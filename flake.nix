@@ -24,6 +24,13 @@
       in
       {
         devShells = {
+          ci = pkgs.mkShell {
+            packages = with pkgs; [
+              rustToolchain
+              nixfmt
+            ];
+          };
+
           default = pkgs.mkShell {
             packages = with pkgs; [
               rustToolchain

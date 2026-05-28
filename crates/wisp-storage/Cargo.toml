@@ -13,10 +13,10 @@ wisp-core = { path = "../wisp-core" }
 # Bundled SQLite so the desktop binary ships with a known-good version and
 # doesn't depend on a system SQLite. `chrono` feature lets rusqlite convert
 # between SQLite TEXT and `chrono::DateTime<Utc>` directly.
-rusqlite = { version = "0.34", features = ["bundled", "chrono"] }
+rusqlite = { workspace = true }
 
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-thiserror = "2"
+chrono = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

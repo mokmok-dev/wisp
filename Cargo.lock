@@ -676,6 +676,7 @@ dependencies = [
 name = "wisp-audiokit"
 version = "0.0.0"
 dependencies = [
+ "thiserror",
  "wisp-audiokit-sys",
 ]
 

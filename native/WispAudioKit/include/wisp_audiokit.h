@@ -14,10 +14,72 @@
 extern "C" {
 #endif
 
+/* ----- Library metadata --------------------------------------------------- */
+
 /* Returns a static, NUL-terminated UTF-8 version string for the
  * WispAudioKit library. The returned pointer lives for the lifetime of
  * the process; the caller must not free it. */
 const char* wisp_audiokit_version(void);
+
+/* ----- Session ------------------------------------------------------------ */
+
+/* Opaque handle returned by wisp_session_new. */
+typedef struct WispSession WispSession;
+
+/* Source identifier passed to result callbacks. */
+#define WISP_SOURCE_MIC    0
+#define WISP_SOURCE_SYSTEM 1
+
+/* Callback invoked for each transcription result. `text_utf8` is NOT
+ * NUL-terminated; use `text_len`. Both pointers are valid only for the
+ * duration of the call — copy out before returning. */
+typedef void (*WispResultCallback)(
+    int32_t     source,         /* WISP_SOURCE_MIC or WISP_SOURCE_SYSTEM */
+    uint64_t    segment_id,
+    const char* text_utf8,
+    size_t      text_len,
+    double      start_seconds,
+    double      end_seconds,
+    void*       user_data
+);
+
+/* Callback invoked for log lines. Same pointer-lifetime rules as
+ * WispResultCallback. */
+typedef void (*WispLogCallback)(
+    const char* message_utf8,
+    size_t      message_len,
+    void*       user_data
+);
+
+/* Construct a new session. Does no I/O; call wisp_session_start next.
+ * Returns NULL on failure (e.g. invalid arguments, output directory
+ * couldn't be created). `output_dir` and `locale` are NUL-terminated
+ * UTF-8 strings (locale e.g. "ja-JP"). */
+WispSession* wisp_session_new(
+    const char*        output_dir,
+    const char*        locale,
+    WispResultCallback on_result,
+    WispLogCallback    on_log,
+    void*              user_data
+);
+
+/* Start capture + transcription. Blocks until the session is ready
+ * (permissions granted, model installed, audio flowing) or fails.
+ * Returns 0 on success, non-zero on failure; query
+ * wisp_session_last_error_message for details on failure. */
+int32_t wisp_session_start(WispSession* session);
+
+/* Stop capture and wait for results to drain. Blocks. */
+void wisp_session_stop(WispSession* session);
+
+/* Free the session handle. The caller MUST have already called
+ * wisp_session_stop. */
+void wisp_session_free(WispSession* session);
+
+/* Returns the last error message recorded against this session, or NULL
+ * if there is no recorded error. The returned pointer is owned by the
+ * session and is invalidated by the next mutating call on it. */
+const char* wisp_session_last_error_message(WispSession* session);
 
 #ifdef __cplusplus
 }

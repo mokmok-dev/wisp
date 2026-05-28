@@ -5,33 +5,270 @@
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use std::ffi::CStr;
+    use std::ffi::{CStr, CString};
+    use std::path::Path;
+    use std::ptr::NonNull;
+    use std::sync::mpsc;
 
-    /// Returns the `WispAudioKit` library version (e.g. `"0.1.0"`).
+    use wisp_audiokit_sys as sys;
+
+    /// `WispAudioKit` library version (e.g. `"0.1.0"`).
     ///
     /// # Panics
-    /// Panics if the Swift side's version string is not valid UTF-8. It ships
-    /// as a static ASCII constant, so this only fires on build-time binary
-    /// corruption.
+    /// Panics if the Swift side's version string is not valid UTF-8. It
+    /// ships as a static ASCII constant, so this only fires on build-time
+    /// binary corruption.
     #[must_use]
     #[allow(clippy::expect_used)]
     pub fn version() -> &'static str {
-        // SAFETY: `wisp_audiokit_version` returns a static UTF-8 C string
-        // that lives for the lifetime of the process and is never null per
-        // its Swift implementation in `Bridge.swift`.
+        // SAFETY: returns a static UTF-8 C string that lives forever.
         unsafe {
-            let ptr = wisp_audiokit_sys::wisp_audiokit_version();
+            let ptr = sys::wisp_audiokit_version();
             CStr::from_ptr(ptr)
                 .to_str()
                 .expect("`WispAudioKit` version is valid UTF-8")
         }
     }
+
+    // ---- Types ---------------------------------------------------------
+
+    /// Which audio source produced a [`SessionResult`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum SourceLabel {
+        Mic,
+        System,
+    }
+
+    /// One transcription update from a running [`Session`].
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct SessionResult {
+        pub source: SourceLabel,
+        pub segment_id: u64,
+        pub text: String,
+        pub start_seconds: f64,
+        pub end_seconds: f64,
+    }
+
+    /// Either a transcription result or a log line emitted by the session.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Event {
+        Result(SessionResult),
+        Log(String),
+    }
+
+    /// Errors surfaced by [`Session`] operations.
+    #[derive(Debug, thiserror::Error)]
+    pub enum SessionError {
+        #[error("path contains a NUL byte or is not representable as a C string: {0:?}")]
+        InvalidPath(std::path::PathBuf),
+
+        #[error("locale contains a NUL byte: {0}")]
+        InvalidLocale(String),
+
+        #[error("WispAudioKit session construction failed")]
+        Construction,
+
+        #[error("WispAudioKit session start failed: {0}")]
+        Start(String),
+    }
+
+    /// Result alias for session operations.
+    pub type Result<T> = std::result::Result<T, SessionError>;
+
+    // ---- Session -------------------------------------------------------
+
+    /// Owns one running (or yet-to-be-started) capture + transcription session.
+    ///
+    /// Construct with [`Session::new`], start with [`Session::start`], pull
+    /// events from [`Session::recv`] / [`Session::try_recv`], and drop to
+    /// release. Drop calls `wisp_session_stop` + `wisp_session_free` so a
+    /// running session is always cleaned up.
+    pub struct Session {
+        handle: NonNull<sys::WispSession>,
+        receiver: mpsc::Receiver<Event>,
+        // Kept alive so the callbacks' user_data pointer stays valid for
+        // as long as the Swift side might call them.
+        _ctx: Box<CallbackContext>,
+    }
+
+    // SAFETY: Session owns the C handle and the receiver. The handle is
+    // an opaque pointer we never deref ourselves; the C side serializes
+    // access internally. Receiver is `Send` but `!Sync`, which matches the
+    // semantics we expose.
+    unsafe impl Send for Session {}
+
+    struct CallbackContext {
+        sender: mpsc::Sender<Event>,
+    }
+
+    impl Session {
+        /// Construct a new session. Does no I/O — call [`Self::start`] next.
+        ///
+        /// `output_dir` is the directory in which the per-session WAV files
+        /// will be written (created if needed). `locale` is a BCP-47
+        /// language tag passed to the Swift speech recognizer
+        /// (e.g. `"ja-JP"`).
+        ///
+        /// # Errors
+        /// Returns [`SessionError::InvalidPath`] / [`SessionError::InvalidLocale`]
+        /// when the inputs contain a NUL byte, and [`SessionError::Construction`]
+        /// when the Swift side rejects them (e.g. the directory could not
+        /// be created).
+        pub fn new(
+            output_dir: impl AsRef<Path>,
+            locale: &str,
+        ) -> Result<Self> {
+            let output_dir = output_dir.as_ref();
+            let path_str = output_dir
+                .to_str()
+                .ok_or_else(|| SessionError::InvalidPath(output_dir.to_path_buf()))?;
+            let path_c = CString::new(path_str)
+                .map_err(|_| SessionError::InvalidPath(output_dir.to_path_buf()))?;
+            let locale_c =
+                CString::new(locale).map_err(|_| SessionError::InvalidLocale(locale.to_owned()))?;
+
+            let (sender, receiver) = mpsc::channel();
+            let ctx = Box::new(CallbackContext { sender });
+            let user_data = std::ptr::from_ref::<CallbackContext>(ctx.as_ref()) as *mut _;
+
+            // SAFETY: pointers are valid for the duration of the call and
+            // `user_data` is kept alive by holding `ctx` in `Session`.
+            let raw = unsafe {
+                sys::wisp_session_new(
+                    path_c.as_ptr(),
+                    locale_c.as_ptr(),
+                    Some(on_result_thunk),
+                    Some(on_log_thunk),
+                    user_data,
+                )
+            };
+            let handle = NonNull::new(raw).ok_or(SessionError::Construction)?;
+            Ok(Self {
+                handle,
+                receiver,
+                _ctx: ctx,
+            })
+        }
+
+        /// Start capture + transcription. Blocks until ready or fails.
+        ///
+        /// # Errors
+        /// Returns [`SessionError::Start`] with the Swift-side error
+        /// message on failure (permission denial, missing audio device,
+        /// model download failure, ...).
+        pub fn start(&self) -> Result<()> {
+            // SAFETY: handle is non-null and the Swift side serializes
+            // start/stop/free internally.
+            let rc = unsafe { sys::wisp_session_start(self.handle.as_ptr()) };
+            if rc == 0 {
+                return Ok(());
+            }
+            let msg = unsafe { sys::wisp_session_last_error_message(self.handle.as_ptr()) };
+            let detail = if msg.is_null() {
+                format!("unknown error (rc={rc})")
+            } else {
+                // SAFETY: Swift documents the pointer is valid until the
+                // next mutating call; we copy out immediately.
+                unsafe { CStr::from_ptr(msg) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            Err(SessionError::Start(detail))
+        }
+
+        /// Stop the session and wait for buffered results to drain. Blocks.
+        /// Idempotent — safe to call multiple times.
+        pub fn stop(&self) {
+            // SAFETY: handle is non-null; stop is idempotent on the Swift side.
+            unsafe { sys::wisp_session_stop(self.handle.as_ptr()) };
+        }
+
+        /// Non-blocking event poll.
+        #[must_use]
+        pub fn try_recv(&self) -> Option<Event> {
+            self.receiver.try_recv().ok()
+        }
+
+        /// Block until the next event arrives, or return `None` if the
+        /// session has been dropped / closed.
+        #[must_use]
+        pub fn recv(&self) -> Option<Event> {
+            self.receiver.recv().ok()
+        }
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            // SAFETY: handle is non-null and we own it. Stop is a no-op if
+            // the session was never started or has already stopped.
+            unsafe {
+                sys::wisp_session_stop(self.handle.as_ptr());
+                sys::wisp_session_free(self.handle.as_ptr());
+            }
+        }
+    }
+
+    // ---- Callback thunks ----------------------------------------------
+
+    unsafe extern "C" fn on_result_thunk(
+        source: i32,
+        segment_id: u64,
+        text_utf8: *const std::os::raw::c_char,
+        text_len: usize,
+        start_seconds: f64,
+        end_seconds: f64,
+        user_data: *mut std::os::raw::c_void,
+    ) {
+        if user_data.is_null() {
+            return;
+        }
+        // SAFETY: user_data was set by Session::new to point at a
+        // CallbackContext kept alive by Session.
+        let ctx = unsafe { &*(user_data.cast::<CallbackContext>()) };
+        let text = if text_utf8.is_null() || text_len == 0 {
+            String::new()
+        } else {
+            // SAFETY: Swift guarantees (ptr, len) is a valid UTF-8 slice
+            // for the duration of the call.
+            let bytes = unsafe { std::slice::from_raw_parts(text_utf8.cast::<u8>(), text_len) };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        let label = match source {
+            sys::WISP_SOURCE_MIC => SourceLabel::Mic,
+            _ => SourceLabel::System,
+        };
+        let _ = ctx.sender.send(Event::Result(SessionResult {
+            source: label,
+            segment_id,
+            text,
+            start_seconds,
+            end_seconds,
+        }));
+    }
+
+    unsafe extern "C" fn on_log_thunk(
+        message_utf8: *const std::os::raw::c_char,
+        message_len: usize,
+        user_data: *mut std::os::raw::c_void,
+    ) {
+        if user_data.is_null() {
+            return;
+        }
+        let ctx = unsafe { &*(user_data.cast::<CallbackContext>()) };
+        let text = if message_utf8.is_null() || message_len == 0 {
+            String::new()
+        } else {
+            let bytes =
+                unsafe { std::slice::from_raw_parts(message_utf8.cast::<u8>(), message_len) };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        let _ = ctx.sender.send(Event::Log(text));
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
-    /// Returns the `WispAudioKit` library version. Always empty on non-macOS
-    /// targets — `WispAudioKit` only ships for macOS.
+    /// `WispAudioKit` library version. Always empty on non-macOS targets.
     #[must_use]
     pub fn version() -> &'static str {
         ""
@@ -39,10 +276,12 @@ mod imp {
 }
 
 pub use imp::version;
+#[cfg(target_os = "macos")]
+pub use imp::{Event, Session, SessionError, SessionResult, SourceLabel};
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::version;
+    use super::*;
 
     #[test]
     fn version_is_nonempty_and_dotted() {
@@ -52,9 +291,16 @@ mod tests {
             v.chars().next().is_some_and(|c| c.is_ascii_digit()),
             "version should start with a digit, got: {v}"
         );
-        assert!(
-            v.contains('.'),
-            "version should be dotted (e.g. '0.1.0'), got: {v}"
-        );
+        assert!(v.contains('.'), "version should be dotted, got: {v}");
+    }
+
+    #[test]
+    fn session_constructs_and_drops_without_starting() {
+        let tmp = std::env::temp_dir().join(format!("wisp-audiokit-test-{}", std::process::id()));
+        let s = Session::new(&tmp, "ja-JP").expect("session new");
+        // Pull events: there are none yet because we never started.
+        assert!(s.try_recv().is_none());
+        drop(s);
+        // Drop must run without panicking even though we never called start().
     }
 }

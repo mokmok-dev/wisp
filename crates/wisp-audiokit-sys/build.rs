@@ -169,4 +169,15 @@ fn main() {
     ] {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
+
+    // 7) Objective-C runtime — pulled in by any Swift code that touches
+    //    NSObject (which is most of our actor / NSError code paths).
+    println!("cargo:rustc-link-lib=dylib=objc");
+
+    // 8) Bump the deployment target so the linker accepts symbols added
+    //    in newer macOS SDKs. Nix's cc wrapper pins -mmacosx-version-min
+    //    at 14.0 to match its bundled apple-sdk-14.4, but our Swift code
+    //    is compiled against the system SDK 26 and uses APIs (Core Audio
+    //    Process Tap, SpeechAnalyzer, ...) that require 26.
+    println!("cargo:rustc-link-arg=-mmacosx-version-min=26.0");
 }

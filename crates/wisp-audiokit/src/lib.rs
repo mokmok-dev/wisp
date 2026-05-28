@@ -12,8 +12,9 @@ mod imp {
     use std::ffi::{CStr, CString};
     use std::path::Path;
     use std::ptr::NonNull;
-    use std::sync::mpsc;
+    use std::time::Duration;
 
+    use crossbeam_channel as channel;
     use wisp_audiokit_sys as sys;
     use wisp_core::SourceLabel;
 
@@ -66,7 +67,7 @@ mod imp {
     /// running session is always cleaned up.
     pub struct Session {
         handle: NonNull<sys::WispSession>,
-        receiver: mpsc::Receiver<Event>,
+        receiver: channel::Receiver<Event>,
         // Kept alive so the callbacks' user_data pointer stays valid for
         // as long as the Swift side might call them.
         _ctx: Box<CallbackContext>,
@@ -74,12 +75,17 @@ mod imp {
 
     // SAFETY: Session owns the C handle and the receiver. The handle is
     // an opaque pointer we never deref ourselves; the C side serializes
-    // access internally. Receiver is `Send` but `!Sync`, which matches the
-    // semantics we expose.
+    // access internally. The receiver is `Send` but `!Sync`, which matches
+    // the semantics we expose.
     unsafe impl Send for Session {}
 
+    // Swift may invoke `on_result_thunk` / `on_log_thunk` from different
+    // threads. The thunks form `&CallbackContext` from a raw `user_data`
+    // pointer, so `CallbackContext` must be `Sync`. `crossbeam_channel`'s
+    // `Sender` is `Sync` (unlike `std::sync::mpsc::Sender`), which lets
+    // those callbacks fire concurrently without UB.
     struct CallbackContext {
-        sender: mpsc::Sender<Event>,
+        sender: channel::Sender<Event>,
     }
 
     impl Session {
@@ -108,7 +114,7 @@ mod imp {
             let locale_c =
                 CString::new(locale).map_err(|_| SessionError::InvalidLocale(locale.to_owned()))?;
 
-            let (sender, receiver) = mpsc::channel();
+            let (sender, receiver) = channel::unbounded();
             let ctx = Box::new(CallbackContext { sender });
             let user_data = std::ptr::from_ref::<CallbackContext>(ctx.as_ref()) as *mut _;
 
@@ -175,6 +181,17 @@ mod imp {
         #[must_use]
         pub fn recv(&self) -> Option<Event> {
             self.receiver.recv().ok()
+        }
+
+        /// Block until the next event arrives or `timeout` elapses.
+        /// Returns `None` on timeout or when the session has been
+        /// dropped / closed.
+        #[must_use]
+        pub fn recv_timeout(
+            &self,
+            timeout: Duration,
+        ) -> Option<Event> {
+            self.receiver.recv_timeout(timeout).ok()
         }
     }
 
@@ -251,6 +268,7 @@ mod imp {
 #[cfg(not(target_os = "macos"))]
 mod imp {
     use std::path::Path;
+    use std::time::Duration;
 
     use wisp_core::SourceLabel;
 
@@ -310,6 +328,15 @@ mod imp {
         /// Always returns `None`.
         #[must_use]
         pub fn recv(&self) -> Option<Event> {
+            None
+        }
+
+        /// Always returns `None`.
+        #[must_use]
+        pub fn recv_timeout(
+            &self,
+            _timeout: Duration,
+        ) -> Option<Event> {
             None
         }
     }

@@ -53,6 +53,14 @@ const MIGRATIONS: &[&str] = &[
     ",
 ];
 
+// Statically guard the `usize -> u32` conversion in `run` below: the
+// migration index is bounded by `MIGRATIONS.len()`, so as long as that
+// fits in a u32 the cast is infallible.
+const _: () = assert!(
+    MIGRATIONS.len() <= u32::MAX as usize,
+    "MIGRATIONS must fit in a u32 (PRAGMA user_version is u32)",
+);
+
 /// Apply any pending migrations, advancing `PRAGMA user_version` as each
 /// step succeeds. Idempotent: running on an already-current database is a
 /// no-op.
@@ -64,20 +72,16 @@ pub(crate) fn run(conn: &Connection) -> Result<()> {
     let current: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
-        // i+1 <= MIGRATIONS.len(), a compile-time constant of small size,
-        // so this conversion can't overflow u32.
         let Ok(target) = u32::try_from(i + 1) else {
-            continue;
+            unreachable!("MIGRATIONS.len() statically asserted to fit in u32");
         };
-        let tx_result = (|| -> std::result::Result<(), rusqlite::Error> {
-            conn.execute_batch("BEGIN;")?;
-            conn.execute_batch(sql)?;
-            conn.pragma_update(None, "user_version", target)?;
-            conn.execute_batch("COMMIT;")?;
-            Ok(())
+        let result = (|| -> std::result::Result<(), rusqlite::Error> {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(sql)?;
+            tx.pragma_update(None, "user_version", target)?;
+            tx.commit()
         })();
-        if let Err(source) = tx_result {
-            let _ = conn.execute_batch("ROLLBACK;");
+        if let Err(source) = result {
             return Err(StorageError::Migration { target, source });
         }
     }

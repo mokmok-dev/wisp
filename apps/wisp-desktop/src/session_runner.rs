@@ -12,6 +12,12 @@ use std::time::Duration;
 
 use wisp_audiokit::{Event, Session, SessionError};
 
+/// How often the running session checks for UI commands (Stop / Shutdown)
+/// while waiting for the next audio event. Sets the worst-case latency for
+/// a Stop press to be honoured. Events themselves are delivered
+/// immediately — this only bounds the *idle* wake-up cadence.
+const CMD_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
 /// Commands the UI sends to the worker.
 pub enum Command {
     Start { output_dir: PathBuf, locale: String },
@@ -118,9 +124,10 @@ fn run_session(
     }
     let _ = update_tx.send(Update::Started);
 
-    // Pump events until the UI asks to stop. We poll the cmd channel
-    // between event reads so a Stop request doesn't have to wait for the
-    // next audio event.
+    // Pump events until the UI asks to stop. Between events we wake at
+    // most every `CMD_POLL_INTERVAL` to check the command channel so a
+    // Stop request doesn't have to wait for the next audio event; when
+    // events are arriving we forward them immediately without polling.
     loop {
         match cmd_rx.try_recv() {
             Ok(Command::Stop) => break,
@@ -131,10 +138,8 @@ fn run_session(
             },
             Ok(Command::Start { .. }) | Err(TryRecvError::Empty) => {},
         }
-        if let Some(event) = session.try_recv() {
+        if let Some(event) = session.recv_timeout(CMD_POLL_INTERVAL) {
             let _ = update_tx.send(Update::Event(event));
-        } else {
-            std::thread::sleep(Duration::from_millis(20));
         }
     }
 

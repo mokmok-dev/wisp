@@ -81,13 +81,18 @@ impl Render for TranscriptView {
         let log_count = app.recent_log.len();
         let last_error = app.last_error.clone();
 
-        // Pin the viewport to the bottom whenever the transcript actually
-        // changed (new segment landed, or the current partial got longer).
-        // Cursor blinks don't shift the signature so they don't fight the
-        // user when they scroll up to read history.
+        // Pin the viewport to the bottom on transcript changes, but only
+        // when the user is already at the bottom. If they've scrolled up to
+        // read history we leave them there.
+        //
+        // We sample is_at_bottom() *before* calling scroll_to_bottom() so
+        // the decision is based on what the user is currently looking at,
+        // not the post-render state.
         let signature = (segments.len(), segments.iter().map(|s| s.text.len()).sum());
         if signature != self.last_signature {
-            self.scroll_handle.scroll_to_bottom();
+            if is_at_bottom(&self.scroll_handle) {
+                self.scroll_handle.scroll_to_bottom();
+            }
             self.last_signature = signature;
         }
 
@@ -372,6 +377,21 @@ fn render_status_bar(
                         .child(format!("{log_count} log lines")),
                 ),
         )
+}
+
+/// Is the scroll handle close enough to the bottom that we should
+/// continue auto-following new content?
+///
+/// GPUI's vertical scroll offset is in `[-max_offset.height, 0]` — `0`
+/// is the top of the content, `-max_offset.height` is the bottom. We
+/// allow a few pixels of slack so wheel inertia / one-pixel rounding
+/// don't accidentally disable auto-follow. On the very first render
+/// (`max_offset.height == 0`) this also returns true, so the initial
+/// arrival of segments gets scrolled into view.
+fn is_at_bottom(handle: &ScrollHandle) -> bool {
+    let slack = px(8.0);
+    let bottom = -handle.max_offset().height;
+    handle.offset().y <= bottom + slack
 }
 
 /// Insert a `\n` after each sentence-ending 。 *except* the trailing

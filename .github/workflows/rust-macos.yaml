@@ -1,0 +1,36 @@
+name: rust-macos
+on:
+  pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "rust-toolchain.toml"
+      - "native/**"
+      - ".cargo/config.toml"
+      - ".github/workflows/rust-macos.yaml"
+      - "flake.lock"
+      - "flake.nix"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-rust-macos
+  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: write
+jobs:
+  test:
+    # WispAudioKit uses APIs that only exist on macOS 26
+    # (Speech.SpeechAnalyzer, Core Audio Process Tap) so we need a Tahoe
+    # runner. `macos-26` is the GitHub-hosted runner image for it.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcrun swift --version
+          xcrun --find metal
+      - uses: ./.github/actions/setup-nix
+      # Builds the WispAudioKit Swift static library through build.rs and
+      # exercises the FFI round-trip via the smoke test in wisp-audiokit.
+      - run: nix develop --quiet --command cargo test -p wisp-audiokit

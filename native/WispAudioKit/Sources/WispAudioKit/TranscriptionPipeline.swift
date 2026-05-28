@@ -9,6 +9,22 @@ import Speech
 /// The pipeline is intentionally per-source so we get speaker attribution
 /// for free (mic = "self", system = "other") without ML diarization.
 public final class TranscriptionPipeline: @unchecked Sendable {
+    /// One transcription update emitted to the consumer.
+    ///
+    /// `segmentID` is monotonically increasing per pipeline. The same ID
+    /// repeats while a partial is being revised; when the analyzer's
+    /// finalized boundary advances (i.e. `range.start` moves past the
+    /// previous result), `segmentID` ticks up to start a new segment.
+    public struct Result: Sendable {
+        public let label: String
+        public let segmentID: UInt64
+        public let text: String
+        public let startSeconds: Double
+        public let endSeconds: Double
+    }
+
+    public typealias OnResult = @Sendable (Result) -> Void
+
     public let label: String
     public let wavURL: URL
     public let sourceFormat: AVAudioFormat
@@ -19,18 +35,23 @@ public final class TranscriptionPipeline: @unchecked Sendable {
     private let converter: AVAudioConverter
     private let wavFile: AVAudioFile
     private let inputContinuation: AsyncStream<AnalyzerInput>.Continuation
+    private let onResult: OnResult
     private var resultsTask: Task<Void, Never>?
 
-    public init(label: String, sourceFormat: AVAudioFormat, wavURL: URL) async throws {
+    public init(
+        label: String,
+        sourceFormat: AVAudioFormat,
+        wavURL: URL,
+        locale: Locale = Locale(identifier: "ja-JP"),
+        onResult: @escaping OnResult
+    ) async throws {
         self.label = label
         self.wavURL = wavURL
         self.sourceFormat = sourceFormat
+        self.onResult = onResult
 
-        // SpeechTranscriber for Japanese with progressive (streaming) preset
-        let transcriber = SpeechTranscriber(
-            locale: Locale(identifier: "ja-JP"),
-            preset: .progressiveTranscription
-        )
+        // SpeechTranscriber with progressive (streaming) preset
+        let transcriber = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
         self.transcriber = transcriber
 
         // Best format the analyzer accepts
@@ -69,49 +90,26 @@ public final class TranscriptionPipeline: @unchecked Sendable {
         let (inputStream, inputContinuation) = AsyncStream<AnalyzerInput>.makeStream()
         self.inputContinuation = inputContinuation
 
-        // Analyzer with volatile range observer
-        let labelForHandler = label
+        // Analyzer with volatile range observer. We don't act on the volatile
+        // range directly — segment finalization is tracked from the results
+        // stream below (when `range.start` advances, the current segment is
+        // done and we tick the segment ID).
         analyzer = SpeechAnalyzer(
             inputSequence: inputStream,
             modules: [transcriber],
             options: nil,
             analysisContext: .init(),
-            volatileRangeChangedHandler: { range, changedStart, _ in
-                if changedStart {
-                    let s = CMTimeGetSeconds(range.start)
-                    wispLog(
-                        "[\(labelForHandler)] finalized boundary advanced to \(String(format: "%.2fs", s))"
-                    )
-                }
-            }
+            volatileRangeChangedHandler: nil
         )
+
+        // Spawn the results consumer eagerly. Idempotent because we guard on
+        // `resultsTask`.
+        startResultsConsumer()
 
         wispLog(
             "[\(label)] pipeline ready — analyzer format sr=\(analyzerFormat.sampleRate) ch=\(analyzerFormat.channelCount) fmt=\(analyzerFormat.commonFormat.rawValue)"
         )
         wispLog("[\(label)] WAV: \(wavURL.path)")
-    }
-
-    /// Start consuming transcription results in the background.
-    /// Idempotent: only spawns the task once.
-    public func startResultsConsumer() {
-        guard resultsTask == nil else { return }
-        let label = label
-        let transcriber = transcriber
-        resultsTask = Task {
-            do {
-                for try await result in transcriber.results {
-                    let text = String(result.text.characters)
-                    let s = CMTimeGetSeconds(result.range.start)
-                    let e = CMTimeGetSeconds(result.range.end)
-                    let range = String(format: "%6.2f-%6.2fs", s, e)
-                    print("[\(label)] [\(range)] \(text)")
-                }
-                wispLog("[\(label)] results stream finished")
-            } catch {
-                wispLog("[\(label)] results error: \(error)")
-            }
-        }
     }
 
     /// Push one audio buffer from the source. Writes to WAV and feeds the
@@ -164,5 +162,37 @@ public final class TranscriptionPipeline: @unchecked Sendable {
         inputContinuation.finish()
         try? await analyzer.finalizeAndFinishThroughEndOfInput()
         _ = await resultsTask?.result
+    }
+
+    private func startResultsConsumer() {
+        guard resultsTask == nil else { return }
+        let label = label
+        let transcriber = transcriber
+        let onResult = onResult
+        resultsTask = Task {
+            var lastStart: CMTime?
+            var segmentID: UInt64 = 0
+            do {
+                for try await result in transcriber.results {
+                    // Tick the segment ID whenever the finalized boundary advances.
+                    let start = result.range.start
+                    if lastStart != start {
+                        segmentID += 1
+                        lastStart = start
+                    }
+
+                    onResult(Result(
+                        label: label,
+                        segmentID: segmentID,
+                        text: String(result.text.characters),
+                        startSeconds: CMTimeGetSeconds(result.range.start),
+                        endSeconds: CMTimeGetSeconds(result.range.end)
+                    ))
+                }
+                wispLog("[\(label)] results stream finished")
+            } catch {
+                wispLog("[\(label)] results error: \(error)")
+            }
+        }
     }
 }

@@ -250,6 +250,7 @@ public func wisp_session_last_error_message(session: OpaquePointer?) -> UnsafePo
 }
 
 // MARK: - Permissions
+
 //
 // Two TCC services gate Wisp: microphone (AVAudioApplication) and speech
 // recognition (SFSpeechRecognizer). Both have a synchronous status getter

@@ -17,6 +17,7 @@ concurrency:
 permissions:
   contents: read
   actions: write
+  id-token: write
 jobs:
   test:
     # WispAudioKit uses APIs that only exist on macOS 26

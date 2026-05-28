@@ -242,18 +242,18 @@ fn render_segment(
         theme::text_primary()
     };
 
-    // Append the caret directly to the text string so it sits inline. The
+    // Break the displayed text after each sentence-ending 。 so the row
+    // doesn't read as one giant paragraph. Trailing 。 isn't broken — when
+    // the next sentence comes in the line break appears naturally, giving
+    // the partial a typewriter feel.
+    //
+    // The caret is then appended to the text string so it sits inline; the
     // blink is driven by a timer in main.rs toggling `cursor_visible` and
     // re-rendering.
-    let display = if is_active {
-        if show_cursor {
-            format!("{}▊", seg.text)
-        } else {
-            format!("{} ", seg.text)
-        }
-    } else {
-        seg.text.clone()
-    };
+    let mut display = break_on_sentence_end(&seg.text);
+    if is_active {
+        display.push(if show_cursor { '▊' } else { ' ' });
+    }
     // `min_w_0` is the CSS dance that lets a flex item shrink below its
     // intrinsic content width. Without it, long Japanese strings (no
     // whitespace, so no implicit break points) just blow past the right
@@ -353,6 +353,22 @@ fn render_status_bar(
         )
 }
 
+/// Insert a `\n` after each sentence-ending 。 *except* the trailing
+/// one — that way the partial line doesn't visibly break the moment the
+/// punctuation is recognised; the break only appears once the next
+/// sentence starts arriving.
+fn break_on_sentence_end(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut iter = text.chars().peekable();
+    while let Some(c) = iter.next() {
+        out.push(c);
+        if c == '。' && iter.peek().is_some() {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Public helper used by main.rs to pick a polling interval.
 pub fn cursor_blink_period() -> std::time::Duration {
     std::time::Duration::from_millis(500)
@@ -367,4 +383,27 @@ pub fn ui_tick_period() -> std::time::Duration {
 /// Public helper: timestamp `Instant` for "right now".
 pub fn now() -> Instant {
     Instant::now()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::break_on_sentence_end;
+
+    #[test]
+    fn breaks_between_sentences_but_not_at_trailing_period() {
+        assert_eq!(
+            break_on_sentence_end("一文目。二文目。"),
+            "一文目。\n二文目。"
+        );
+    }
+
+    #[test]
+    fn passes_through_text_without_period() {
+        assert_eq!(break_on_sentence_end("途中"), "途中");
+    }
+
+    #[test]
+    fn preserves_text_with_only_a_trailing_period() {
+        assert_eq!(break_on_sentence_end("こんにちは。"), "こんにちは。");
+    }
 }

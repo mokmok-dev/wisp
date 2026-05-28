@@ -9,12 +9,6 @@ pub struct Segments<'a> {
     conn: &'a Connection,
 }
 
-/// One hit from a full-text search.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SearchHit {
-    pub segment: Segment,
-}
-
 impl<'a> Segments<'a> {
     pub(crate) fn new(conn: &'a Connection) -> Self {
         Self { conn }
@@ -75,9 +69,9 @@ impl<'a> Segments<'a> {
         Ok(out)
     }
 
-    /// Full-text search across every segment in the database. Returns hits
-    /// ordered by FTS5 relevance (`bm25`). `query` is passed verbatim to
-    /// FTS5 — the caller is responsible for any escaping.
+    /// Full-text search across every segment in the database. Returns
+    /// matching segments ordered by FTS5 relevance (`bm25`). `query` is
+    /// passed verbatim to FTS5 — the caller is responsible for any escaping.
     ///
     /// # Errors
     /// Returns [`crate::StorageError::Sqlite`] on query failure or
@@ -86,7 +80,7 @@ impl<'a> Segments<'a> {
         &self,
         query: &str,
         limit: u32,
-    ) -> Result<Vec<SearchHit>> {
+    ) -> Result<Vec<Segment>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.id, s.session_id, s.source, s.segment_index, s.start_seconds, \
                     s.end_seconds, s.text, s.speaker_label, s.created_at \
@@ -99,9 +93,7 @@ impl<'a> Segments<'a> {
         let mut rows = stmt.query(params![query, limit])?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
-            out.push(SearchHit {
-                segment: row_to_segment(row)?,
-            });
+            out.push(row_to_segment(row)?);
         }
         Ok(out)
     }
@@ -233,7 +225,7 @@ mod tests {
             .unwrap();
         let hits = segments.search("weather", 10).expect("search");
         assert_eq!(hits.len(), 1);
-        assert!(hits[0].segment.text.contains("weather"));
+        assert!(hits[0].text.contains("weather"));
     }
 
     #[test]

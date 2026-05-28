@@ -1,0 +1,8 @@
+[package]
+name = "wisp-core"
+edition.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true

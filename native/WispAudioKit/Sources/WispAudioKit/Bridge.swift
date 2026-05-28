@@ -1,6 +1,7 @@
 import Foundation
 
 // MARK: - C-ABI bridge
+
 //
 // Functions in this file are intentionally `@_cdecl` exports — they are the
 // entry points called from Rust via the `wisp-audiokit-sys` crate. Keep the
@@ -22,7 +23,9 @@ import Foundation
 private nonisolated(unsafe) let wispAudioKitVersionCString: UnsafePointer<CChar> = {
     let utf8 = Array("0.1.0".utf8CString)
     let buf = UnsafeMutablePointer<CChar>.allocate(capacity: utf8.count)
-    for (i, c) in utf8.enumerated() { buf[i] = c }
+    for (i, c) in utf8.enumerated() {
+        buf[i] = c
+    }
     return UnsafePointer(buf)
 }()
 

@@ -75,8 +75,9 @@ mod imp {
 
     // SAFETY: Session owns the C handle and the receiver. The handle is
     // an opaque pointer we never deref ourselves; the C side serializes
-    // access internally. The receiver is `Send` but `!Sync`, which matches
-    // the semantics we expose.
+    // access internally, so it is sound to move the handle across threads.
+    // (`Session` stays `!Sync` overall because the `NonNull` field is
+    // `!Sync` — only `Send` needs the manual impl.)
     unsafe impl Send for Session {}
 
     // Swift may invoke `on_result_thunk` / `on_log_thunk` from different

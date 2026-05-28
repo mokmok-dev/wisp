@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use wisp_audiokit::{Event, SessionResult, SourceLabel};
+use wisp_audiokit::{Event, SessionError, SessionResult, SourceLabel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -42,7 +42,7 @@ pub struct AppModel {
     pub state: SessionState,
     pub segments: Vec<Segment>,
     pub recent_log: VecDeque<String>,
-    pub last_error: Option<String>,
+    pub last_error: Option<SessionError>,
 }
 
 impl AppModel {
@@ -64,9 +64,9 @@ impl AppModel {
 
     pub fn fail(
         &mut self,
-        message: impl Into<String>,
+        error: SessionError,
     ) {
-        self.last_error = Some(message.into());
+        self.last_error = Some(error);
         self.state = SessionState::Failed;
         self.finalize_all_segments();
     }

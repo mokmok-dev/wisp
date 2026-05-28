@@ -2,7 +2,7 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 use wisp_core::{NewSegment, Segment, SegmentId, SessionId, SourceLabel};
 
-use crate::error::{Result, StorageError};
+use crate::error::Result;
 
 /// Read/write operations for the `segments` table.
 pub struct Segments<'a> {
@@ -55,7 +55,7 @@ impl<'a> Segments<'a> {
     ///
     /// # Errors
     /// Returns [`crate::StorageError::Sqlite`] on query failure or
-    /// [`StorageError::UnknownSource`] if the DB holds a `source` value
+    /// [`StorageError::SourceLabel`] if the DB holds a `source` value
     /// outside `{"mic","system"}` (only possible via direct DB edits).
     pub fn list_by_session(
         &self,
@@ -81,7 +81,7 @@ impl<'a> Segments<'a> {
     ///
     /// # Errors
     /// Returns [`crate::StorageError::Sqlite`] on query failure or
-    /// [`StorageError::UnknownSource`] (see [`Self::list_by_session`]).
+    /// [`StorageError::SourceLabel`] (see [`Self::list_by_session`]).
     pub fn search(
         &self,
         query: &str,
@@ -109,9 +109,7 @@ impl<'a> Segments<'a> {
 
 fn row_to_segment(row: &rusqlite::Row<'_>) -> Result<Segment> {
     let source_str: String = row.get(2)?;
-    let source = source_str
-        .parse::<SourceLabel>()
-        .map_err(|()| StorageError::UnknownSource(source_str))?;
+    let source = source_str.parse::<SourceLabel>()?;
     Ok(Segment {
         id: SegmentId::from(row.get::<_, i64>(0)?),
         session_id: SessionId::from(row.get::<_, i64>(1)?),

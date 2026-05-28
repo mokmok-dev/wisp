@@ -14,8 +14,8 @@ pub enum StorageError {
         source: rusqlite::Error,
     },
 
-    #[error("unrecognized source label in database: {0}")]
-    UnknownSource(String),
+    #[error(transparent)]
+    SourceLabel(#[from] wisp_core::SourceLabelError),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

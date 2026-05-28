@@ -4,10 +4,12 @@
 //! framework wrapper (`wisp-audiokit`) into storage (`wisp-storage`) and
 //! the `GPUI` desktop app (`wisp-desktop`).
 
+mod error;
 mod ids;
 mod source;
 mod transcript;
 
+pub use error::SourceLabelError;
 pub use ids::{SegmentId, SessionId};
 pub use source::SourceLabel;
 pub use transcript::{NewSegment, NewSession, Segment, Session};

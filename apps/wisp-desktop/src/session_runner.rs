@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use wisp_audiokit::{Event, Session};
+use wisp_audiokit::{Event, Session, SessionError};
 
 /// Commands the UI sends to the worker.
 pub enum Command {
@@ -28,7 +28,7 @@ pub enum Update {
     /// `Session::stop()` returned; the session has been torn down.
     Stopped,
     /// Lifecycle error (start/construct failed).
-    Error(String),
+    Error(SessionError),
 }
 
 pub struct SessionRunner {
@@ -108,12 +108,12 @@ fn run_session(
     let session = match Session::new(output_dir, locale) {
         Ok(s) => s,
         Err(e) => {
-            let _ = update_tx.send(Update::Error(e.to_string()));
+            let _ = update_tx.send(Update::Error(e));
             return;
         },
     };
     if let Err(e) = session.start() {
-        let _ = update_tx.send(Update::Error(e.to_string()));
+        let _ = update_tx.send(Update::Error(e));
         return;
     }
     let _ = update_tx.send(Update::Started);

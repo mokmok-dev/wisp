@@ -12,3 +12,4 @@ workspace = true
 # so they live here in the shared crate.
 chrono = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
+thiserror = { workspace = true }

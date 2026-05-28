@@ -3,6 +3,10 @@
 //! Wraps the raw FFI from `wisp-audiokit-sys`. macOS-only; on other platforms
 //! everything is stubbed out so the workspace stays buildable.
 
+mod error;
+
+pub use error::{Result, SessionError};
+
 #[cfg(target_os = "macos")]
 mod imp {
     use std::ffi::{CStr, CString};
@@ -12,6 +16,8 @@ mod imp {
 
     use wisp_audiokit_sys as sys;
     use wisp_core::SourceLabel;
+
+    use crate::error::{Result, SessionError};
 
     /// `WispAudioKit` library version (e.g. `"0.1.0"`).
     ///
@@ -49,25 +55,6 @@ mod imp {
         Result(SessionResult),
         Log(String),
     }
-
-    /// Errors surfaced by [`Session`] operations.
-    #[derive(Debug, thiserror::Error)]
-    pub enum SessionError {
-        #[error("path contains a NUL byte or is not representable as a C string: {0:?}")]
-        InvalidPath(std::path::PathBuf),
-
-        #[error("locale contains a NUL byte: {0}")]
-        InvalidLocale(String),
-
-        #[error("WispAudioKit session construction failed")]
-        Construction,
-
-        #[error("WispAudioKit session start failed: {0}")]
-        Start(String),
-    }
-
-    /// Result alias for session operations.
-    pub type Result<T> = std::result::Result<T, SessionError>;
 
     // ---- Session -------------------------------------------------------
 
@@ -267,6 +254,8 @@ mod imp {
 
     use wisp_core::SourceLabel;
 
+    use crate::error::{Result, SessionError};
+
     /// `WispAudioKit` library version. Always empty on non-macOS targets.
     #[must_use]
     pub fn version() -> &'static str {
@@ -289,16 +278,6 @@ mod imp {
         Result(SessionResult),
         Log(String),
     }
-
-    /// Errors surfaced by [`Session`] operations.
-    #[derive(Debug, thiserror::Error)]
-    pub enum SessionError {
-        #[error("WispAudioKit is only available on macOS")]
-        UnsupportedPlatform,
-    }
-
-    /// Result alias for session operations.
-    pub type Result<T> = std::result::Result<T, SessionError>;
 
     /// Stub session — always returns [`SessionError::UnsupportedPlatform`].
     pub struct Session;
@@ -337,7 +316,7 @@ mod imp {
 }
 
 pub use imp::version;
-pub use imp::{Event, Session, SessionError, SessionResult};
+pub use imp::{Event, Session, SessionResult};
 pub use wisp_core::SourceLabel;
 
 #[cfg(all(test, target_os = "macos"))]

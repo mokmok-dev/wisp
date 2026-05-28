@@ -6,3 +6,9 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+# Timestamps cross every boundary in the app (capture -> storage -> UI),
+# so they live here in the shared crate.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+serde = { version = "1", features = ["derive"] }

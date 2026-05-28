@@ -10,3 +10,10 @@ workspace = true
 [dependencies]
 wisp-core = { path = "../../crates/wisp-core" }
 wisp-storage = { path = "../../crates/wisp-storage" }
+wisp-audiokit = { path = "../../crates/wisp-audiokit" }
+
+# GPU-accelerated UI framework by the Zed team. V1 is macOS-only so the
+# default features (x11/wayland/windows-manifest) are not strictly needed,
+# but keeping them on means the workspace also builds on Linux CI where
+# the platform-specific code paths are dead-stripped.
+gpui = "0.2"

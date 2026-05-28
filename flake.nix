@@ -1,7 +1,6 @@
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
   };
@@ -10,10 +9,28 @@
     {
       self,
       nixpkgs,
-      flake-utils,
       rust-overlay,
     }:
-    flake-utils.lib.eachDefaultSystem (
+    let
+      # Same default set and merge semantics as flake-utils.lib.eachDefaultSystem,
+      # without the extra flake input (its GitHub tarball fetch has been flaky in CI).
+      defaultSystems = [
+        "aarch64-darwin"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "x86_64-linux"
+      ];
+      eachDefaultSystem =
+        f:
+        let
+          perSystem = nixpkgs.lib.genAttrs defaultSystems f;
+        in
+        {
+          devShells = nixpkgs.lib.mapAttrs (_: attrs: attrs.devShells) perSystem;
+          formatter = nixpkgs.lib.mapAttrs (_: attrs: attrs.formatter) perSystem;
+        };
+    in
+    eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs {

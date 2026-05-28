@@ -1,0 +1,7 @@
+name: setup nix
+description: install nix and configure cache
+runs:
+  using: composite
+  steps:
+    - uses: DeterminateSystems/determinate-nix-action@4eea0b33e3d1f02ecfe37cf16e7204c424009606 # v3.21.0
+    - uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13

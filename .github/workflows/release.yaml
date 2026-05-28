@@ -55,6 +55,7 @@ jobs:
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/release/wisp-desktop "$APP/Contents/MacOS/wisp-desktop"
           chmod +x "$APP/Contents/MacOS/wisp-desktop"
+          cp apps/wisp-desktop/assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
           sed "s/__VERSION__/${{ steps.meta.outputs.version }}/g" \
             apps/wisp-desktop/Info.plist > "$APP/Contents/Info.plist"
           /usr/bin/plutil -lint "$APP/Contents/Info.plist"

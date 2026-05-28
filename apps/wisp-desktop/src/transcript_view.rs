@@ -15,8 +15,9 @@ use gpui::{
     ScrollHandle, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 use wisp_audiokit::{Permission, PermissionStatus, SessionError, SourceLabel};
+use wisp_core::{Session as StoredSession, SessionId};
 
-use crate::app::{AppModel, Permissions, Segment, SessionState};
+use crate::app::{AppModel, Permissions, Segment, SessionState, View};
 use crate::permissions as perms;
 
 pub struct TranscriptView {
@@ -29,6 +30,12 @@ pub struct TranscriptView {
     /// Open the System Settings privacy pane for a permission. Used when
     /// the permission is already denied and only the user can re-enable it.
     pub on_open_settings: std::sync::Arc<dyn Fn(Permission, &mut Window, &mut gpui::App) + 'static>,
+    /// Switch from the library screen to the empty recording screen.
+    pub on_new_session: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
+    /// Load a session's transcript from storage and switch to history view.
+    pub on_open_history: std::sync::Arc<dyn Fn(SessionId, &mut Window, &mut gpui::App) + 'static>,
+    /// Return to the library screen from a live or historical session view.
+    pub on_back_to_library: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
     /// Toggled by the cursor-blink animation timer in main.rs so the
     /// ghost-text caret pulses.
     pub cursor_visible: bool,
@@ -94,19 +101,43 @@ impl Render for TranscriptView {
             return self.render_onboarding(permissions).into_any_element();
         }
 
+        let view = app.view.clone();
+        let library = app.library.clone();
         let segments = app.segments.clone();
         let active_idx = app.active_segment_index();
         let state = app.state;
         let log_count = app.recent_log.len();
         let last_error = app.last_error.clone();
+        let viewed_session = app.viewed_session.clone();
 
-        // Pin the viewport to the bottom on transcript changes, but only
-        // when the user is already at the bottom. If they've scrolled up to
-        // read history we leave them there.
-        //
-        // We sample is_at_bottom() *before* calling scroll_to_bottom() so
-        // the decision is based on what the user is currently looking at,
-        // not the post-render state.
+        match view {
+            View::Library => self.render_library(&library).into_any_element(),
+            View::LiveSession => {
+                self.update_scroll_signature(&segments);
+                self.render_live_session(
+                    state,
+                    &segments,
+                    active_idx,
+                    log_count,
+                    last_error.as_ref(),
+                )
+                .into_any_element()
+            },
+            View::History { .. } => self
+                .render_history(viewed_session.as_ref(), &segments)
+                .into_any_element(),
+        }
+    }
+}
+
+impl TranscriptView {
+    /// Refresh `last_signature` and pin scroll to bottom on transcript
+    /// growth. Only the live-session view calls this — library and history
+    /// don't have a streaming partial to follow.
+    fn update_scroll_signature(
+        &mut self,
+        segments: &[Segment],
+    ) {
         let signature = (segments.len(), segments.iter().map(|s| s.text.len()).sum());
         if signature != self.last_signature {
             if is_at_bottom(&self.scroll_handle) {
@@ -114,16 +145,25 @@ impl Render for TranscriptView {
             }
             self.last_signature = signature;
         }
+    }
 
+    fn render_live_session(
+        &self,
+        state: SessionState,
+        segments: &[Segment],
+        active_idx: Option<usize>,
+        log_count: usize,
+        last_error: Option<&SessionError>,
+    ) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text_primary())
-            .child(self.render_top_bar(state))
+            .child(self.render_live_top_bar(state))
             .child(render_transcript(
-                &segments,
+                segments,
                 active_idx,
                 self.cursor_visible,
                 &self.scroll_handle,
@@ -132,19 +172,40 @@ impl Render for TranscriptView {
                 state,
                 segments.len(),
                 log_count,
-                last_error.as_ref(),
+                last_error,
             ))
-            .into_any_element()
     }
-}
 
-impl TranscriptView {
-    fn render_top_bar(
+    fn render_history(
         &self,
-        state: SessionState,
+        session: Option<&StoredSession>,
+        segments: &[Segment],
     ) -> impl IntoElement {
-        let toggle = self.on_toggle_record.clone();
+        let title = session.map_or_else(|| "Session".to_string(), |s| s.title.clone());
+        let subtitle = session.map(history_subtitle);
+
         div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(theme::bg())
+            .text_color(theme::text_primary())
+            .child(self.render_history_top_bar(&title, subtitle.as_deref()))
+            .child(render_transcript(
+                segments,
+                None,
+                false,
+                &self.scroll_handle,
+            ))
+            .child(render_history_status_bar(segments.len()))
+    }
+
+    fn render_library(
+        &self,
+        sessions: &[StoredSession],
+    ) -> impl IntoElement {
+        let on_new = self.on_new_session.clone();
+        let header = div()
             .h(px(56.0))
             .flex()
             .items_center()
@@ -153,7 +214,86 @@ impl TranscriptView {
             .border_b_1()
             .border_color(theme::border())
             .child(render_brand())
+            .child(render_new_session_button(on_new));
+
+        let body = if sessions.is_empty() {
+            render_empty_library().into_any_element()
+        } else {
+            render_session_list(sessions, self.on_open_history.clone()).into_any_element()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(theme::bg())
+            .text_color(theme::text_primary())
+            .child(header)
+            .child(body)
+            .child(render_library_status_bar(sessions.len()))
+    }
+
+    fn render_live_top_bar(
+        &self,
+        state: SessionState,
+    ) -> impl IntoElement {
+        let toggle = self.on_toggle_record.clone();
+        let on_back = self.on_back_to_library.clone();
+        div()
+            .h(px(56.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(20.0))
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(render_back_button("library-back-live", on_back))
+                    .child(render_brand()),
+            )
             .child(render_record_button(state, toggle))
+    }
+
+    fn render_history_top_bar(
+        &self,
+        title: &str,
+        subtitle: Option<&str>,
+    ) -> impl IntoElement {
+        let on_back = self.on_back_to_library.clone();
+        let mut title_block = div().flex().flex_col().gap(px(2.0)).child(
+            div()
+                .text_color(theme::text_primary())
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title.to_string()),
+        );
+        if let Some(sub) = subtitle {
+            title_block = title_block.child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_tertiary())
+                    .child(sub.to_string()),
+            );
+        }
+        div()
+            .h(px(56.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(20.0))
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(render_back_button("library-back-history", on_back))
+                    .child(title_block),
+            )
     }
 
     fn render_onboarding(
@@ -527,6 +667,211 @@ fn render_segment(
                 .child(label),
         )
         .child(body)
+}
+
+fn render_new_session_button(
+    on_click: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>
+) -> impl IntoElement {
+    div()
+        .id(ElementId::Name("new-session-button".into()))
+        .flex()
+        .items_center()
+        .gap_2()
+        .px(px(14.0))
+        .py(px(7.0))
+        .rounded_full()
+        .bg(theme::record_idle())
+        .text_color(theme::text_primary())
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .child(div().size(px(8.0)).rounded_full().bg(theme::mic_accent()))
+        .child("New Session")
+        .on_click(move |_event, window, cx| {
+            on_click(window, cx);
+        })
+}
+
+fn render_back_button(
+    id: &'static str,
+    on_click: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
+) -> impl IntoElement {
+    div()
+        .id(ElementId::Name(id.into()))
+        .px(px(10.0))
+        .py(px(5.0))
+        .rounded_full()
+        .bg(theme::record_idle())
+        .text_color(theme::text_primary())
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .child("← Library")
+        .on_click(move |_event, window, cx| {
+            on_click(window, cx);
+        })
+}
+
+fn render_empty_library() -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .flex_grow()
+        .gap_2()
+        .child(
+            div()
+                .text_color(theme::text_secondary())
+                .font_weight(FontWeight::MEDIUM)
+                .child("No sessions yet."),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::text_tertiary())
+                .child("Click New Session to record your first one."),
+        )
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn render_session_list(
+    sessions: &[StoredSession],
+    on_open: std::sync::Arc<dyn Fn(SessionId, &mut Window, &mut gpui::App) + 'static>,
+) -> impl IntoElement {
+    let mut list = div()
+        .id(ElementId::Name("library-scroll".into()))
+        .flex()
+        .flex_col()
+        .flex_grow()
+        .overflow_y_scroll()
+        .px(px(20.0))
+        .py(px(16.0))
+        .gap(px(8.0));
+    for s in sessions {
+        list = list.child(render_session_row(s, on_open.clone()));
+    }
+    list
+}
+
+fn render_session_row(
+    session: &StoredSession,
+    on_open: std::sync::Arc<dyn Fn(SessionId, &mut Window, &mut gpui::App) + 'static>,
+) -> impl IntoElement {
+    let id = session.id;
+    // Unique element id per row — GPUI requires every interactive child
+    // to carry a distinct one within its parent.
+    let element_id = ElementId::Name(format!("session-row-{}", id.as_i64()).into());
+
+    let started_local = session.started_at.with_timezone(&chrono::Local);
+    let when = started_local.format("%Y-%m-%d %H:%M").to_string();
+    let duration_text = session.ended_at.map_or_else(
+        || "in progress".to_string(),
+        |end| format_duration(end.signed_duration_since(session.started_at)),
+    );
+
+    div()
+        .id(element_id)
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .py(px(12.0))
+        .px(px(14.0))
+        .bg(theme::surface())
+        .rounded(px(8.0))
+        .border_l_2()
+        .border_color(theme::mic_accent())
+        .cursor_pointer()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .min_w_0()
+                .flex_grow()
+                .child(
+                    div()
+                        .text_color(theme::text_primary())
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(session.title.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text_tertiary())
+                        .child(when),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::text_secondary())
+                .child(duration_text),
+        )
+        .on_click(move |_event, window, cx| {
+            on_open(id, window, cx);
+        })
+}
+
+/// Format a `chrono::Duration` as `MM:SS` or `H:MM:SS` for the library
+/// row's right-hand label.
+fn format_duration(d: chrono::Duration) -> String {
+    let total = d.num_seconds().max(0);
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
+fn history_subtitle(session: &StoredSession) -> String {
+    let started = session.started_at.with_timezone(&chrono::Local);
+    let when = started.format("%Y-%m-%d %H:%M").to_string();
+    match session.ended_at {
+        Some(end) => {
+            let dur = format_duration(end.signed_duration_since(session.started_at));
+            format!("{when} · {dur}")
+        },
+        None => format!("{when} · in progress"),
+    }
+}
+
+fn render_library_status_bar(count: usize) -> impl IntoElement {
+    div()
+        .h(px(32.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .px(px(20.0))
+        .border_t_1()
+        .border_color(theme::border())
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::text_secondary())
+                .child(format!("{count} sessions")),
+        )
+}
+
+fn render_history_status_bar(segment_count: usize) -> impl IntoElement {
+    div()
+        .h(px(32.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .px(px(20.0))
+        .border_t_1()
+        .border_color(theme::border())
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::text_secondary())
+                .child(format!("{segment_count} segments")),
+        )
 }
 
 fn render_status_bar(

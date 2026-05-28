@@ -28,6 +28,10 @@ wisp-core = { path = "../../crates/wisp-core" }
 wisp-storage = { path = "../../crates/wisp-storage" }
 wisp-audiokit = { path = "../../crates/wisp-audiokit" }
 
+# Used for session start/end timestamps and the human-readable date labels
+# shown in the library list.
+chrono = { workspace = true }
+
 # GPU-accelerated UI framework by the Zed team. macOS-only in practice;
 # Ubuntu CI excludes this crate (see .github/workflows/rust.yaml).
 gpui = { workspace = true }

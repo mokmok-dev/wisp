@@ -14,6 +14,7 @@ use std::time::Instant;
 use wisp_audiokit::{
     Event, Permission, PermissionStatus, SessionError, SessionResult, SourceLabel,
 };
+use wisp_core::{Session as StoredSession, SessionId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -22,6 +23,19 @@ pub enum SessionState {
     Recording { started_at: Instant },
     Stopping,
     Failed,
+}
+
+/// Which top-level screen the desktop UI is currently showing.
+///
+///   - `Library`: list of past sessions with a "New Session" button.
+///   - `LiveSession`: the recording UI (idle, recording, or just-stopped
+///     state). New sessions land here before a record press.
+///   - `History`: read-only view of a past session loaded from storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum View {
+    Library,
+    LiveSession,
+    History { session_id: SessionId },
 }
 
 /// Snapshot of every permission Wisp gates Record on.
@@ -82,7 +96,19 @@ pub struct Segment {
 #[derive(Debug)]
 pub struct AppModel {
     pub state: SessionState,
+    pub view: View,
     pub segments: Vec<Segment>,
+    /// All persisted sessions, newest first. Populated on launch and
+    /// refreshed whenever a recording finishes or the user returns to the
+    /// library.
+    pub library: Vec<StoredSession>,
+    /// `Some` while a session row exists in the database for the current
+    /// recording — set when the Swift session reports `Started`, cleared
+    /// when the user navigates away from the live view.
+    pub current_session_id: Option<SessionId>,
+    /// The session being viewed in `View::History`, kept around so the
+    /// header can render its title without re-querying.
+    pub viewed_session: Option<StoredSession>,
     pub recent_log: VecDeque<String>,
     pub last_error: Option<SessionError>,
     pub permissions: Permissions,
@@ -92,11 +118,60 @@ impl AppModel {
     pub fn new() -> Self {
         Self {
             state: SessionState::Idle,
+            view: View::Library,
             segments: Vec::new(),
+            library: Vec::new(),
+            current_session_id: None,
+            viewed_session: None,
             recent_log: VecDeque::new(),
             last_error: None,
             permissions: Permissions::unknown(),
         }
+    }
+
+    /// Replace the cached library list. Called after storage reads (launch,
+    /// recording end, post-delete).
+    pub fn set_library(
+        &mut self,
+        sessions: Vec<StoredSession>,
+    ) {
+        self.library = sessions;
+    }
+
+    /// Move to the library screen and drop any live/historical segments so
+    /// the next view enter starts from a clean slate.
+    pub fn show_library(&mut self) {
+        self.view = View::Library;
+        self.segments.clear();
+        self.viewed_session = None;
+        self.last_error = None;
+    }
+
+    /// Move to the live recording screen in idle state. Used by the
+    /// library's "New Session" button.
+    pub fn show_new_session(&mut self) {
+        self.view = View::LiveSession;
+        self.state = SessionState::Idle;
+        self.segments.clear();
+        self.viewed_session = None;
+        self.current_session_id = None;
+        self.last_error = None;
+    }
+
+    /// Move to a historical session's read-only transcript view. The
+    /// caller is responsible for populating `segments` from storage.
+    pub fn show_history(
+        &mut self,
+        session: StoredSession,
+        segments: Vec<Segment>,
+    ) {
+        self.view = View::History {
+            session_id: session.id,
+        };
+        self.segments = segments;
+        self.viewed_session = Some(session);
+        // Historical segments are already finalized.
+        self.finalize_all_segments();
     }
 
     pub fn set_state(

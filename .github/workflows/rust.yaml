@@ -1,0 +1,28 @@
+name: rust
+on:
+  pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".clippy.toml"
+      - ".rustfmt.toml"
+      - ".github/workflows/rust.yaml"
+      - "flake.lock"
+      - "flake.nix"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-rust
+  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: write
+jobs:
+  check:
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-nix
+      - run: nix develop .#ci --quiet --command cargo fmt --all -- --check
+      - run: nix develop .#ci --quiet --command cargo clippy --workspace --all-targets -- -D warnings
+      - run: nix develop .#ci --quiet --command cargo test --workspace --all-targets

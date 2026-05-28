@@ -14,7 +14,7 @@ use gpui::{
     Context, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
     ScrollHandle, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
-use wisp_audiokit::SourceLabel;
+use wisp_audiokit::{SessionError, SourceLabel};
 
 use crate::app::{AppModel, Segment, SessionState};
 
@@ -113,7 +113,7 @@ impl Render for TranscriptView {
                 state,
                 segments.len(),
                 log_count,
-                last_error.as_deref(),
+                last_error.as_ref(),
             ))
     }
 }
@@ -320,7 +320,7 @@ fn render_status_bar(
     state: SessionState,
     segment_count: usize,
     log_count: usize,
-    last_error: Option<&str>,
+    last_error: Option<&SessionError>,
 ) -> impl IntoElement {
     let (dot, status_text) = match state {
         SessionState::Idle => (theme::record_idle(), "Idle".to_string()),

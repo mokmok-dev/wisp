@@ -32,13 +32,13 @@ impl SourceLabel {
 }
 
 impl std::str::FromStr for SourceLabel {
-    type Err = ();
+    type Err = crate::SourceLabelError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "mic" => Ok(Self::Mic),
             "system" => Ok(Self::System),
-            _ => Err(()),
+            _ => Err(crate::SourceLabelError(s.to_owned())),
         }
     }
 }

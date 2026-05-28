@@ -1,91 +1,91 @@
 # Wisp
 
-**完全オフラインで動く、録音 & 文字起こしデスクトップアプリ。**
+**A fully offline recording & transcription desktop app.**
 
-Wisp はマイクとシステム音声（会議相手の声）を同時に取り込み、すべてデバイス内で文字起こしを行います。録音データも文字起こし結果もネットワークには一切送信されません。
+Wisp captures your microphone and system audio (the other side of a call) at the same time and transcribes both on-device. Audio and text never leave your machine.
 
-> 現在 macOS 26 (Tahoe) のみ対応。Windows / Linux は近日公開予定です。
+> Currently macOS 26 (Tahoe) only. Windows and Linux support is coming soon.
 
 ---
 
-## 特徴
+## Features
 
-- **完全オフライン** — 音声・テキストともに端末外には出ません。Wi-Fi を切っても動作します。
-- **オンデバイス文字起こし** — macOS の [Speech](https://developer.apple.com/documentation/speech) framework に新しく加わった `SpeechAnalyzer` をそのまま利用します。クラウド API は不要です。
-- **システム音声 + マイクの同時キャプチャ** — macOS 14.4 以降の [Core Audio Process Tap](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps) を使い、会議アプリの出力を権限プロンプトなしでタップします。マイク入力と合成し、相手と自分の発話を 1 本のトランスクリプトに統合します。
-- **Rust 製、GPU レンダリング UI** — UI は [Zed](https://zed.dev/) エディタを支える [GPUI](https://www.gpui.rs/) で実装。ネイティブ並みの応答性と滑らかなスクロールを実現します。
-- **シンプルなローカル保存** — 録音は WAV、メタデータは SQLite (`~/Library/Application Support/dev.mokmok.wisp/`) に保存されます。後から自由にエクスポート・解析できます。
+- **Fully offline** — Audio and transcripts stay on your device. Wisp works with Wi-Fi turned off.
+- **On-device transcription** — Uses [`SpeechAnalyzer`](https://developer.apple.com/documentation/speech), the new API in Apple's Speech framework. No cloud APIs.
+- **System audio + microphone capture** — Uses macOS 14.4+ [Core Audio Process Taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps) to tap meeting-app output without prompts, mixes it with your mic input, and merges both sides into a single transcript.
+- **Built in Rust with a GPU-rendered UI** — The UI is built on [GPUI](https://www.gpui.rs/), the framework that powers the [Zed](https://zed.dev/) editor. Native-feeling responsiveness and smooth scrolling.
+- **Simple local storage** — Recordings are stored as WAV and metadata as SQLite under `~/Library/Application Support/dev.mokmok.wisp/`. Easy to export and analyze later.
 
-## スクリーンショット
+## Screenshots
 
-_（後日追加予定）_
+_Coming soon._
 
-## アーキテクチャ
+## Architecture
 
-Wisp は小さな workspace に分かれており、責務をはっきり分離しています。
+Wisp is a small Cargo workspace with cleanly separated concerns:
 
-| クレート / ターゲット | 役割 |
+| Crate / target | Responsibility |
 | --- | --- |
-| `apps/wisp-desktop` | GPUI で書かれたデスクトップシェル。録音状態と転写ビューを描画。 |
-| `crates/wisp-core` | クレート横断で使う型（`Session`、`Segment`、ID、`SourceLabel` など）。プラットフォーム非依存。 |
-| `crates/wisp-audiokit` | Swift 製 `WispAudioKit` を包む安全な Rust ラッパ。 |
-| `crates/wisp-audiokit-sys` | `WispAudioKit` の C ABI を直接バインド。 |
-| `crates/wisp-storage` | SQLite (rusqlite, bundled) を使ったセッション / セグメント永続化。 |
-| `native/WispAudioKit` | Swift パッケージ。`Core Audio Process Tap` でのキャプチャと `SpeechAnalyzer` での転写を担う。静的ライブラリとして Rust 側にリンクされる。 |
+| `apps/wisp-desktop` | GPUI desktop shell. Renders recording state and the transcript view. |
+| `crates/wisp-core` | Shared, platform-agnostic types (`Session`, `Segment`, IDs, `SourceLabel`). |
+| `crates/wisp-audiokit` | Safe Rust wrapper around the Swift `WispAudioKit` framework. |
+| `crates/wisp-audiokit-sys` | Raw C ABI bindings to `WispAudioKit`. |
+| `crates/wisp-storage` | Session/segment persistence on SQLite (bundled `rusqlite`). |
+| `native/WispAudioKit` | Swift package handling Core Audio Process Tap capture and `SpeechAnalyzer` transcription. Linked into the Rust binary as a static library. |
 
-データの流れはおおむね次のとおりです。
+Roughly, data flows like this:
 
 ```
 Core Audio Process Tap ─┐
                         ├─► WispAudioKit ─► wisp-audiokit ─► wisp-desktop (GPUI)
-マイク入力 ─────────────┘        │                              ▲
+Microphone input ───────┘        │                              ▲
                                  └─► SpeechAnalyzer ────────────┘
                                           │
                                           └─► wisp-storage (SQLite + WAV)
 ```
 
-## 動作要件
+## Requirements
 
-- **macOS 26 (Tahoe)** — `SpeechAnalyzer`、`Core Audio Process Tap`、Metal Toolchain の新 API を利用しているため、現状 macOS 26 が必須です。
-- **Xcode 26** — Swift 6.0 / macOS 26 SDK を含むバージョン。
-- **Rust 1.95** — `rust-toolchain.toml` で固定されています。
-- マイクとシステム音声録音の権限。初回起動時に macOS が確認します。
+- **macOS 26 (Tahoe)** — Wisp relies on `SpeechAnalyzer`, Core Audio Process Taps, and the new Metal Toolchain, so macOS 26 is required for now.
+- **Xcode 26** — for the Swift 6.0 / macOS 26 SDK.
+- **Rust 1.95** — pinned in `rust-toolchain.toml`.
+- Microphone and system-audio recording permissions. macOS will prompt on first launch.
 
-## ビルド & 実行
+## Build & run
 
-[Nix](https://nixos.org/) flake を同梱しているので、開発環境はワンコマンドで揃います。
+A [Nix](https://nixos.org/) flake is included, so the dev environment is one command away:
 
 ```bash
-# 開発シェルに入る
+# Enter the dev shell
 nix develop
 
-# デバッグビルドで起動
+# Run a debug build
 cargo run -p wisp-desktop
 ```
 
-Nix を使わず Rust + Xcode を直接使う場合：
+If you'd rather use Rust + Xcode directly:
 
 ```bash
 cargo build -p wisp-desktop --release
 ```
 
-リリース時の `.app` バンドル化は `.github/workflows/release.yaml` を参照してください。タグ `v*` を push すると macOS 26 ランナーで `Wisp.app` が生成されます。
+See `.github/workflows/release.yaml` for how the release `.app` bundle is produced — pushing a `v*` tag builds `Wisp.app` on a macOS 26 runner.
 
-### 出力先のカスタマイズ
+### Custom output directory
 
-`WISP_OUTPUT_DIR` 環境変数で録音ファイルの保存先を上書きできます。未指定時は `~/Library/Application Support/dev.mokmok.wisp/recordings` に保存されます。
+Set `WISP_OUTPUT_DIR` to override where recordings are written. When unset, Wisp uses `~/Library/Application Support/dev.mokmok.wisp/recordings`.
 
-## ロードマップ
+## Roadmap
 
-- [ ] **Windows 対応** — WASAPI ループバック + Windows.Media.SpeechRecognition / ローカルモデルの組み合わせを検証中。
-- [ ] **Linux 対応** — PipeWire のモニタソース + ローカル Whisper 系モデルを検討。
-- [ ] エクスポート機能（Markdown / SRT / JSON）。
-- [ ] 話者分離（同一チャネル内）。
+- [ ] **Windows support** — exploring WASAPI loopback paired with `Windows.Media.SpeechRecognition` or a local model.
+- [ ] **Linux support** — exploring PipeWire monitor sources paired with a local Whisper-family model.
+- [ ] Export to Markdown / SRT / JSON.
+- [ ] Speaker diarization within a single channel.
 
-## コントリビュート
+## Contributing
 
-Issue / Pull Request 歓迎です。`cargo fmt`・`cargo clippy --workspace --all-targets`・`cargo test --workspace` が CI と同じ条件で通ることを確認してから送ってください。Swift 側は `make -C native/WispAudioKit` で同じチェックが走ります。
+Issues and pull requests are welcome. Before sending a PR, please make sure `cargo fmt`, `cargo clippy --workspace --all-targets`, and `cargo test --workspace` pass under the same conditions as CI. For the Swift side, `make -C native/WispAudioKit` runs the equivalent checks.
 
-## ライセンス
+## License
 
-未定（公開時に追記）。
+TBD (will be added before public release).

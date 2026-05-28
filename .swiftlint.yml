@@ -1,0 +1,38 @@
+included:
+  - native
+
+excluded:
+  - native/**/.build
+  - native/**/build
+  - native/**/.swiftpm
+
+disabled_rules:
+  - line_length          # delegated to swiftformat (--maxwidth)
+  - identifier_name      # too restrictive for short identifiers (e.g. `s`, `e`)
+  - todo                 # PoC stage still has TODOs
+
+opt_in_rules:
+  - empty_count
+  - empty_string
+  - explicit_init
+  - first_where
+  - last_where
+  - sorted_first_last
+  - toggle_bool
+  - unneeded_parentheses_in_closure_argument
+
+function_body_length:
+  warning: 80
+  error: 150
+
+type_body_length:
+  warning: 250
+  error: 400
+
+file_length:
+  warning: 400
+  error: 800
+
+cyclomatic_complexity:
+  warning: 15
+  error: 25

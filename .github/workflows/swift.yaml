@@ -1,0 +1,24 @@
+name: swift
+on:
+  pull_request:
+    paths:
+      - "native/**"
+      - ".swiftformat"
+      - ".swiftlint.yml"
+      - ".github/workflows/swift.yaml"
+      - "flake.lock"
+      - "flake.nix"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-swift
+  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: write
+jobs:
+  check:
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-nix
+      - run: nix develop .#ci --quiet --command swiftformat --lint native/WispAudioKit/Sources
+      - run: nix develop .#ci --quiet --command swiftlint --strict native

@@ -91,7 +91,13 @@ fn main() {
                                     model.set_state(SessionState::Recording { started_at: now() });
                                 },
                                 Update::Event(e) => model.ingest(e),
-                                Update::Stopped => model.set_state(SessionState::Idle),
+                                Update::Stopped => {
+                                    // Lock in whatever the analyzer last
+                                    // had — without this the trailing
+                                    // partial stays grey forever.
+                                    model.finalize_all_segments();
+                                    model.set_state(SessionState::Idle);
+                                },
                                 Update::Error(msg) => model.fail(msg),
                             }
                         }

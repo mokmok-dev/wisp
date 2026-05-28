@@ -66,6 +66,16 @@ impl AppModel {
     ) {
         self.last_error = Some(message.into());
         self.state = SessionState::Failed;
+        self.finalize_all_segments();
+    }
+
+    /// Mark every segment as final. Called when recording stops so the
+    /// most recent (formerly active) row drops the ghost-text styling
+    /// and reads as locked-in alongside the rest.
+    pub fn finalize_all_segments(&mut self) {
+        for seg in &mut self.segments {
+            seg.is_final = true;
+        }
     }
 
     pub fn ingest(
@@ -299,6 +309,15 @@ mod tests {
         assert_eq!(m.segments.len(), 2, "different utterances should not merge");
         assert!(m.segments[0].is_final);
         assert!(!m.segments[1].is_final);
+    }
+
+    #[test]
+    fn finalize_all_segments_locks_partial() {
+        let mut m = AppModel::new();
+        m.ingest(Event::Result(r(SourceLabel::Mic, 1, "途中…")));
+        assert!(!m.segments[0].is_final);
+        m.finalize_all_segments();
+        assert!(m.segments[0].is_final);
     }
 
     #[test]

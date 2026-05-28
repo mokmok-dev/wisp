@@ -14,23 +14,23 @@ import os.lock
 ///   1. `AudioHardwareCreateProcessTap` → process tap (AudioObjectID)
 ///   2. Create a private Aggregate Device that wraps the tap as a sub-tap
 ///   3. `AudioDeviceCreateIOProcIDWithBlock` to start receiving PCM via HAL
-final class ProcessTapCapture: @unchecked Sendable {
+public final class ProcessTapCapture: @unchecked Sendable {
     private let onBuffer: (AVAudioPCMBuffer) -> Void
 
     private var tapID: AudioObjectID = .init(kAudioObjectUnknown)
     private var aggregateID: AudioObjectID = .init(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
-    private(set) var captureFormat: AVAudioFormat?
+    public private(set) var captureFormat: AVAudioFormat?
 
     // Diagnostics: count callbacks vs successful buffer conversions
     private let ioCallbackCount = OSAllocatedUnfairLock<Int>(initialState: 0)
     private let bufferYieldCount = OSAllocatedUnfairLock<Int>(initialState: 0)
 
-    init(onBuffer: @escaping (AVAudioPCMBuffer) -> Void) {
+    public init(onBuffer: @escaping (AVAudioPCMBuffer) -> Void) {
         self.onBuffer = onBuffer
     }
 
-    func start() throws {
+    public func start() throws {
         // 1. Find our own process AudioObjectID so we can exclude it from the tap.
         let ourPID = getpid()
         let ourProcessObjectID = try translatePIDToProcessObject(pid: ourPID)
@@ -50,14 +50,14 @@ final class ProcessTapCapture: @unchecked Sendable {
             throw PoCError.scStreamSetupFailed("AudioHardwareCreateProcessTap: \(status)")
         }
         tapID = localTapID
-        log("[SYS] Process tap created (id=\(tapID))")
+        wispLog("[SYS] Process tap created (id=\(tapID))")
 
         // 3. Get the tap's UID — needed to reference it from the aggregate device.
         let tapUID = try getCFStringProperty(
             objectID: tapID,
             selector: AudioObjectPropertySelector(kAudioTapPropertyUID)
         )
-        log("[SYS] Tap UID: \(tapUID)")
+        wispLog("[SYS] Tap UID: \(tapUID)")
 
         // 4. Build a private aggregate device that includes our tap.
         let aggregateUID = UUID().uuidString
@@ -83,7 +83,7 @@ final class ProcessTapCapture: @unchecked Sendable {
             throw PoCError.scStreamSetupFailed("AudioHardwareCreateAggregateDevice: \(status)")
         }
         aggregateID = localAggID
-        log("[SYS] Aggregate device created (id=\(aggregateID))")
+        wispLog("[SYS] Aggregate device created (id=\(aggregateID))")
 
         // 5. Discover the aggregate's input stream format.
         var asbd = try getStreamFormat(deviceID: aggregateID)
@@ -91,7 +91,7 @@ final class ProcessTapCapture: @unchecked Sendable {
             throw PoCError.noCompatibleFormat
         }
         captureFormat = avFormat
-        log(
+        wispLog(
             "[SYS] Tap stream format sr=\(avFormat.sampleRate) ch=\(avFormat.channelCount) fmt=\(avFormat.commonFormat.rawValue)"
         )
 
@@ -125,13 +125,13 @@ final class ProcessTapCapture: @unchecked Sendable {
         guard status == noErr else {
             throw PoCError.scStreamSetupFailed("AudioDeviceStart: \(status)")
         }
-        log("[SYS] Process tap streaming started")
+        wispLog("[SYS] Process tap streaming started")
     }
 
-    func stop() {
+    public func stop() {
         let ioCount = ioCallbackCount.withLock { $0 }
         let yieldCount = bufferYieldCount.withLock { $0 }
-        log("[SYS] diagnostics: IOProc=\(ioCount) calls, yields=\(yieldCount) buffers")
+        wispLog("[SYS] diagnostics: IOProc=\(ioCount) calls, yields=\(yieldCount) buffers")
 
         if let procID = ioProcID, aggregateID != AudioObjectID(kAudioObjectUnknown) {
             AudioDeviceStop(aggregateID, procID)

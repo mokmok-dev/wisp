@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// integer IDs (segment IDs, indices, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct SessionId(pub i64);
+pub struct SessionId(i64);
 
 impl SessionId {
     /// Returns the underlying rowid. Use when interacting with `SQLite` or
@@ -14,6 +14,12 @@ impl SessionId {
     #[must_use]
     pub const fn as_i64(self) -> i64 {
         self.0
+    }
+}
+
+impl From<i64> for SessionId {
+    fn from(value: i64) -> Self {
+        Self(value)
     }
 }
 
@@ -29,13 +35,19 @@ impl std::fmt::Display for SessionId {
 /// Identifier for one transcript segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct SegmentId(pub i64);
+pub struct SegmentId(i64);
 
 impl SegmentId {
     /// Returns the underlying rowid.
     #[must_use]
     pub const fn as_i64(self) -> i64 {
         self.0
+    }
+}
+
+impl From<i64> for SegmentId {
+    fn from(value: i64) -> Self {
+        Self(value)
     }
 }
 

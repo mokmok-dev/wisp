@@ -1,0 +1,18 @@
+name: setup rust cache
+description: cache cargo registry and target/ between workflow runs
+inputs:
+  devshell:
+    description: flake devShell attribute (e.g. ci or default)
+    required: false
+    default: ci
+runs:
+  using: composite
+  steps:
+    - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      with:
+        # Toolchain comes from Nix, not ~/.cargo/bin.
+        cache-bin: "false"
+        # Keep workspace crate artifacts for clippy/test across runs.
+        cache-workspace-crates: "true"
+        cache-on-failure: "true"
+        cmd-format: nix develop .#${{ inputs.devshell }} --quiet -c {0}

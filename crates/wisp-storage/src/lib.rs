@@ -28,6 +28,17 @@ pub struct Storage {
     root: PathBuf,
 }
 
+impl std::fmt::Debug for Storage {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        f.debug_struct("Storage")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Storage {
     /// Open (or create) the `SQLite` database at `<root>/sessions.db`.
     ///

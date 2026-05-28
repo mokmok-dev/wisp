@@ -27,10 +27,18 @@ impl SourceLabel {
     /// Parse the stable string form. Returns `None` for unknown values.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
+        s.parse().ok()
+    }
+}
+
+impl std::str::FromStr for SourceLabel {
+    type Err = ();
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "mic" => Some(Self::Mic),
-            "system" => Some(Self::System),
-            _ => None,
+            "mic" => Ok(Self::Mic),
+            "system" => Ok(Self::System),
+            _ => Err(()),
         }
     }
 }

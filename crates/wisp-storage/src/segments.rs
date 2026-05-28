@@ -47,7 +47,7 @@ impl<'a> Segments<'a> {
                 now,
             ],
         )?;
-        Ok(SegmentId(self.conn.last_insert_rowid()))
+        Ok(SegmentId::from(self.conn.last_insert_rowid()))
     }
 
     /// All segments for a session, ordered by `(start_seconds, id)` so
@@ -67,10 +67,10 @@ impl<'a> Segments<'a> {
              FROM segments WHERE session_id = ?1 \
              ORDER BY start_seconds, id",
         )?;
-        let rows = stmt.query_map([session_id.as_i64()], row_to_segment)?;
+        let mut rows = stmt.query([session_id.as_i64()])?;
         let mut out = Vec::new();
-        for r in rows {
-            out.push(r??);
+        while let Some(row) = rows.next()? {
+            out.push(row_to_segment(row)?);
         }
         Ok(out)
     }
@@ -96,23 +96,25 @@ impl<'a> Segments<'a> {
              ORDER BY bm25(segments_fts) \
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![query, limit], row_to_segment)?;
+        let mut rows = stmt.query(params![query, limit])?;
         let mut out = Vec::new();
-        for r in rows {
-            out.push(SearchHit { segment: r?? });
+        while let Some(row) = rows.next()? {
+            out.push(SearchHit {
+                segment: row_to_segment(row)?,
+            });
         }
         Ok(out)
     }
 }
 
-fn row_to_segment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Segment>> {
+fn row_to_segment(row: &rusqlite::Row<'_>) -> Result<Segment> {
     let source_str: String = row.get(2)?;
-    let Some(source) = SourceLabel::parse(&source_str) else {
-        return Ok(Err(StorageError::UnknownSource(source_str)));
-    };
-    Ok(Ok(Segment {
-        id: SegmentId(row.get(0)?),
-        session_id: SessionId(row.get(1)?),
+    let source = source_str
+        .parse::<SourceLabel>()
+        .map_err(|()| StorageError::UnknownSource(source_str))?;
+    Ok(Segment {
+        id: SegmentId::from(row.get::<_, i64>(0)?),
+        session_id: SessionId::from(row.get::<_, i64>(1)?),
         source,
         segment_index: row.get(3)?,
         start_seconds: row.get(4)?,
@@ -120,7 +122,7 @@ fn row_to_segment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Segment>> 
         text: row.get(6)?,
         speaker_label: row.get(7)?,
         created_at: row.get(8)?,
-    }))
+    })
 }
 
 #[cfg(test)]

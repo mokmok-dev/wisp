@@ -20,4 +20,5 @@ unsafe_code = "allow"
 
 [dependencies]
 wisp-audiokit-sys = { path = "../wisp-audiokit-sys" }
+wisp-core = { path = "../wisp-core" }
 thiserror = { workspace = true }

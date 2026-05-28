@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use wisp_audiokit::{Event, Session, SessionError};
+use wisp_audiokit::{Event, Session};
 
 /// Commands the UI sends to the worker.
 pub enum Command {
@@ -108,12 +108,12 @@ fn run_session(
     let session = match Session::new(output_dir, locale) {
         Ok(s) => s,
         Err(e) => {
-            let _ = update_tx.send(Update::Error(format_err(&e)));
+            let _ = update_tx.send(Update::Error(e.to_string()));
             return;
         },
     };
     if let Err(e) = session.start() {
-        let _ = update_tx.send(Update::Error(format_err(&e)));
+        let _ = update_tx.send(Update::Error(e.to_string()));
         return;
     }
     let _ = update_tx.send(Update::Started);
@@ -144,8 +144,4 @@ fn run_session(
         let _ = update_tx.send(Update::Event(event));
     }
     let _ = update_tx.send(Update::Stopped);
-}
-
-fn format_err(e: &SessionError) -> String {
-    format!("{e}")
 }

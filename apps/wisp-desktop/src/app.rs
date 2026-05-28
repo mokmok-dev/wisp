@@ -8,6 +8,7 @@
 //!   - When the next segment for that source arrives, the previous one is
 //!     marked `final` (the speech engine has locked it in).
 
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use wisp_audiokit::{Event, SessionResult, SourceLabel};
@@ -36,10 +37,11 @@ pub struct Segment {
     pub is_final: bool,
 }
 
+#[derive(Debug)]
 pub struct AppModel {
     pub state: SessionState,
     pub segments: Vec<Segment>,
-    pub recent_log: Vec<String>,
+    pub recent_log: VecDeque<String>,
     pub last_error: Option<String>,
 }
 
@@ -48,7 +50,7 @@ impl AppModel {
         Self {
             state: SessionState::Idle,
             segments: Vec::new(),
-            recent_log: Vec::new(),
+            recent_log: VecDeque::new(),
             last_error: None,
         }
     }
@@ -85,9 +87,9 @@ impl AppModel {
         match event {
             Event::Result(result) => self.upsert_segment(result),
             Event::Log(line) => {
-                self.recent_log.push(line);
-                if self.recent_log.len() > 200 {
-                    self.recent_log.drain(0..self.recent_log.len() - 200);
+                self.recent_log.push_back(line);
+                while self.recent_log.len() > 200 {
+                    self.recent_log.pop_front();
                 }
             },
         }
@@ -327,6 +329,6 @@ mod tests {
             m.ingest(Event::Log(format!("line {i}")));
         }
         assert!(m.recent_log.len() <= 200);
-        assert!(m.recent_log.last().unwrap().contains("299"));
+        assert!(m.recent_log.back().unwrap().contains("299"));
     }
 }

@@ -6691,6 +6691,7 @@ version = "0.0.0"
 dependencies = [
  "thiserror 2.0.18",
  "wisp-audiokit-sys",
+ "wisp-core",
 ]
 
 [[package]]

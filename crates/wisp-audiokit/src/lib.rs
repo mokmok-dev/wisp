@@ -11,6 +11,7 @@ mod imp {
     use std::sync::mpsc;
 
     use wisp_audiokit_sys as sys;
+    use wisp_core::SourceLabel;
 
     /// `WispAudioKit` library version (e.g. `"0.1.0"`).
     ///
@@ -31,13 +32,6 @@ mod imp {
     }
 
     // ---- Types ---------------------------------------------------------
-
-    /// Which audio source produced a [`SessionResult`].
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub enum SourceLabel {
-        Mic,
-        System,
-    }
 
     /// One transcription update from a running [`Session`].
     #[derive(Debug, Clone, PartialEq)]
@@ -235,7 +229,8 @@ mod imp {
         };
         let label = match source {
             sys::WISP_SOURCE_MIC => SourceLabel::Mic,
-            _ => SourceLabel::System,
+            sys::WISP_SOURCE_SYSTEM => SourceLabel::System,
+            _ => return,
         };
         let _ = ctx.sender.send(Event::Result(SessionResult {
             source: label,
@@ -277,7 +272,8 @@ mod imp {
 
 pub use imp::version;
 #[cfg(target_os = "macos")]
-pub use imp::{Event, Session, SessionError, SessionResult, SourceLabel};
+pub use imp::{Event, Session, SessionError, SessionResult};
+pub use wisp_core::SourceLabel;
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {

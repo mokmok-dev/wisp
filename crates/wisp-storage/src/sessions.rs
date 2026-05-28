@@ -33,7 +33,7 @@ impl<'a> Sessions<'a> {
                 new.system_wav_path,
             ],
         )?;
-        Ok(SessionId(self.conn.last_insert_rowid()))
+        Ok(SessionId::from(self.conn.last_insert_rowid()))
     }
 
     /// Look up a session by ID.
@@ -66,11 +66,7 @@ impl<'a> Sessions<'a> {
              FROM sessions ORDER BY started_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([], row_to_session)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Mark a session as ended at `ended_at`. No-op if `id` doesn't exist.
@@ -137,7 +133,7 @@ impl<'a> Sessions<'a> {
 
 fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
-        id: SessionId(row.get(0)?),
+        id: SessionId::from(row.get::<_, i64>(0)?),
         started_at: row.get(1)?,
         ended_at: row.get(2)?,
         title: row.get(3)?,
@@ -222,7 +218,10 @@ mod tests {
     #[test]
     fn get_missing_is_none() {
         let storage = Storage::open_in_memory().expect("open");
-        let got = storage.sessions().get(wisp_core::SessionId(9999)).unwrap();
+        let got = storage
+            .sessions()
+            .get(wisp_core::SessionId::from(9999))
+            .unwrap();
         assert!(got.is_none());
     }
 }

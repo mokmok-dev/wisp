@@ -61,6 +61,8 @@ fn main() {
                     let view = TranscriptView {
                         app: model_ref.clone(),
                         cursor_visible: true,
+                        scroll_handle: gpui::ScrollHandle::new(),
+                        last_signature: (0, 0),
                         on_toggle_record: Arc::new(move |_window, cx| {
                             toggle_recording(&runner, &model_ref, &output_dir, cx);
                         }),

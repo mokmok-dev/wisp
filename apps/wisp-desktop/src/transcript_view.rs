@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use gpui::{
     Context, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div, px, rgb,
+    ScrollHandle, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 use wisp_audiokit::SourceLabel;
 
@@ -24,6 +24,14 @@ pub struct TranscriptView {
     /// Toggled by the cursor-blink animation timer in main.rs so the
     /// ghost-text caret pulses.
     pub cursor_visible: bool,
+    /// Persistent scroll position for the transcript list.
+    pub scroll_handle: ScrollHandle,
+    /// Cheap fingerprint of the transcript on the previous render. When it
+    /// changes between renders we know an event landed (new segment or
+    /// partial text grew) and pin the scroll position to the bottom — but
+    /// not on cursor-blink ticks, which would otherwise yank the viewport
+    /// back down every 500ms when the user scrolls up to read history.
+    pub last_signature: (usize, usize),
 }
 
 mod theme {
@@ -73,6 +81,16 @@ impl Render for TranscriptView {
         let log_count = app.recent_log.len();
         let last_error = app.last_error.clone();
 
+        // Pin the viewport to the bottom whenever the transcript actually
+        // changed (new segment landed, or the current partial got longer).
+        // Cursor blinks don't shift the signature so they don't fight the
+        // user when they scroll up to read history.
+        let signature = (segments.len(), segments.iter().map(|s| s.text.len()).sum());
+        if signature != self.last_signature {
+            self.scroll_handle.scroll_to_bottom();
+            self.last_signature = signature;
+        }
+
         div()
             .flex()
             .flex_col()
@@ -84,6 +102,7 @@ impl Render for TranscriptView {
                 &segments,
                 active_idx,
                 self.cursor_visible,
+                &self.scroll_handle,
             ))
             .child(render_status_bar(
                 state,
@@ -176,9 +195,11 @@ fn render_transcript(
     segments: &[Segment],
     active_idx: Option<usize>,
     cursor_visible: bool,
+    scroll_handle: &ScrollHandle,
 ) -> impl IntoElement {
     let mut container = div()
         .id(ElementId::Name("transcript-scroll".into()))
+        .track_scroll(scroll_handle)
         .flex()
         .flex_col()
         .flex_grow()

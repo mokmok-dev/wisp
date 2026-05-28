@@ -4,8 +4,24 @@ edition.workspace = true
 version.workspace = true
 publish = false
 
-[lints]
-workspace = true
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+expect_used = "warn"
+panic = "warn"
+pedantic = { level = "warn", priority = -1 }
+todo = "warn"
+unwrap_used = "warn"
+
+# UI code has unique patterns that fight pedantic lints. Disable a few:
+#   - GPUI closure types are deep; type aliases hurt readability more than
+#     they help.
+#   - Many GPUI callbacks capture non-Send/Sync handles (entities, etc.)
+#     yet still need to be Rc/Arc shared between render passes.
+type_complexity = "allow"
+arc_with_non_send_sync = "allow"
+
+[lints.rust]
+unsafe_code = "deny"
 
 [dependencies]
 wisp-core = { path = "../../crates/wisp-core" }

@@ -11,7 +11,9 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use wisp_audiokit::{Event, Permission, PermissionStatus, SessionError, SessionResult, SourceLabel};
+use wisp_audiokit::{
+    Event, Permission, PermissionStatus, SessionError, SessionResult, SourceLabel,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -50,7 +52,11 @@ impl Permissions {
         self.microphone.is_granted() && self.speech.is_granted()
     }
 
-    pub fn set_status(&mut self, perm: Permission, status: PermissionStatus) {
+    pub fn set_status(
+        &mut self,
+        perm: Permission,
+        status: PermissionStatus,
+    ) {
         match perm {
             Permission::Microphone => self.microphone = status,
             Permission::SpeechRecognition => self.speech = status,

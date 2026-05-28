@@ -63,7 +63,13 @@ fn main() {
         // without a flash of the wrong content.
         permissions::refresh(&model, cx);
 
-        let window = open_main_window(cx, window_options, runner.clone(), model.clone(), output_dir);
+        let window = open_main_window(
+            cx,
+            window_options,
+            runner.clone(),
+            model.clone(),
+            output_dir,
+        );
 
         spawn_session_update_pump(cx, runner, model.clone());
         spawn_cursor_blink(cx, window);
@@ -147,7 +153,10 @@ fn spawn_session_update_pump(
 }
 
 /// Toggle the ghost-text cursor and refresh the status-bar elapsed counter.
-fn spawn_cursor_blink(cx: &mut App, window: WindowHandle<TranscriptView>) {
+fn spawn_cursor_blink(
+    cx: &mut App,
+    window: WindowHandle<TranscriptView>,
+) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         let mut elapsed = Duration::ZERO;
         loop {
@@ -171,7 +180,10 @@ fn spawn_cursor_blink(cx: &mut App, window: WindowHandle<TranscriptView>) {
 /// have flipped a toggle in System Settings; we have no event-driven way
 /// to learn about that, so we poll. Cheap (two
 /// `AVAudioApplication`/`SFSpeechRecognizer` getters).
-fn spawn_permission_refresh(cx: &mut App, model: Entity<AppModel>) {
+fn spawn_permission_refresh(
+    cx: &mut App,
+    model: Entity<AppModel>,
+) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {
             Timer::after(PERMISSION_REFRESH_INTERVAL).await;

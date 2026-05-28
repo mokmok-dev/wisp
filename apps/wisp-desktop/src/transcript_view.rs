@@ -28,8 +28,7 @@ pub struct TranscriptView {
         std::sync::Arc<dyn Fn(Permission, &mut Window, &mut gpui::App) + 'static>,
     /// Open the System Settings privacy pane for a permission. Used when
     /// the permission is already denied and only the user can re-enable it.
-    pub on_open_settings:
-        std::sync::Arc<dyn Fn(Permission, &mut Window, &mut gpui::App) + 'static>,
+    pub on_open_settings: std::sync::Arc<dyn Fn(Permission, &mut Window, &mut gpui::App) + 'static>,
     /// Toggled by the cursor-blink animation timer in main.rs so the
     /// ghost-text caret pulses.
     pub cursor_visible: bool,
@@ -193,9 +192,7 @@ impl TranscriptView {
                 div()
                     .text_xs()
                     .text_color(theme::text_secondary())
-                    .child(
-                        "These run entirely on-device. Wisp doesn't send your audio anywhere.",
-                    ),
+                    .child("These run entirely on-device. Wisp doesn't send your audio anywhere."),
             )
             .child(row_mic)
             .child(row_speech);

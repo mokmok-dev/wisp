@@ -17,12 +17,14 @@ use crate::app::AppModel;
 /// Read the current OS-side status of both permissions and write them
 /// into the model. Used at app launch and after the user returns from
 /// System Settings (we re-check on every UI tick — see `main.rs`).
-pub fn refresh(model: &Entity<AppModel>, cx: &mut App) {
+pub fn refresh(
+    model: &Entity<AppModel>,
+    cx: &mut App,
+) {
     let microphone = check_permission(Permission::Microphone);
     let speech = check_permission(Permission::SpeechRecognition);
     model.update(cx, |m, cx| {
-        let changed =
-            m.permissions.microphone != microphone || m.permissions.speech != speech;
+        let changed = m.permissions.microphone != microphone || m.permissions.speech != speech;
         m.permissions.microphone = microphone;
         m.permissions.speech = speech;
         if changed {
@@ -34,7 +36,11 @@ pub fn refresh(model: &Entity<AppModel>, cx: &mut App) {
 /// Kick off an OS permission prompt for `perm` on a background thread,
 /// write the resulting status back into the model, and clear the pending
 /// flag. Marks `perm` pending immediately so the UI can show a spinner.
-pub fn request(perm: Permission, model: Entity<AppModel>, cx: &mut App) {
+pub fn request(
+    perm: Permission,
+    model: Entity<AppModel>,
+    cx: &mut App,
+) {
     // Already in flight — ignore re-entrant clicks.
     if model.read(cx).permissions.pending.is_some() {
         return;

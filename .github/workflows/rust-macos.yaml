@@ -31,6 +31,7 @@ jobs:
           xcrun swift --version
           xcrun --find metal
       - uses: ./.github/actions/setup-nix
+      - uses: ./.github/actions/setup-rust-cache
       # Builds the WispAudioKit Swift static library through build.rs and
       # exercises the FFI round-trip via the smoke test in wisp-audiokit.
-      - run: nix develop --quiet --command cargo test -p wisp-audiokit
+      - run: nix develop .#ci --quiet --command cargo test -p wisp-audiokit

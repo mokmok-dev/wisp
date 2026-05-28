@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext, Application, AsyncApp, Bounds, Entity, Timer, TitlebarOptions, WindowBounds,
-    WindowHandle, WindowOptions, px, size,
+    App, AppContext, Application, AsyncApp, Bounds, Entity, KeyBinding, Menu, MenuItem, Timer,
+    TitlebarOptions, WindowBounds, WindowHandle, WindowOptions, actions, px, size,
 };
 
 mod app;
@@ -43,9 +43,17 @@ use transcript_view::{TranscriptView, cursor_blink_period, now, ui_tick_period};
 /// responsive when they come back.
 const PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 
+actions!(wisp_desktop, [Quit]);
+
 fn main() {
     Application::new().run(|cx| {
         cx.activate(true);
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+        cx.set_menus(vec![Menu {
+            name: "Wisp".into(),
+            items: vec![MenuItem::action("Quit Wisp", Quit)],
+        }]);
 
         let output_dir = default_output_directory();
         let runner = Arc::new(SessionRunner::spawn());

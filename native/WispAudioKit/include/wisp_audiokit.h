@@ -81,6 +81,28 @@ void wisp_session_free(WispSession* session);
  * session and is invalidated by the next mutating call on it. */
 const char* wisp_session_last_error_message(WispSession* session);
 
+/* ----- Permissions -------------------------------------------------------- */
+
+/* Permission identifiers. */
+#define WISP_PERMISSION_MICROPHONE         0
+#define WISP_PERMISSION_SPEECH_RECOGNITION 1
+
+/* Status returned by wisp_permission_status / wisp_permission_request.
+ * Negative values are reserved for "invalid permission id" / future use. */
+#define WISP_PERMISSION_STATUS_UNDETERMINED 0
+#define WISP_PERMISSION_STATUS_DENIED       1
+#define WISP_PERMISSION_STATUS_GRANTED      2
+#define WISP_PERMISSION_STATUS_RESTRICTED   3 /* speech only */
+
+/* Returns the current status of the given permission without prompting. */
+int32_t wisp_permission_status(int32_t permission);
+
+/* Triggers the OS permission prompt (if the status is undetermined) and
+ * blocks the caller until the user responds. If the status is already
+ * granted/denied/restricted, returns immediately with the current value.
+ * Safe to call from a background thread. */
+int32_t wisp_permission_request(int32_t permission);
+
 #ifdef __cplusplus
 }
 #endif

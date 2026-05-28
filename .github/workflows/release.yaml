@@ -63,9 +63,17 @@ jobs:
         # No Apple Developer ID yet; ad-hoc (`--sign -`) is enough to make
         # Gatekeeper let users open the app via right-click → Open. Once a
         # cert is available, swap in the real identity and add notarization.
+        #
+        # The entitlements file is required even for ad-hoc signing because
+        # we enable hardened runtime (--options runtime). Without
+        # `com.apple.security.device.audio-input`, AVCaptureDevice and
+        # AVAudioApplication silently return "denied" for the mic
+        # permission request — no OS prompt, no TCC entry.
         run: |
           set -euo pipefail
-          codesign --force --deep --options runtime --sign - Wisp.app
+          codesign --force --deep --options runtime \
+            --entitlements apps/wisp-desktop/wisp-desktop.entitlements \
+            --sign - Wisp.app
           codesign --verify --verbose Wisp.app
 
       - name: Create DMG

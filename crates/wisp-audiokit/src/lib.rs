@@ -7,6 +7,39 @@ mod error;
 
 pub use error::{Result, SessionError};
 
+/// TCC-style OS permission gated by Wisp at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Permission {
+    /// Microphone access. Required for the mic capture path.
+    Microphone,
+    /// On-device speech recognition. Required for both pipelines.
+    SpeechRecognition,
+}
+
+/// Current state of a single [`Permission`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PermissionStatus {
+    /// The user has not been asked yet; calling [`request_permission`] will
+    /// trigger the OS dialog.
+    Undetermined,
+    /// The user explicitly denied this permission. Re-requesting won't show
+    /// a dialog — the user has to flip it in System Settings.
+    Denied,
+    /// Granted; the corresponding capture path can be used.
+    Granted,
+    /// Restricted by a system policy (e.g. parental controls). Only
+    /// reachable for `SpeechRecognition`.
+    Restricted,
+}
+
+impl PermissionStatus {
+    /// Convenience: true iff the underlying capability is usable.
+    #[must_use]
+    pub fn is_granted(self) -> bool {
+        matches!(self, Self::Granted)
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use std::ffi::{CStr, CString};
@@ -19,6 +52,50 @@ mod imp {
     use wisp_core::SourceLabel;
 
     use crate::error::{Result, SessionError};
+    use crate::{Permission, PermissionStatus};
+
+    fn permission_to_raw(perm: Permission) -> i32 {
+        match perm {
+            Permission::Microphone => sys::WISP_PERMISSION_MICROPHONE,
+            Permission::SpeechRecognition => sys::WISP_PERMISSION_SPEECH_RECOGNITION,
+        }
+    }
+
+    fn status_from_raw(raw: i32) -> PermissionStatus {
+        match raw {
+            sys::WISP_PERMISSION_STATUS_GRANTED => PermissionStatus::Granted,
+            sys::WISP_PERMISSION_STATUS_DENIED => PermissionStatus::Denied,
+            sys::WISP_PERMISSION_STATUS_RESTRICTED => PermissionStatus::Restricted,
+            // Treat negative ("invalid permission id") as undetermined too —
+            // we never pass an invalid id from safe Rust, and conflating the
+            // two keeps the surface tidy.
+            _ => PermissionStatus::Undetermined,
+        }
+    }
+
+    /// Read the current status of `permission` from the OS. Never prompts.
+    #[must_use]
+    pub fn check_permission(permission: Permission) -> PermissionStatus {
+        // SAFETY: simple value-in, value-out call into Swift; no pointers.
+        let raw = unsafe { sys::wisp_permission_status(permission_to_raw(permission)) };
+        status_from_raw(raw)
+    }
+
+    /// Show the OS permission prompt for `permission` (only if the user has
+    /// not been asked yet) and block until they respond. Returns the
+    /// resulting status. If the status is already determined, returns it
+    /// immediately without prompting.
+    ///
+    /// Safe to call from any thread; the macOS APIs marshal the dialog to
+    /// the main thread internally. Callers from a UI event loop should run
+    /// this on a worker thread to keep the UI responsive while the user
+    /// reads the prompt.
+    #[must_use]
+    pub fn request_permission(permission: Permission) -> PermissionStatus {
+        // SAFETY: simple value-in, value-out call into Swift; no pointers.
+        let raw = unsafe { sys::wisp_permission_request(permission_to_raw(permission)) };
+        status_from_raw(raw)
+    }
 
     /// `WispAudioKit` library version (e.g. `"0.1.0"`).
     ///
@@ -274,11 +351,26 @@ mod imp {
     use wisp_core::SourceLabel;
 
     use crate::error::{Result, SessionError};
+    use crate::{Permission, PermissionStatus};
 
     /// `WispAudioKit` library version. Always empty on non-macOS targets.
     #[must_use]
     pub fn version() -> &'static str {
         ""
+    }
+
+    /// Stub — always reports `Granted` on non-macOS targets so callers can
+    /// fall through to the (stubbed) session, which will then return
+    /// `UnsupportedPlatform`. Keeps the workspace buildable on Linux CI.
+    #[must_use]
+    pub fn check_permission(_permission: Permission) -> PermissionStatus {
+        PermissionStatus::Granted
+    }
+
+    /// Stub — see [`check_permission`].
+    #[must_use]
+    pub fn request_permission(_permission: Permission) -> PermissionStatus {
+        PermissionStatus::Granted
     }
 
     /// One transcription update from a running [`Session`].
@@ -344,7 +436,7 @@ mod imp {
 }
 
 pub use imp::version;
-pub use imp::{Event, Session, SessionResult};
+pub use imp::{Event, Session, SessionResult, check_permission, request_permission};
 pub use wisp_core::SourceLabel;
 
 #[cfg(all(test, target_os = "macos"))]

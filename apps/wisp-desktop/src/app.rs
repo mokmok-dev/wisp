@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use wisp_audiokit::{Event, SessionError, SessionResult, SourceLabel};
+use wisp_audiokit::{Event, Permission, PermissionStatus, SessionError, SessionResult, SourceLabel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -20,6 +20,42 @@ pub enum SessionState {
     Recording { started_at: Instant },
     Stopping,
     Failed,
+}
+
+/// Snapshot of every permission Wisp gates Record on.
+///
+/// The UI is allowed to enter the main transcript view once both fields
+/// are `Granted`. While `pending` is `Some(p)`, a previous
+/// `request_permission(p)` call is still waiting on the OS dialog — the
+/// onboarding row for that permission shows a spinner instead of a button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Permissions {
+    pub microphone: PermissionStatus,
+    pub speech: PermissionStatus,
+    pub pending: Option<Permission>,
+}
+
+impl Permissions {
+    pub fn unknown() -> Self {
+        Self {
+            microphone: PermissionStatus::Undetermined,
+            speech: PermissionStatus::Undetermined,
+            pending: None,
+        }
+    }
+
+    /// True when both required permissions are granted; the UI can show
+    /// the normal Record screen.
+    pub fn all_granted(self) -> bool {
+        self.microphone.is_granted() && self.speech.is_granted()
+    }
+
+    pub fn set_status(&mut self, perm: Permission, status: PermissionStatus) {
+        match perm {
+            Permission::Microphone => self.microphone = status,
+            Permission::SpeechRecognition => self.speech = status,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +79,7 @@ pub struct AppModel {
     pub segments: Vec<Segment>,
     pub recent_log: VecDeque<String>,
     pub last_error: Option<SessionError>,
+    pub permissions: Permissions,
 }
 
 impl AppModel {
@@ -52,6 +89,7 @@ impl AppModel {
             segments: Vec::new(),
             recent_log: VecDeque::new(),
             last_error: None,
+            permissions: Permissions::unknown(),
         }
     }
 

@@ -28,8 +28,6 @@
             packages = with pkgs; [
               rustToolchain
               nixfmt
-              swiftformat
-              swiftlint
             ];
           };
 
@@ -37,8 +35,6 @@
             packages = with pkgs; [
               rustToolchain
               sccache
-              swiftformat
-              swiftlint
             ];
 
             shellHook = ''

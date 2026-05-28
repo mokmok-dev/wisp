@@ -25,6 +25,18 @@ pub struct WispSession {
 pub const WISP_SOURCE_MIC: i32 = 0;
 pub const WISP_SOURCE_SYSTEM: i32 = 1;
 
+/// Permission identifiers passed to [`wisp_permission_status`] /
+/// [`wisp_permission_request`].
+pub const WISP_PERMISSION_MICROPHONE: i32 = 0;
+pub const WISP_PERMISSION_SPEECH_RECOGNITION: i32 = 1;
+
+/// Status returned by [`wisp_permission_status`] /
+/// [`wisp_permission_request`]. Negative values mean "invalid permission id".
+pub const WISP_PERMISSION_STATUS_UNDETERMINED: i32 = 0;
+pub const WISP_PERMISSION_STATUS_DENIED: i32 = 1;
+pub const WISP_PERMISSION_STATUS_GRANTED: i32 = 2;
+pub const WISP_PERMISSION_STATUS_RESTRICTED: i32 = 3;
+
 /// Callback invoked for each transcription result.
 ///
 /// `text_utf8` is NOT NUL-terminated — use `text_len`. The pointer is valid
@@ -74,4 +86,16 @@ unsafe extern "C" {
     /// Returns the last error message recorded against this session, or
     /// null. Invalidated by the next mutating call.
     pub fn wisp_session_last_error_message(session: *mut WispSession) -> *const c_char;
+
+    /// Returns the current status of the given permission without prompting.
+    /// `permission` is one of `WISP_PERMISSION_*`; the return value is a
+    /// `WISP_PERMISSION_STATUS_*` value, or a negative number for an
+    /// unknown permission id.
+    pub fn wisp_permission_status(permission: i32) -> c_int;
+
+    /// Trigger the OS permission prompt (only if the status is currently
+    /// undetermined) and block until the user responds. Returns the
+    /// resulting `WISP_PERMISSION_STATUS_*`. Safe to call from any thread —
+    /// the macOS APIs marshal the dialog to the main thread internally.
+    pub fn wisp_permission_request(permission: i32) -> c_int;
 }

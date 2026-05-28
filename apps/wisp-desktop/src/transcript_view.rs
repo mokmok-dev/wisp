@@ -14,13 +14,21 @@ use gpui::{
     Context, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
     ScrollHandle, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
-use wisp_audiokit::{SessionError, SourceLabel};
+use wisp_audiokit::{Permission, PermissionStatus, SessionError, SourceLabel};
 
-use crate::app::{AppModel, Segment, SessionState};
+use crate::app::{AppModel, Permissions, Segment, SessionState};
+use crate::permissions as perms;
 
 pub struct TranscriptView {
     pub app: gpui::Entity<AppModel>,
     pub on_toggle_record: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
+    /// Request a permission. Fires the OS prompt asynchronously; the
+    /// resulting status flows back into the model.
+    pub on_request_permission:
+        std::sync::Arc<dyn Fn(Permission, &mut Window, &mut gpui::App) + 'static>,
+    /// Open the System Settings privacy pane for a permission. Used when
+    /// the permission is already denied and only the user can re-enable it.
+    pub on_open_settings: std::sync::Arc<dyn Fn(Permission, &mut Window, &mut gpui::App) + 'static>,
     /// Toggled by the cursor-blink animation timer in main.rs so the
     /// ghost-text caret pulses.
     pub cursor_visible: bool,
@@ -75,6 +83,17 @@ impl Render for TranscriptView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let app = self.app.read(cx);
+        let permissions = app.permissions;
+
+        // Gate the main UI on having both required permissions. Until then,
+        // we show an onboarding screen with per-permission rows the user
+        // can act on. This avoids the previous failure mode where the user
+        // presses Record and only then learns the app needs permissions
+        // they may or may not be able to grant.
+        if !permissions.all_granted() {
+            return self.render_onboarding(permissions).into_any_element();
+        }
+
         let segments = app.segments.clone();
         let active_idx = app.active_segment_index();
         let state = app.state;
@@ -115,6 +134,7 @@ impl Render for TranscriptView {
                 log_count,
                 last_error.as_ref(),
             ))
+            .into_any_element()
     }
 }
 
@@ -134,6 +154,199 @@ impl TranscriptView {
             .border_color(theme::border())
             .child(render_brand())
             .child(render_record_button(state, toggle))
+    }
+
+    fn render_onboarding(
+        &self,
+        permissions: Permissions,
+    ) -> impl IntoElement {
+        let pending = permissions.pending;
+        let row_mic = self.render_permission_row(
+            Permission::Microphone,
+            permissions.microphone,
+            pending == Some(Permission::Microphone),
+        );
+        let row_speech = self.render_permission_row(
+            Permission::SpeechRecognition,
+            permissions.speech,
+            pending == Some(Permission::SpeechRecognition),
+        );
+
+        let card = div()
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .w(px(520.0))
+            .p(px(24.0))
+            .bg(theme::surface())
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .text_color(theme::text_primary())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Wisp needs a couple of permissions"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .child("These run entirely on-device. Wisp doesn't send your audio anywhere."),
+            )
+            .child(row_mic)
+            .child(row_speech);
+
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .size_full()
+            .bg(theme::bg())
+            .text_color(theme::text_primary())
+            .child(card)
+    }
+
+    fn render_permission_row(
+        &self,
+        perm: Permission,
+        status: PermissionStatus,
+        is_pending: bool,
+    ) -> impl IntoElement {
+        let title_text = perms::label(perm);
+        let rationale_text = perms::rationale(perm);
+        let status_text = perms::status_label(status);
+
+        let info = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .flex_grow()
+            .min_w_0()
+            .child(
+                div()
+                    .text_color(theme::text_primary())
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(title_text),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_tertiary())
+                    .child(rationale_text),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(status_color(status))
+                    .child(status_text),
+            );
+
+        let action = self.render_permission_action(perm, status, is_pending);
+
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .py(px(12.0))
+            .px(px(12.0))
+            .bg(theme::bg())
+            .rounded(px(8.0))
+            .border_l_2()
+            .border_color(status_color(status))
+            .child(info)
+            .child(action)
+    }
+
+    fn render_permission_action(
+        &self,
+        perm: Permission,
+        status: PermissionStatus,
+        is_pending: bool,
+    ) -> gpui::AnyElement {
+        // Already granted — nothing to do; render a static check label so
+        // the row stays balanced.
+        if status == PermissionStatus::Granted {
+            return div()
+                .px(px(14.0))
+                .py(px(7.0))
+                .text_sm()
+                .text_color(theme::text_tertiary())
+                .child("Allowed")
+                .into_any_element();
+        }
+        // Restricted means a system policy is preventing this; there is no
+        // user-facing toggle. Just label it.
+        if status == PermissionStatus::Restricted {
+            return div()
+                .px(px(14.0))
+                .py(px(7.0))
+                .text_sm()
+                .text_color(theme::text_tertiary())
+                .child("Restricted")
+                .into_any_element();
+        }
+        // A request is already in flight — show a non-interactive label.
+        if is_pending {
+            return div()
+                .px(px(14.0))
+                .py(px(7.0))
+                .text_sm()
+                .text_color(theme::text_tertiary())
+                .child("Waiting…")
+                .into_any_element();
+        }
+
+        // Undetermined → can re-trigger the OS prompt.
+        // Denied → can't, OS won't prompt again; jump straight to Settings.
+        let (label, action_kind) = match status {
+            PermissionStatus::Denied => ("Open Settings", ActionKind::OpenSettings),
+            _ => ("Allow", ActionKind::Request),
+        };
+        let on_request = self.on_request_permission.clone();
+        let on_open = self.on_open_settings.clone();
+        let id_label = match action_kind {
+            ActionKind::Request => "permission-allow",
+            ActionKind::OpenSettings => "permission-open-settings",
+        };
+        // Element IDs must be unique per render tree; suffix with the
+        // permission discriminant so the two rows don't collide.
+        let suffix = match perm {
+            Permission::Microphone => "mic",
+            Permission::SpeechRecognition => "speech",
+        };
+        let id = ElementId::Name(format!("{id_label}-{suffix}").into());
+        div()
+            .id(id)
+            .px(px(14.0))
+            .py(px(7.0))
+            .rounded_full()
+            .bg(theme::record_idle())
+            .text_color(theme::text_primary())
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .on_click(move |_event, window, cx| match action_kind {
+                ActionKind::Request => on_request(perm, window, cx),
+                ActionKind::OpenSettings => on_open(perm, window, cx),
+            })
+            .child(label)
+            .into_any_element()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ActionKind {
+    Request,
+    OpenSettings,
+}
+
+fn status_color(status: PermissionStatus) -> gpui::Rgba {
+    match status {
+        PermissionStatus::Granted => theme::mic_accent(),
+        PermissionStatus::Denied | PermissionStatus::Restricted => theme::record_red(),
+        PermissionStatus::Undetermined => theme::text_tertiary(),
     }
 }
 

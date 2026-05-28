@@ -1,5 +1,7 @@
+@preconcurrency import AVFoundation
 import Foundation
 import os.lock
+import Speech
 
 // MARK: - C-ABI bridge
 
@@ -245,6 +247,116 @@ public func wisp_session_free(session: OpaquePointer?) {
 public func wisp_session_last_error_message(session: OpaquePointer?) -> UnsafePointer<CChar>? {
     guard let handle = unbox(session) else { return nil }
     return handle.errorPointer()
+}
+
+// MARK: - Permissions
+
+//
+// Two TCC services gate Wisp: microphone (AVAudioApplication) and speech
+// recognition (SFSpeechRecognizer). Both have a synchronous status getter
+// and an async request API; we expose both shapes so the UI can decide
+// between "open the OS prompt" and "deep-link to System Settings" based on
+// the current state.
+//
+// Permission identifiers (kept in sync with wisp_audiokit.h):
+//   0 = microphone
+//   1 = speech recognition
+//
+// Status identifiers:
+//   0 = undetermined (never asked)
+//   1 = denied
+//   2 = granted
+//   3 = restricted (speech only — e.g. parental controls)
+//   negative = invalid permission id
+
+private let wispPermissionMicrophone: Int32 = 0
+private let wispPermissionSpeech: Int32 = 1
+
+private let wispPermissionStatusUndetermined: Int32 = 0
+private let wispPermissionStatusDenied: Int32 = 1
+private let wispPermissionStatusGranted: Int32 = 2
+private let wispPermissionStatusRestricted: Int32 = 3
+
+/// Returns the current status of the given permission without prompting.
+///
+/// Microphone uses `AVCaptureDevice` (the macOS-canonical media capture
+/// permission API), not `AVAudioApplication` — the latter is primarily an
+/// iOS API and its request method doesn't reliably trigger the TCC prompt
+/// on macOS.
+@_cdecl("wisp_permission_status")
+public func wisp_permission_status(permission: Int32) -> Int32 {
+    switch permission {
+    case wispPermissionMicrophone:
+        avAuthorizationStatusToWisp(AVCaptureDevice.authorizationStatus(for: .audio))
+    case wispPermissionSpeech:
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .notDetermined: wispPermissionStatusUndetermined
+        case .denied: wispPermissionStatusDenied
+        case .authorized: wispPermissionStatusGranted
+        case .restricted: wispPermissionStatusRestricted
+        @unknown default: wispPermissionStatusUndetermined
+        }
+    default:
+        -1
+    }
+}
+
+private func avAuthorizationStatusToWisp(_ status: AVAuthorizationStatus) -> Int32 {
+    switch status {
+    case .notDetermined: wispPermissionStatusUndetermined
+    case .denied: wispPermissionStatusDenied
+    case .authorized: wispPermissionStatusGranted
+    case .restricted: wispPermissionStatusRestricted
+    @unknown default: wispPermissionStatusUndetermined
+    }
+}
+
+/// Triggers the OS permission prompt (if undetermined) and blocks the
+/// caller until the user has responded — or returns immediately with the
+/// current status if the OS would not show a prompt (already granted /
+/// denied / restricted).
+///
+/// Called from a background thread by the Rust side; the underlying
+/// callbacks fire on arbitrary queues so we just gate on a semaphore.
+@_cdecl("wisp_permission_request")
+public func wisp_permission_request(permission: Int32) -> Int32 {
+    switch permission {
+    case wispPermissionMicrophone:
+        if AVCaptureDevice.authorizationStatus(for: .audio) != .notDetermined {
+            return wisp_permission_status(permission: permission)
+        }
+        let sem = DispatchSemaphore(value: 0)
+        let resultSlot = OSAllocatedUnfairLock<Bool>(initialState: false)
+        AVCaptureDevice.requestAccess(for: .audio) { granted in
+            resultSlot.withLock { $0 = granted }
+            sem.signal()
+        }
+        sem.wait()
+        return resultSlot.withLock { $0 } ? wispPermissionStatusGranted
+            : wispPermissionStatusDenied
+    case wispPermissionSpeech:
+        if SFSpeechRecognizer.authorizationStatus() != .notDetermined {
+            return wisp_permission_status(permission: permission)
+        }
+        let sem = DispatchSemaphore(value: 0)
+        let resultSlot = OSAllocatedUnfairLock<SFSpeechRecognizerAuthorizationStatus>(
+            initialState: .notDetermined
+        )
+        SFSpeechRecognizer.requestAuthorization { status in
+            resultSlot.withLock { $0 = status }
+            sem.signal()
+        }
+        sem.wait()
+        return switch resultSlot.withLock({ $0 }) {
+        case .notDetermined: wispPermissionStatusUndetermined
+        case .denied: wispPermissionStatusDenied
+        case .authorized: wispPermissionStatusGranted
+        case .restricted: wispPermissionStatusRestricted
+        @unknown default: wispPermissionStatusUndetermined
+        }
+    default:
+        return -1
+    }
 }
 
 // MARK: - Internal helpers

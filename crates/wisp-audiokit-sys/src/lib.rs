@@ -4,12 +4,16 @@
 //! crate's `build.rs` into a static library (`libWispAudioKit.a`). The C ABI
 //! surface is hand-mirrored from `native/WispAudioKit/include/wisp_audiokit.h`.
 //!
-//! On non-macOS targets every binding is a stub returning a null pointer or
-//! a non-zero error code so the workspace stays buildable.
+//! `WispAudioKit` is macOS-only, so the `extern "C"` block below is gated to
+//! `target_os = "macos"`. On other targets the crate exposes only the type
+//! aliases and constants — there are no function symbols to link against,
+//! and consumers must (and do) cfg-gate any code that touches them.
 
 #![allow(unsafe_code, non_camel_case_types)]
 
-use std::os::raw::{c_char, c_int, c_void};
+#[cfg(target_os = "macos")]
+use std::os::raw::c_int;
+use std::os::raw::{c_char, c_void};
 
 /// Opaque handle for a `WispSession`. Construct via [`wisp_session_new`].
 #[repr(C)]
@@ -71,74 +75,3 @@ unsafe extern "C" {
     /// null. Invalidated by the next mutating call.
     pub fn wisp_session_last_error_message(session: *mut WispSession) -> *const c_char;
 }
-
-// ---- Non-macOS stubs ----------------------------------------------------
-
-#[cfg(not(target_os = "macos"))]
-mod stubs {
-    //! Non-macOS stubs. `WispAudioKit` is macOS-only, so on Linux / Windows
-    //! every entry point is a no-op returning null / `-1`. The functions are
-    //! marked `unsafe` only to keep their signatures interchangeable with
-    //! the real `extern "C"` declarations on macOS — they are trivially
-    //! safe to call.
-
-    use super::{WispLogCallback, WispResultCallback, WispSession, c_char, c_int, c_void};
-
-    /// Stub: always returns null on non-macOS.
-    ///
-    /// # Safety
-    /// Trivially safe; no pointers are dereferenced.
-    #[must_use]
-    pub unsafe fn wisp_audiokit_version() -> *const c_char {
-        core::ptr::null()
-    }
-
-    /// Stub: always returns null on non-macOS.
-    ///
-    /// # Safety
-    /// Trivially safe; no pointers are dereferenced.
-    pub unsafe fn wisp_session_new(
-        _output_dir: *const c_char,
-        _locale: *const c_char,
-        _on_result: Option<WispResultCallback>,
-        _on_log: Option<WispLogCallback>,
-        _user_data: *mut c_void,
-    ) -> *mut WispSession {
-        core::ptr::null_mut()
-    }
-
-    /// Stub: always returns `-1` on non-macOS.
-    ///
-    /// # Safety
-    /// Trivially safe; no pointers are dereferenced.
-    pub unsafe fn wisp_session_start(_session: *mut WispSession) -> c_int {
-        -1
-    }
-
-    /// Stub: no-op on non-macOS.
-    ///
-    /// # Safety
-    /// Trivially safe; no pointers are dereferenced.
-    pub unsafe fn wisp_session_stop(_session: *mut WispSession) {}
-
-    /// Stub: no-op on non-macOS.
-    ///
-    /// # Safety
-    /// Trivially safe; no pointers are dereferenced.
-    pub unsafe fn wisp_session_free(_session: *mut WispSession) {}
-
-    /// Stub: always returns null on non-macOS.
-    ///
-    /// # Safety
-    /// Trivially safe; no pointers are dereferenced.
-    #[must_use]
-    pub unsafe fn wisp_session_last_error_message(_session: *mut WispSession) -> *const c_char {
-        core::ptr::null()
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub use stubs::{
-    wisp_audiokit_version, wisp_session_free, wisp_session_last_error_message, wisp_session_new,
-    wisp_session_start, wisp_session_stop,
-};

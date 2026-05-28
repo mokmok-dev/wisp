@@ -24,6 +24,7 @@ unsafe extern "C" {
 ///
 /// # Safety
 /// Trivially safe; included only so the workspace builds on non-macOS hosts.
+#[must_use]
 pub unsafe fn wisp_audiokit_version() -> *const c_char {
     std::ptr::null()
 }

@@ -26,5 +26,7 @@ jobs:
       - uses: ./.github/actions/setup-nix
       - uses: ./.github/actions/setup-rust-cache
       - run: nix develop .#ci --quiet --command cargo fmt --all -- --check
-      - run: nix develop .#ci --quiet --command cargo clippy --workspace --all-targets -- -D warnings
-      - run: nix develop .#ci --quiet --command cargo test --workspace --all-targets
+      # wisp-desktop is macOS-only (GPUI + WispAudioKit); Linux lacks the X11
+      # libs GPUI links against. macOS coverage lives in rust-macos.yaml.
+      - run: nix develop .#ci --quiet --command cargo clippy --workspace --exclude wisp-desktop --all-targets -- -D warnings
+      - run: nix develop .#ci --quiet --command cargo test --workspace --exclude wisp-desktop --all-targets

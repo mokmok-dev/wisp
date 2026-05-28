@@ -76,13 +76,27 @@ unsafe extern "C" {
 
 #[cfg(not(target_os = "macos"))]
 mod stubs {
+    //! Non-macOS stubs. `WispAudioKit` is macOS-only, so on Linux / Windows
+    //! every entry point is a no-op returning null / `-1`. The functions are
+    //! marked `unsafe` only to keep their signatures interchangeable with
+    //! the real `extern "C"` declarations on macOS — they are trivially
+    //! safe to call.
+
     use super::*;
 
+    /// Stub: always returns null on non-macOS.
+    ///
+    /// # Safety
+    /// Trivially safe; no pointers are dereferenced.
     #[must_use]
     pub unsafe fn wisp_audiokit_version() -> *const c_char {
         core::ptr::null()
     }
 
+    /// Stub: always returns null on non-macOS.
+    ///
+    /// # Safety
+    /// Trivially safe; no pointers are dereferenced.
     pub unsafe fn wisp_session_new(
         _output_dir: *const c_char,
         _locale: *const c_char,
@@ -93,14 +107,30 @@ mod stubs {
         core::ptr::null_mut()
     }
 
+    /// Stub: always returns `-1` on non-macOS.
+    ///
+    /// # Safety
+    /// Trivially safe; no pointers are dereferenced.
     pub unsafe fn wisp_session_start(_session: *mut WispSession) -> c_int {
         -1
     }
 
+    /// Stub: no-op on non-macOS.
+    ///
+    /// # Safety
+    /// Trivially safe; no pointers are dereferenced.
     pub unsafe fn wisp_session_stop(_session: *mut WispSession) {}
 
+    /// Stub: no-op on non-macOS.
+    ///
+    /// # Safety
+    /// Trivially safe; no pointers are dereferenced.
     pub unsafe fn wisp_session_free(_session: *mut WispSession) {}
 
+    /// Stub: always returns null on non-macOS.
+    ///
+    /// # Safety
+    /// Trivially safe; no pointers are dereferenced.
     #[must_use]
     pub unsafe fn wisp_session_last_error_message(_session: *mut WispSession) -> *const c_char {
         core::ptr::null()

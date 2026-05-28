@@ -197,7 +197,10 @@ impl TranscriptView {
                 false,
                 &self.scroll_handle,
             ))
-            .child(render_history_status_bar(segments.len()))
+            .child(render_count_status_bar(format!(
+                "{} segments",
+                segments.len()
+            )))
     }
 
     fn render_library(
@@ -230,7 +233,10 @@ impl TranscriptView {
             .text_color(theme::text_primary())
             .child(header)
             .child(body)
-            .child(render_library_status_bar(sessions.len()))
+            .child(render_count_status_bar(format!(
+                "{} sessions",
+                sessions.len()
+            )))
     }
 
     fn render_live_top_bar(
@@ -840,7 +846,9 @@ fn history_subtitle(session: &StoredSession) -> String {
     }
 }
 
-fn render_library_status_bar(count: usize) -> impl IntoElement {
+/// A minimal status bar showing a single left-aligned count label. Shared
+/// by the library ("N sessions") and history ("N segments") screens.
+fn render_count_status_bar(text: String) -> impl IntoElement {
     div()
         .h(px(32.0))
         .flex()
@@ -853,24 +861,7 @@ fn render_library_status_bar(count: usize) -> impl IntoElement {
             div()
                 .text_xs()
                 .text_color(theme::text_secondary())
-                .child(format!("{count} sessions")),
-        )
-}
-
-fn render_history_status_bar(segment_count: usize) -> impl IntoElement {
-    div()
-        .h(px(32.0))
-        .flex()
-        .items_center()
-        .justify_between()
-        .px(px(20.0))
-        .border_t_1()
-        .border_color(theme::border())
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme::text_secondary())
-                .child(format!("{segment_count} segments")),
+                .child(text),
         )
 }
 

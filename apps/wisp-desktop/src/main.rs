@@ -84,10 +84,10 @@ fn main() {
             runner.clone(),
             storage.clone(),
             model.clone(),
-            recordings_dir.clone(),
+            recordings_dir,
         );
 
-        spawn_session_update_pump(cx, runner, storage, model.clone(), recordings_dir);
+        spawn_session_update_pump(cx, runner, storage, model.clone());
         spawn_cursor_blink(cx, window);
         spawn_permission_refresh(cx, model);
     });
@@ -172,7 +172,6 @@ fn spawn_session_update_pump(
     runner: Arc<SessionRunner>,
     storage: SharedStorage,
     model: Entity<AppModel>,
-    _recordings_dir: PathBuf,
 ) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {

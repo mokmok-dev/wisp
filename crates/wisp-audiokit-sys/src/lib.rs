@@ -82,7 +82,7 @@ mod stubs {
     //! the real `extern "C"` declarations on macOS — they are trivially
     //! safe to call.
 
-    use super::*;
+    use super::{WispLogCallback, WispResultCallback, WispSession, c_char, c_int, c_void};
 
     /// Stub: always returns null on non-macOS.
     ///

@@ -263,15 +263,80 @@ mod imp {
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
+    use std::path::Path;
+
+    use wisp_core::SourceLabel;
+
     /// `WispAudioKit` library version. Always empty on non-macOS targets.
     #[must_use]
     pub fn version() -> &'static str {
         ""
     }
+
+    /// One transcription update from a running [`Session`].
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct SessionResult {
+        pub source: SourceLabel,
+        pub segment_id: u64,
+        pub text: String,
+        pub start_seconds: f64,
+        pub end_seconds: f64,
+    }
+
+    /// Either a transcription result or a log line emitted by the session.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Event {
+        Result(SessionResult),
+        Log(String),
+    }
+
+    /// Errors surfaced by [`Session`] operations.
+    #[derive(Debug, thiserror::Error)]
+    pub enum SessionError {
+        #[error("WispAudioKit is only available on macOS")]
+        UnsupportedPlatform,
+    }
+
+    /// Result alias for session operations.
+    pub type Result<T> = std::result::Result<T, SessionError>;
+
+    /// Stub session — always returns [`SessionError::UnsupportedPlatform`].
+    pub struct Session;
+
+    impl Session {
+        /// # Errors
+        /// Always returns [`SessionError::UnsupportedPlatform`].
+        pub fn new(
+            _output_dir: impl AsRef<Path>,
+            _locale: &str,
+        ) -> Result<Self> {
+            Err(SessionError::UnsupportedPlatform)
+        }
+
+        /// # Errors
+        /// Always returns [`SessionError::UnsupportedPlatform`].
+        pub fn start(&self) -> Result<()> {
+            Err(SessionError::UnsupportedPlatform)
+        }
+
+        /// No-op on non-macOS targets.
+        pub fn stop(&self) {}
+
+        /// Always returns `None`.
+        #[must_use]
+        pub fn try_recv(&self) -> Option<Event> {
+            None
+        }
+
+        /// Always returns `None`.
+        #[must_use]
+        pub fn recv(&self) -> Option<Event> {
+            None
+        }
+    }
 }
 
 pub use imp::version;
-#[cfg(target_os = "macos")]
 pub use imp::{Event, Session, SessionError, SessionResult};
 pub use wisp_core::SourceLabel;
 

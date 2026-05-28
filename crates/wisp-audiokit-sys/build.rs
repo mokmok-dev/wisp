@@ -57,20 +57,17 @@ fn main() {
     // paths into DEVELOPER_DIR / SDKROOT. The /usr/bin/swift driver then
     // can't find swift-frontend (it's not in the Nix SDK) and the SDK
     // version doesn't match the toolchain. Detect Nix-store paths and fall
-    // back to the Command Line Tools, which is the toolchain the Swift
-    // package already targets. Real Xcode installs (DEVELOPER_DIR pointing
-    // somewhere outside /nix/store) are honored as-is.
+    // back to a real Apple toolchain: prefer Xcode (GitHub macOS runners
+    // and most local dev machines), then the Command Line Tools. Real
+    // DEVELOPER_DIR overrides (anything not under /nix/store) are honored
+    // as-is.
     let developer_dir = match env::var("DEVELOPER_DIR") {
         Ok(v) if !v.starts_with("/nix/store/") => v.into(),
-        _ => std::ffi::OsString::from("/Library/Developer/CommandLineTools"),
+        _ => detect_developer_dir(),
     };
     let sdk_root = match env::var("SDKROOT") {
         Ok(v) if !v.starts_with("/nix/store/") => v.into(),
-        _ => {
-            let mut p = PathBuf::from(&developer_dir);
-            p.push("SDKs/MacOSX.sdk");
-            p.into_os_string()
-        },
+        _ => detect_sdk_root(&developer_dir),
     };
 
     let configure = |cmd: &mut Command| {
@@ -169,4 +166,42 @@ fn main() {
     ] {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
+}
+
+/// Pick a developer directory when `DEVELOPER_DIR` isn't usable (unset or
+/// pointing into the Nix store). Tries Xcode first because GitHub's macOS
+/// runners ship Xcode but not the standalone Command Line Tools, then
+/// falls back to CLT for local dev machines that only have CLT installed.
+fn detect_developer_dir() -> std::ffi::OsString {
+    const CANDIDATES: &[&str] = &[
+        "/Applications/Xcode.app/Contents/Developer",
+        "/Library/Developer/CommandLineTools",
+    ];
+    for c in CANDIDATES {
+        if std::path::Path::new(c).exists() {
+            return c.into();
+        }
+    }
+    // Last-ditch: hand back the CLT path even if it doesn't exist; the
+    // subsequent `swift build` will fail with a clearer error than we
+    // could produce here.
+    "/Library/Developer/CommandLineTools".into()
+}
+
+/// Locate the macOS SDK under a given developer directory. CLT places it
+/// at `$DEV/SDKs/MacOSX.sdk`; Xcode places it at
+/// `$DEV/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk`. Picks
+/// whichever exists; falls back to the CLT layout otherwise.
+fn detect_sdk_root(developer_dir: &std::ffi::OsStr) -> std::ffi::OsString {
+    let dev = PathBuf::from(developer_dir);
+    let candidates = [
+        dev.join("SDKs/MacOSX.sdk"),
+        dev.join("Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"),
+    ];
+    for c in &candidates {
+        if c.exists() {
+            return c.clone().into_os_string();
+        }
+    }
+    candidates[0].clone().into_os_string()
 }

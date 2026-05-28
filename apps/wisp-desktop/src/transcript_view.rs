@@ -254,8 +254,15 @@ fn render_segment(
     } else {
         seg.text.clone()
     };
+    // `min_w_0` is the CSS dance that lets a flex item shrink below its
+    // intrinsic content width. Without it, long Japanese strings (no
+    // whitespace, so no implicit break points) just blow past the right
+    // edge of the window. `whitespace_normal` keeps wrapping enabled even
+    // when content is wider than the box.
     let body = div()
         .flex_grow()
+        .min_w_0()
+        .whitespace_normal()
         .text_color(text_color)
         .line_height(px(22.0))
         .child(display);
@@ -263,6 +270,7 @@ fn render_segment(
     div()
         .flex()
         .items_start()
+        .w_full()
         .gap(px(12.0))
         .py(px(8.0))
         .px(px(12.0))
@@ -273,6 +281,7 @@ fn render_segment(
         .child(
             div()
                 .w(px(36.0))
+                .flex_none()
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(accent)

@@ -85,6 +85,14 @@ impl AppModel {
 
     /// Either revise the active partial for this source or start a new
     /// segment, finalising the previous one for the same source.
+    ///
+    /// `SpeechAnalyzer` sometimes emits the same utterance under two
+    /// distinct segment IDs — once when it ratifies the previous range,
+    /// once when it starts the next one — even though both carry the
+    /// (nearly) same text. We dedupe those by checking text similarity
+    /// against the latest segment for the same source: if it looks like a
+    /// continuation, we adopt the new ID + text in place instead of
+    /// pushing a duplicate row.
     fn upsert_segment(
         &mut self,
         result: SessionResult,
@@ -100,7 +108,18 @@ impl AppModel {
                 seg.end_seconds = result.end_seconds;
                 return;
             }
-            // Newer segment_id for the same source ⇒ the previous one is locked in.
+            // Different segment ID for the same source. If the text looks
+            // like a continuation/refinement of the previous segment,
+            // overwrite in place instead of creating a visually duplicated
+            // row. Otherwise the previous segment is locked in and we push
+            // a fresh one.
+            if looks_like_continuation(&seg.text, &result.text) {
+                seg.id = result.segment_id;
+                seg.text = result.text;
+                seg.start_seconds = result.start_seconds;
+                seg.end_seconds = result.end_seconds;
+                return;
+            }
             seg.is_final = true;
             break;
         }
@@ -129,6 +148,44 @@ impl Default for AppModel {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Heuristic: do these two strings look like the same utterance being
+/// emitted under two segment IDs?
+///
+/// Combines a common-prefix and common-suffix match against the shorter
+/// length of the two strings, so that small in-the-middle revisions (like
+/// `MaOS → MacOS`) still register as a continuation. Returns true when
+/// the matched chars cover at least 60% of the shorter string (with a
+/// floor of 6 characters). Tuned to catch `SpeechAnalyzer`'s "ratify
+/// previous + begin next" double-emit and small wording revisions, while
+/// not collapsing genuinely separate short utterances.
+fn looks_like_continuation(
+    prev: &str,
+    new: &str,
+) -> bool {
+    if prev == new {
+        return true;
+    }
+    if prev.is_empty() || new.is_empty() {
+        return false;
+    }
+    let common_prefix = prev
+        .chars()
+        .zip(new.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let common_suffix = prev
+        .chars()
+        .rev()
+        .zip(new.chars().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let shorter = std::cmp::min(prev.chars().count(), new.chars().count());
+    // Cap so prefix + suffix can't overlap on tiny strings.
+    let matched = std::cmp::min(common_prefix + common_suffix, shorter);
+    let threshold = std::cmp::max(6, shorter * 6 / 10);
+    matched >= threshold
 }
 
 #[cfg(test)]
@@ -189,6 +246,59 @@ mod tests {
         m.ingest(Event::Result(r(SourceLabel::Mic, 2, "b")));
         m.ingest(Event::Result(r(SourceLabel::System, 1, "c")));
         assert_eq!(m.active_segment_index(), Some(2));
+    }
+
+    #[test]
+    fn duplicate_text_under_new_segment_id_merges() {
+        let mut m = AppModel::new();
+        m.ingest(Event::Result(r(
+            SourceLabel::Mic,
+            1,
+            "おはようございます。",
+        )));
+        // SpeechAnalyzer re-emits the same utterance under segment 2 —
+        // should merge into the existing row, not push a duplicate.
+        m.ingest(Event::Result(r(
+            SourceLabel::Mic,
+            2,
+            "おはようございます。",
+        )));
+        assert_eq!(m.segments.len(), 1, "duplicate text should be merged");
+        assert_eq!(m.segments[0].id, 2, "merged row should adopt the new id");
+        assert!(!m.segments[0].is_final, "still the active partial");
+    }
+
+    #[test]
+    fn small_typo_revision_merges() {
+        let mut m = AppModel::new();
+        m.ingest(Event::Result(r(
+            SourceLabel::Mic,
+            1,
+            "MaOSの標準機能を使って",
+        )));
+        // Same utterance, but SpeechAnalyzer corrects "MaOS" → "MacOS" and
+        // routes it through a new segment ID.
+        m.ingest(Event::Result(r(
+            SourceLabel::Mic,
+            2,
+            "MacOSの標準機能を使って",
+        )));
+        assert_eq!(m.segments.len(), 1, "small typo revision should merge");
+        assert!(m.segments[0].text.contains("MacOS"));
+    }
+
+    #[test]
+    fn dissimilar_text_starts_a_new_segment() {
+        let mut m = AppModel::new();
+        m.ingest(Event::Result(r(SourceLabel::Mic, 1, "おはようございます")));
+        m.ingest(Event::Result(r(
+            SourceLabel::Mic,
+            2,
+            "今日はいい天気ですね",
+        )));
+        assert_eq!(m.segments.len(), 2, "different utterances should not merge");
+        assert!(m.segments[0].is_final);
+        assert!(!m.segments[1].is_final);
     }
 
     #[test]

@@ -1,0 +1,95 @@
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0). Must already exist."
+        required: true
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: write
+  actions: write
+  id-token: write
+jobs:
+  macos:
+    # wisp-desktop links against APIs that ship only in macOS 26 (Tahoe),
+    # so the build host has to be Tahoe too. macos-26 is the
+    # GitHub-hosted Apple Silicon runner image for it.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve tag and version
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcrun swift --version
+          xcrun --find metal
+
+      - uses: ./.github/actions/setup-nix
+      - uses: ./.github/actions/setup-rust-cache
+
+      - name: Build wisp-desktop (release)
+        run: nix develop .#ci --quiet --command cargo build -p wisp-desktop --release --locked
+
+      - name: Assemble Wisp.app bundle
+        run: |
+          set -euo pipefail
+          APP="Wisp.app"
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/release/wisp-desktop "$APP/Contents/MacOS/wisp-desktop"
+          chmod +x "$APP/Contents/MacOS/wisp-desktop"
+          sed "s/__VERSION__/${{ steps.meta.outputs.version }}/g" \
+            apps/wisp-desktop/Info.plist > "$APP/Contents/Info.plist"
+          /usr/bin/plutil -lint "$APP/Contents/Info.plist"
+
+      - name: Ad-hoc codesign
+        # No Apple Developer ID yet; ad-hoc (`--sign -`) is enough to make
+        # Gatekeeper let users open the app via right-click → Open. Once a
+        # cert is available, swap in the real identity and add notarization.
+        run: |
+          set -euo pipefail
+          codesign --force --deep --options runtime --sign - Wisp.app
+          codesign --verify --verbose Wisp.app
+
+      - name: Create DMG
+        id: dmg
+        run: |
+          set -euo pipefail
+          DMG="wisp-${{ steps.meta.outputs.version }}-aarch64-apple-darwin.dmg"
+          STAGE="$(mktemp -d)"
+          ditto Wisp.app "$STAGE/Wisp.app"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create \
+            -volname "Wisp" \
+            -srcfolder "$STAGE" \
+            -ov -format UDZO \
+            "$DMG"
+          echo "path=$DMG" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: ${{ steps.dmg.outputs.path }}

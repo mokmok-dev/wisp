@@ -11,9 +11,9 @@
 
 #![allow(unsafe_code, non_camel_case_types)]
 
-use std::os::raw::{c_char, c_void};
 #[cfg(target_os = "macos")]
 use std::os::raw::c_int;
+use std::os::raw::{c_char, c_void};
 
 /// Opaque handle for a `WispSession`. Construct via [`wisp_session_new`].
 #[repr(C)]
@@ -75,4 +75,3 @@ unsafe extern "C" {
     /// null. Invalidated by the next mutating call.
     pub fn wisp_session_last_error_message(session: *mut WispSession) -> *const c_char;
 }
-

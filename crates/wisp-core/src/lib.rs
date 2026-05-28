@@ -2,4 +2,4 @@
 //!
 //! Kept platform-agnostic so the same types flow from the Swift audio
 //! framework wrapper (`wisp-audiokit`) into storage (`wisp-storage`) and
-//! the GPUI desktop app (`wisp-desktop`).
+//! the `GPUI` desktop app (`wisp-desktop`).

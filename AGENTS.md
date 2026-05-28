@@ -2,35 +2,59 @@
 
 ## Cursor Cloud specific instructions
 
-This is a macOS desktop app (on-device meeting transcription) with two main components:
+macOS 向けオンデバイス会議文字起こしアプリ。開発環境は Nix flake で管理。
 
-### Components
+### Nix daemon の起動
 
-| Component | Language | Path | Cloud Agent Scope |
+update script が `nix-daemon` を起動するが、万が一動いていなければ:
+
+```sh
+sudo systemctl start nix-daemon.socket
+```
+
+### 開発シェル
+
+全てのコマンドは `nix develop .#default` 経由で実行する（Rust toolchain + sccache）:
+
+```sh
+nix develop .#default --quiet --command <cmd>
+```
+
+### コンポーネント
+
+| コンポーネント | 言語 | パス | Cloud Agent スコープ |
 |---|---|---|---|
 | Rust workspace (`wisp-desktop`, `wisp-core`, `wisp-storage`) | Rust 1.95.0 | `/` (root `Cargo.toml`) | Full lint/test/build/run |
-| WispAudioKit + wispctl | Swift 6.0 | `native/WispAudioKit/` | Lint only (`swiftformat`); build requires macOS 26.0+ |
+| WispAudioKit + wispctl | Swift 6.0 | `native/WispAudioKit/` | Lint のみ; ビルドは macOS 26.0+ 必須 |
 
-### Rust (full CI parity)
+### Rust（CI 同等）
 
-Standard CI commands from `.github/workflows/rust.yaml`:
+`.github/workflows/rust.yaml` 参照:
 
-- `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace --all-targets`
-- `cargo run -p wisp-desktop` — runs the skeleton desktop app
+```sh
+nix develop .#default --quiet --command cargo fmt --all -- --check
+nix develop .#default --quiet --command cargo clippy --workspace --all-targets -- -D warnings
+nix develop .#default --quiet --command cargo test --workspace --all-targets
+nix develop .#default --quiet --command cargo run -p wisp-desktop
+```
 
-### Swift (lint only on Linux)
+### Swift lint（Linux では lint のみ）
 
-The Swift code (`native/WispAudioKit/`) targets macOS 26.0+ and cannot be compiled on Linux. Only formatting lint is possible:
+Swift コード (`native/WispAudioKit/`) は macOS 26.0+ 専用。Linux ではフォーマット lint のみ可能。`swiftformat` は `.#ci` シェルに含まれる:
 
-- `swiftformat --lint native/WispAudioKit/Sources`
+```sh
+nix develop .#ci --quiet --command swiftformat --lint native/WispAudioKit/Sources
+```
 
-The `swiftformat` binary (v0.61.1) must be installed separately — see update script. Config is in `.swiftformat` at the repo root.
+### Nix フォーマットチェック
 
-### Non-obvious notes
+```sh
+nix develop .#ci --quiet --command nixfmt --check flake.nix
+```
 
-- The project uses Nix flakes + direnv (`.envrc`) for local dev on macOS. Cloud Agents skip Nix and install Rust via `rustup` (already present) and `swiftformat` from GitHub releases.
-- `rust-toolchain.toml` pins Rust 1.95.0; `rustup` auto-resolves this.
-- Workspace lints are strict: `clippy::all` + `clippy::pedantic` at warn level, `unsafe_code` denied. See `Cargo.toml` `[workspace.lints]`.
-- `.rustfmt.toml` uses edition 2024 style with `fn_params_layout = "Vertical"`.
+### 注意点
+
+- `.#default` シェルは `RUSTC_WRAPPER=sccache` を自動設定する。
+- `.#ci` シェルは `rustToolchain` + `nixfmt` + `swiftformat` を提供する（sccache なし）。
+- Workspace lint は厳格: `clippy::all` + `clippy::pedantic` を warn、`unsafe_code` を deny。`Cargo.toml` `[workspace.lints]` 参照。
+- `.rustfmt.toml` は edition 2024 スタイル、`fn_params_layout = "Vertical"`。

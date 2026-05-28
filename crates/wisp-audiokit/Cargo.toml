@@ -1,0 +1,22 @@
+[package]
+name = "wisp-audiokit"
+edition.workspace = true
+version.workspace = true
+publish = false
+description = "Safe Rust wrapper over the WispAudioKit Swift framework."
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+expect_used = "warn"
+panic = "warn"
+pedantic = { level = "warn", priority = -1 }
+todo = "warn"
+unwrap_used = "warn"
+
+[lints.rust]
+# Safe wrapper around the -sys crate; the unsafe blocks are localised and
+# documented per-call.
+unsafe_code = "allow"
+
+[dependencies]
+wisp-audiokit-sys = { path = "../wisp-audiokit-sys" }

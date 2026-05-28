@@ -1,0 +1,14 @@
+# On macOS the workspace links to Apple system frameworks (CoreAudio, Speech,
+# ScreenCaptureKit, ...) and the Swift runtime via the WispAudioKit static
+# library. The Nix-provided `cc` wrapper in our devShell pins -F / -L at the
+# Nix apple-sdk-14.4 paths, which is older than the SDK that built the Swift
+# code and is missing newer frameworks (e.g. CoreAudioTypes) and the swift
+# runtime stubs. Force the system `cc` (which uses the active xcode-select
+# toolchain) for linking so framework lookups resolve against the system SDK.
+#
+# Linux / Windows targets are unaffected.
+[target.aarch64-apple-darwin]
+linker = "/usr/bin/cc"
+
+[target.x86_64-apple-darwin]
+linker = "/usr/bin/cc"

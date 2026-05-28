@@ -1,0 +1,20 @@
+[package]
+name = "wisp-audiokit-sys"
+edition.workspace = true
+version.workspace = true
+publish = false
+build = "build.rs"
+links = "WispAudioKit"
+description = "Raw FFI bindings to the WispAudioKit Swift framework (macOS only)."
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+expect_used = "warn"
+panic = "warn"
+pedantic = { level = "warn", priority = -1 }
+todo = "warn"
+unwrap_used = "warn"
+
+[lints.rust]
+# This crate is the FFI boundary: `extern "C"` requires unsafe.
+unsafe_code = "allow"

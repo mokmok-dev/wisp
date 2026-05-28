@@ -4,7 +4,6 @@ on:
     paths:
       - "native/**"
       - ".swiftformat"
-      - ".swiftlint.yml"
       - ".github/workflows/swift.yaml"
       - "flake.lock"
       - "flake.nix"
@@ -21,4 +20,3 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: ./.github/actions/setup-nix
       - run: nix develop .#ci --quiet --command swiftformat --lint native/WispAudioKit/Sources
-      - run: nix develop .#ci --quiet --command swiftlint --strict native

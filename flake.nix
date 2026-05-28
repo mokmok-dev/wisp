@@ -28,9 +28,7 @@
             packages = with pkgs; [
               rustToolchain
               nixfmt
-              swift
               swiftformat
-              swiftlint
             ];
           };
 

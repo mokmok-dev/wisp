@@ -1,5 +1,9 @@
 [workspace]
-members = []
+members = [
+  "apps/wisp-desktop",
+  "crates/wisp-core",
+  "crates/wisp-storage",
+]
 resolver = "3"
 
 [workspace.dependencies]

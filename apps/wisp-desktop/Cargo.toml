@@ -1,0 +1,12 @@
+[package]
+name = "wisp-desktop"
+edition.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+wisp-core = { path = "../../crates/wisp-core" }
+wisp-storage = { path = "../../crates/wisp-storage" }

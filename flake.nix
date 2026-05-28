@@ -24,10 +24,21 @@
       in
       {
         devShells = {
+          ci = pkgs.mkShell {
+            packages = with pkgs; [
+              rustToolchain
+              nixfmt
+              swiftformat
+              swiftlint
+            ];
+          };
+
           default = pkgs.mkShell {
             packages = with pkgs; [
               rustToolchain
               sccache
+              swiftformat
+              swiftlint
             ];
 
             shellHook = ''

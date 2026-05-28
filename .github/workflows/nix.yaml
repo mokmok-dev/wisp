@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - "flake.lock"
+      - "flake.nix"
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-nix
   cancel-in-progress: true

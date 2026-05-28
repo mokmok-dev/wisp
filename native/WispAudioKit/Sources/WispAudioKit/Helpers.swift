@@ -1,16 +1,15 @@
 @preconcurrency import AVFoundation
 import CoreMedia
 import Foundation
-import Speech
 
-enum PoCError: Error, CustomStringConvertible {
+public enum PoCError: Error, CustomStringConvertible {
     case permissionDenied(String)
     case noCompatibleFormat
     case converterCreationFailed
     case noDisplay
     case scStreamSetupFailed(String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case .permissionDenied(let name): "Permission denied: \(name)"
         case .noCompatibleFormat: "No compatible audio format for transcriber"
@@ -21,7 +20,13 @@ enum PoCError: Error, CustomStringConvertible {
     }
 }
 
-func log(_ msg: String) {
+/// Logs a `[wispctl]`-prefixed message to stderr. Used by both the library
+/// internals and the wispctl CLI for now; will move behind a callback once
+/// the Rust FFI lands and the library can no longer assume a stderr.
+///
+/// Named `wispLog` (not `log`) to avoid colliding with Foundation's `log`
+/// math overloads when the CLI imports both modules.
+public func wispLog(_ msg: String) {
     FileHandle.standardError.write(Data("[wispctl] \(msg)\n".utf8))
 }
 
@@ -29,26 +34,6 @@ func log(_ msg: String) {
 /// which Swift 6 treats as @Sendable and disallows capturing local var-mut.
 final class MutableFlag: @unchecked Sendable {
     var value: Bool = false
-}
-
-func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
-    await withCheckedContinuation { cont in
-        SFSpeechRecognizer.requestAuthorization { status in
-            cont.resume(returning: status)
-        }
-    }
-}
-
-func waitForInterrupt() async {
-    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-        let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-        source.setEventHandler {
-            source.cancel()
-            cont.resume()
-        }
-        source.resume()
-        signal(SIGINT, SIG_IGN)
-    }
 }
 
 extension CMSampleBuffer {

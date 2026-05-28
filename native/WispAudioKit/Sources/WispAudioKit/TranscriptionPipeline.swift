@@ -8,10 +8,10 @@ import Speech
 ///
 /// The pipeline is intentionally per-source so we get speaker attribution
 /// for free (mic = "self", system = "other") without ML diarization.
-final class TranscriptionPipeline: @unchecked Sendable {
-    let label: String
-    let wavURL: URL
-    let sourceFormat: AVAudioFormat
+public final class TranscriptionPipeline: @unchecked Sendable {
+    public let label: String
+    public let wavURL: URL
+    public let sourceFormat: AVAudioFormat
 
     private let analyzer: SpeechAnalyzer
     private let transcriber: SpeechTranscriber
@@ -21,7 +21,7 @@ final class TranscriptionPipeline: @unchecked Sendable {
     private let inputContinuation: AsyncStream<AnalyzerInput>.Continuation
     private var resultsTask: Task<Void, Never>?
 
-    init(label: String, sourceFormat: AVAudioFormat, wavURL: URL) async throws {
+    public init(label: String, sourceFormat: AVAudioFormat, wavURL: URL) async throws {
         self.label = label
         self.wavURL = wavURL
         self.sourceFormat = sourceFormat
@@ -79,22 +79,22 @@ final class TranscriptionPipeline: @unchecked Sendable {
             volatileRangeChangedHandler: { range, changedStart, _ in
                 if changedStart {
                     let s = CMTimeGetSeconds(range.start)
-                    log(
+                    wispLog(
                         "[\(labelForHandler)] finalized boundary advanced to \(String(format: "%.2fs", s))"
                     )
                 }
             }
         )
 
-        log(
+        wispLog(
             "[\(label)] pipeline ready — analyzer format sr=\(analyzerFormat.sampleRate) ch=\(analyzerFormat.channelCount) fmt=\(analyzerFormat.commonFormat.rawValue)"
         )
-        log("[\(label)] WAV: \(wavURL.path)")
+        wispLog("[\(label)] WAV: \(wavURL.path)")
     }
 
     /// Start consuming transcription results in the background.
     /// Idempotent: only spawns the task once.
-    func startResultsConsumer() {
+    public func startResultsConsumer() {
         guard resultsTask == nil else { return }
         let label = label
         let transcriber = transcriber
@@ -107,9 +107,9 @@ final class TranscriptionPipeline: @unchecked Sendable {
                     let range = String(format: "%6.2f-%6.2fs", s, e)
                     print("[\(label)] [\(range)] \(text)")
                 }
-                log("[\(label)] results stream finished")
+                wispLog("[\(label)] results stream finished")
             } catch {
-                log("[\(label)] results error: \(error)")
+                wispLog("[\(label)] results error: \(error)")
             }
         }
     }
@@ -117,12 +117,12 @@ final class TranscriptionPipeline: @unchecked Sendable {
     /// Push one audio buffer from the source. Writes to WAV and feeds the
     /// analyzer (resampling/format-converting on the fly).
     /// Safe to call from audio callback threads.
-    func push(_ buffer: AVAudioPCMBuffer) {
+    public func push(_ buffer: AVAudioPCMBuffer) {
         // 1. WAV (native format)
         do {
             try wavFile.write(from: buffer)
         } catch {
-            log("[\(label)] WAV write error: \(error)")
+            wispLog("[\(label)] WAV write error: \(error)")
         }
 
         // 2. Resample to analyzer format
@@ -151,7 +151,7 @@ final class TranscriptionPipeline: @unchecked Sendable {
             }
         )
         if let convertError {
-            log("[\(label)] convert error: \(convertError)")
+            wispLog("[\(label)] convert error: \(convertError)")
             return
         }
         guard status != .error, converted.frameLength > 0 else { return }
@@ -160,7 +160,7 @@ final class TranscriptionPipeline: @unchecked Sendable {
     }
 
     /// Stop feeding the analyzer and wait for final results to drain.
-    func finish() async {
+    public func finish() async {
         inputContinuation.finish()
         try? await analyzer.finalizeAndFinishThroughEndOfInput()
         _ = await resultsTask?.result

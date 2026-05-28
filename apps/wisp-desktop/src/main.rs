@@ -1,38 +1,47 @@
 //! Wisp desktop app — `GPUI` shell.
 //!
-//! Wires together the three building blocks defined in the sibling modules:
+//! Wires together the building blocks defined in the sibling modules:
 //!
-//!   * `app::AppModel` — transcript + lifecycle state. UI reads, the
-//!     session-runner bridge writes.
+//!   * `app::AppModel` — transcript + lifecycle + library state. UI reads,
+//!     the session-runner bridge writes.
 //!   * `session_runner::SessionRunner` — background OS thread that owns the
 //!     Swift `wisp_audiokit::Session` and surfaces events via a channel.
 //!   * `transcript_view::TranscriptView` — the GPUI render target.
+//!   * `library` — bridges the in-memory transcript with `wisp_storage`
+//!     so sessions persist across restarts and can be reviewed later.
 //!
-//! Two `cx.spawn` async tasks plumb everything together:
+//! Three `cx.spawn` async tasks plumb everything together:
 //!
-//!   1. Drain `SessionRunner` updates into `AppModel` every ~33ms.
+//!   1. Drain `SessionRunner` updates into `AppModel` every ~33ms, doing
+//!      DB writes at session boundaries (Started / Stopped).
 //!   2. Toggle the ghost-text cursor on the view every 500ms and refresh
 //!      the status bar's elapsed counter at 250ms so it stays smooth.
+//!   3. Re-poll permission status periodically.
 
 // We deliberately panic loudly on window-setup failures (clearer than a
 // silently-dropped Result hidden behind `?` in `main`).
 #![allow(clippy::expect_used)]
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chrono::Utc;
 use gpui::{
-    App, AppContext, Application, AsyncApp, Bounds, Entity, KeyBinding, Menu, MenuItem, Timer,
-    TitlebarOptions, WindowBounds, WindowHandle, WindowOptions, actions, px, size,
+    App, AppContext, Application, AsyncApp, Bounds, Entity, Timer, TitlebarOptions, WindowBounds,
+    WindowHandle, WindowOptions, px, size,
 };
+use wisp_core::SessionId;
+use wisp_storage::Storage;
 
 mod app;
+mod library;
 mod permissions;
 mod session_runner;
 mod transcript_view;
 
 use app::{AppModel, SessionState};
+use library::SharedStorage;
 use session_runner::{SessionRunner, Update};
 use transcript_view::{TranscriptView, cursor_blink_period, now, ui_tick_period};
 
@@ -43,21 +52,19 @@ use transcript_view::{TranscriptView, cursor_blink_period, now, ui_tick_period};
 /// responsive when they come back.
 const PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 
-actions!(wisp_desktop, [Quit]);
-
 fn main() {
     Application::new().run(|cx| {
         cx.activate(true);
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-        cx.set_menus(vec![Menu {
-            name: "Wisp".into(),
-            items: vec![MenuItem::action("Quit Wisp", Quit)],
-        }]);
 
-        let output_dir = default_output_directory();
+        let data_dir = default_data_directory();
+        let recordings_dir = data_dir.join("recordings");
+        let storage = open_storage(&data_dir);
         let runner = Arc::new(SessionRunner::spawn());
         let model = cx.new(|_| AppModel::new());
+
+        // Populate the library list synchronously at launch so the first
+        // paint of the window already shows the user's saved sessions.
+        refresh_library(&storage, &model, cx);
 
         let bounds = Bounds::centered(None, size(px(900.0), px(640.0)), cx);
         let window_options = WindowOptions {
@@ -67,7 +74,7 @@ fn main() {
         };
 
         // Populate the model with the initial permission state so the
-        // window opens straight onto onboarding or the record screen,
+        // window opens straight onto onboarding or the library screen,
         // without a flash of the wrong content.
         permissions::refresh(&model, cx);
 
@@ -75,11 +82,12 @@ fn main() {
             cx,
             window_options,
             runner.clone(),
+            storage.clone(),
             model.clone(),
-            output_dir,
+            recordings_dir.clone(),
         );
 
-        spawn_session_update_pump(cx, runner, model.clone());
+        spawn_session_update_pump(cx, runner, storage, model.clone(), recordings_dir);
         spawn_cursor_blink(cx, window);
         spawn_permission_refresh(cx, model);
     });
@@ -89,20 +97,32 @@ fn open_main_window(
     cx: &mut App,
     window_options: WindowOptions,
     runner: Arc<SessionRunner>,
+    storage: SharedStorage,
     model: Entity<AppModel>,
-    output_dir: PathBuf,
+    recordings_dir: PathBuf,
 ) -> WindowHandle<TranscriptView> {
     cx.open_window(window_options, move |_, cx| {
         cx.new(|cx| {
             let model_for_toggle = model.clone();
             let model_for_request = model.clone();
+            let model_for_new = model.clone();
+            let model_for_open_history = model.clone();
+            let model_for_back = model.clone();
+            let storage_for_open_history = storage.clone();
+            let recordings_for_toggle = recordings_dir.clone();
+            let runner_for_toggle = runner.clone();
             let view = TranscriptView {
                 app: model.clone(),
                 cursor_visible: true,
                 scroll_handle: gpui::ScrollHandle::new(),
                 last_signature: (0, 0),
                 on_toggle_record: Arc::new(move |_window, cx| {
-                    toggle_recording(&runner, &model_for_toggle, &output_dir, cx);
+                    toggle_recording(
+                        &runner_for_toggle,
+                        &model_for_toggle,
+                        &recordings_for_toggle,
+                        cx,
+                    );
                 }),
                 on_request_permission: Arc::new(move |perm, _window, cx| {
                     permissions::request(perm, model_for_request.clone(), cx);
@@ -111,6 +131,26 @@ fn open_main_window(
                     permissions::open_settings(perm);
                     // The next periodic permission refresh picks up the
                     // toggle once the user flips it in System Settings.
+                }),
+                on_new_session: Arc::new(move |_window, cx| {
+                    model_for_new.update(cx, |m, cx| {
+                        m.show_new_session();
+                        cx.notify();
+                    });
+                }),
+                on_open_history: Arc::new(move |session_id, _window, cx| {
+                    open_history(
+                        &storage_for_open_history,
+                        &model_for_open_history,
+                        session_id,
+                        cx,
+                    );
+                }),
+                on_back_to_library: Arc::new(move |_window, cx| {
+                    model_for_back.update(cx, |m, cx| {
+                        m.show_library();
+                        cx.notify();
+                    });
                 }),
             };
             // Re-render whenever the underlying model changes.
@@ -122,10 +162,17 @@ fn open_main_window(
 }
 
 /// Drain `SessionRunner` updates into the model every ~33ms.
+///
+/// At the same time, persist the recording lifecycle into storage:
+/// `Started` inserts a session row, `Stopped` writes finalised segments
+/// and stamps `ended_at`, `Error` clears the in-flight session so it
+/// doesn't dangle in the library as a half-recorded row.
 fn spawn_session_update_pump(
     cx: &mut App,
     runner: Arc<SessionRunner>,
+    storage: SharedStorage,
     model: Entity<AppModel>,
+    _recordings_dir: PathBuf,
 ) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {
@@ -136,19 +183,7 @@ fn spawn_session_update_pump(
             }
             let result = model.update(cx, |model, cx| {
                 for u in updates {
-                    match u {
-                        Update::Started => {
-                            model.set_state(SessionState::Recording { started_at: now() });
-                        },
-                        Update::Event(e) => model.ingest(e),
-                        Update::Stopped => {
-                            // Lock in whatever the analyzer last had — without
-                            // this the trailing partial stays grey forever.
-                            model.finalize_all_segments();
-                            model.set_state(SessionState::Idle);
-                        },
-                        Update::Error(msg) => model.fail(msg),
-                    }
+                    apply_update(u, model, &storage);
                 }
                 cx.notify();
             });
@@ -158,6 +193,60 @@ fn spawn_session_update_pump(
         }
     })
     .detach();
+}
+
+fn apply_update(
+    update: Update,
+    model: &mut AppModel,
+    storage: &SharedStorage,
+) {
+    match update {
+        Update::Started => {
+            let started_at = Utc::now();
+            model.set_state(SessionState::Recording { started_at: now() });
+            // Best-effort: if the DB write fails we still let the user
+            // record; we just won't persist this session.
+            if let Ok(store) = storage.lock() {
+                let dir_name = library::session_dir_name(started_at);
+                if let Ok(session_id) = library::create_session(&store, started_at, &dir_name) {
+                    model.current_session_id = Some(session_id);
+                }
+            }
+        },
+        Update::Event(e) => model.ingest(e),
+        Update::Stopped => {
+            model.finalize_all_segments();
+            model.set_state(SessionState::Idle);
+            persist_finished_session(model, storage);
+        },
+        Update::Error(msg) => {
+            // Clear the in-flight DB row — without this it dangles in the
+            // library forever with ended_at = NULL.
+            if let Some(id) = model.current_session_id.take()
+                && let Ok(store) = storage.lock()
+            {
+                let _ = store.sessions().delete(id);
+            }
+            model.fail(msg);
+        },
+    }
+}
+
+fn persist_finished_session(
+    model: &mut AppModel,
+    storage: &SharedStorage,
+) {
+    let Some(session_id) = model.current_session_id.take() else {
+        return;
+    };
+    let Ok(store) = storage.lock() else {
+        return;
+    };
+    let ended_at = Utc::now();
+    let _ = library::finalise_session(&store, session_id, &model.segments, ended_at);
+    if let Ok(list) = store.sessions().list() {
+        model.set_library(list);
+    }
 }
 
 /// Toggle the ghost-text cursor and refresh the status-bar elapsed counter.
@@ -207,17 +296,22 @@ fn spawn_permission_refresh(
 fn toggle_recording(
     runner: &SessionRunner,
     model: &gpui::Entity<AppModel>,
-    output_dir: &std::path::Path,
+    recordings_dir: &std::path::Path,
     cx: &mut gpui::App,
 ) {
     let state = model.read(cx).state;
     match state {
         SessionState::Idle | SessionState::Failed => {
+            // Per-session subdirectory so each recording's WAVs stay
+            // grouped and we can show them as a single library row.
+            let session_dir = recordings_dir.join(library::session_dir_name(Utc::now()));
             model.update(cx, |m, cx| {
+                m.segments.clear();
+                m.last_error = None;
                 m.set_state(SessionState::Starting);
                 cx.notify();
             });
-            runner.start(output_dir.to_path_buf(), "ja-JP".to_string());
+            runner.start(session_dir, "ja-JP".to_string());
         },
         SessionState::Recording { .. } => {
             model.update(cx, |m, cx| {
@@ -232,16 +326,72 @@ fn toggle_recording(
     }
 }
 
-fn default_output_directory() -> PathBuf {
-    if let Ok(dir) = std::env::var("WISP_OUTPUT_DIR") {
+fn open_history(
+    storage: &SharedStorage,
+    model: &Entity<AppModel>,
+    session_id: SessionId,
+    cx: &mut App,
+) {
+    let Ok(store) = storage.lock() else {
+        return;
+    };
+    let Some(session) = store.sessions().get(session_id).ok().flatten() else {
+        return;
+    };
+    let segments = library::load_history(&store, session_id).unwrap_or_default();
+    drop(store);
+    model.update(cx, |m, cx| {
+        m.show_history(session, segments);
+        cx.notify();
+    });
+}
+
+fn refresh_library(
+    storage: &SharedStorage,
+    model: &Entity<AppModel>,
+    cx: &mut App,
+) {
+    let Ok(store) = storage.lock() else {
+        return;
+    };
+    let Ok(list) = store.sessions().list() else {
+        return;
+    };
+    drop(store);
+    model.update(cx, |m, cx| {
+        m.set_library(list);
+        cx.notify();
+    });
+}
+
+fn open_storage(data_dir: &std::path::Path) -> SharedStorage {
+    // If the on-disk DB can't be opened (disk full, perms), fall back to
+    // an in-memory store so the app still starts. We log the path to
+    // stderr so it shows up in the system log; the user will see an
+    // empty library and no persistence, which is the right failure mode
+    // for this kind of catastrophic disk error.
+    let storage = Storage::open(data_dir).or_else(|err| {
+        eprintln!(
+            "wisp: failed to open storage at {}: {err}; falling back to in-memory",
+            data_dir.display()
+        );
+        Storage::open_in_memory()
+    });
+    let storage = storage.expect("open in-memory storage as last-resort fallback");
+    Arc::new(Mutex::new(storage))
+}
+
+fn default_data_directory() -> PathBuf {
+    if let Ok(dir) = std::env::var("WISP_DATA_DIR") {
         return PathBuf::from(dir);
     }
-    // ~/Library/Application Support/dev.mokmok.wisp/recordings on macOS, or
-    // a temp dir if we can't resolve $HOME.
+    // ~/Library/Application Support/dev.mokmok.wisp/ on macOS, or
+    // a temp dir if we can't resolve $HOME. The sessions DB lives at
+    // <this>/sessions.db and per-session WAV directories under
+    // <this>/recordings/<dir-name>/.
     let mut p = std::env::var_os("HOME").map_or_else(std::env::temp_dir, PathBuf::from);
     p.push("Library");
     p.push("Application Support");
     p.push("dev.mokmok.wisp");
-    p.push("recordings");
     p
 }

@@ -6721,6 +6721,7 @@ dependencies = [
 name = "wisp-desktop"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "gpui",
  "wisp-audiokit",
  "wisp-core",

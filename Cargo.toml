@@ -1,6 +1,8 @@
 [workspace]
 members = [
   "apps/wisp-desktop",
+  "crates/wisp-audiokit",
+  "crates/wisp-audiokit-sys",
   "crates/wisp-core",
   "crates/wisp-storage",
 ]

@@ -5,7 +5,9 @@ let package = Package(
     name: "WispAudioKit",
     platforms: [.macOS("26.0")],
     products: [
-        .library(name: "WispAudioKit", targets: ["WispAudioKit"]),
+        // Static library so the Rust `wisp-audiokit-sys` crate can statically
+        // link the resulting .a into the desktop binary.
+        .library(name: "WispAudioKit", type: .static, targets: ["WispAudioKit"]),
         .executable(name: "wispctl", targets: ["wispctl"]),
     ],
     targets: [

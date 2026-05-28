@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "wisp-audiokit"
+version = "0.0.0"
+dependencies = [
+ "wisp-audiokit-sys",
+]
+
+[[package]]
+name = "wisp-audiokit-sys"
+version = "0.0.0"
+
+[[package]]
 name = "wisp-core"
 version = "0.0.0"
 

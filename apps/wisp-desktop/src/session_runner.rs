@@ -79,6 +79,30 @@ impl SessionRunner {
         }
         out
     }
+
+    /// Block until the worker reports `Stopped`/`Error`, or `timeout` elapses.
+    /// Used when quitting so in-flight recordings can be finalised.
+    pub fn wait_for_idle(
+        &self,
+        timeout: Duration,
+    ) -> Vec<Update> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut collected = Vec::new();
+        loop {
+            collected.extend(self.drain_updates());
+            if collected
+                .iter()
+                .any(|u| matches!(u, Update::Stopped | Update::Error(_)))
+            {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(CMD_POLL_INTERVAL);
+        }
+        collected
+    }
 }
 
 impl Drop for SessionRunner {

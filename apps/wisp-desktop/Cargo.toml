@@ -35,3 +35,10 @@ chrono = { workspace = true }
 # GPU-accelerated UI framework by the Zed team. macOS-only in practice;
 # Ubuntu CI excludes this crate (see .github/workflows/rust.yaml).
 gpui = { workspace = true }
+
+# Menu bar status item (NSStatusItem) for start/stop recording without the
+# main window focused. macOS-gated: wisp-desktop only ships on macOS, and on
+# macOS tray-icon pulls only objc2 (its GTK/AppIndicator deps are themselves
+# target-gated to Linux/*BSD), so this adds no GTK baggage.
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = "0.24.0"

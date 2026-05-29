@@ -42,6 +42,9 @@ mod permissions;
 mod session_runner;
 mod session_updates;
 mod transcript_view;
+// Menu bar status item is macOS-only (uses NSStatusItem via tray-icon).
+#[cfg(target_os = "macos")]
+mod tray;
 
 use app::{AppModel, SessionState};
 use app_menu::configure as configure_app_menu;
@@ -97,8 +100,11 @@ fn main() {
             runner.clone(),
             storage.clone(),
             model.clone(),
-            recordings_dir,
+            recordings_dir.clone(),
         );
+
+        #[cfg(target_os = "macos")]
+        tray::configure(cx, runner.clone(), &model, recordings_dir);
 
         spawn_session_update_pump(cx, runner, storage, model.clone());
         spawn_cursor_blink(cx, window);

@@ -17,7 +17,9 @@ python3 -m http.server -d site 8000
 | `index.html`    | The page.                                                      |
 | `styles.css`    | Styling. Palette mirrors the desktop app's deep-slate theme.   |
 | `favicon.svg`   | Blue-dot mark matching the app's `Wisp` wordmark.              |
-| `screenshot.png`| Hero screenshot (kept in sync with `docs/screenshot.png`).     |
+| `screenshot.mp4`| Hero loop (H.264, autoplays muted).                            |
+| `screenshot.webm`| Hero loop (VP9), preferred by browsers that support it.       |
+| `screenshot.png`| Poster frame & OG image (kept in sync with `docs/screenshot.png`). |
 | `CNAME`         | Custom domain for GitHub Pages (`wisp.mokmok.dev`).            |
 
 ## Deployment

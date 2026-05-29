@@ -18,7 +18,7 @@ Wisp captures your microphone and system audio (the other side of a call) at the
 
 ## Screenshots
 
-![Wisp main window — idle state before recording](docs/screenshot.png)
+![Wisp session library — past sessions and a New Session entry point](docs/screenshot.png)
 
 ## Architecture
 

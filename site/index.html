@@ -87,12 +87,27 @@
 
         <div class="shot">
           <div class="shot-frame">
-            <img
-              src="screenshot.png"
-              alt="The Wisp main window, idle and ready to record."
-              width="900"
-              loading="lazy"
-            />
+            <video
+              poster="screenshot.png"
+              width="1200"
+              height="864"
+              autoplay
+              muted
+              loop
+              playsinline
+              preload="metadata"
+              aria-label="The Wisp main window: opening a new session from the library and returning."
+            >
+              <source src="screenshot.webm" type="video/webm" />
+              <source src="screenshot.mp4" type="video/mp4" />
+              <img
+                src="screenshot.png"
+                alt="The Wisp main window with a library of past sessions."
+                width="1200"
+                height="864"
+                loading="lazy"
+              />
+            </video>
           </div>
         </div>
       </section>

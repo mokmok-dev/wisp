@@ -253,7 +253,8 @@ main {
     0 30px 80px -30px rgba(0, 0, 0, 0.8),
     0 0 0 1px rgba(255, 255, 255, 0.02) inset;
 }
-.shot-frame img {
+.shot-frame img,
+.shot-frame video {
   display: block;
   width: 100%;
   height: auto;

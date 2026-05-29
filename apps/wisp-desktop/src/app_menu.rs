@@ -81,9 +81,7 @@ fn graceful_stop_session(
 
     let should_wait = matches!(
         model.read(cx).state,
-        SessionState::Recording { .. }
-            | SessionState::Starting
-            | SessionState::Stopping
+        SessionState::Recording { .. } | SessionState::Starting | SessionState::Stopping
     );
     if !should_wait {
         return;

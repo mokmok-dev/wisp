@@ -52,24 +52,21 @@ impl Render for AboutView {
             )
             .child(div().flex_grow())
             .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .child(
-                        div()
-                            .id("about-ok")
-                            .px_3()
-                            .py_1p5()
-                            .bg(rgb(0x13_171f))
-                            .border_1()
-                            .border_color(rgb(0x1f_242e))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .child("OK")
-                            .on_click(|_, window, _| {
-                                window.remove_window();
-                            }),
-                    ),
+                div().flex().justify_end().child(
+                    div()
+                        .id("about-ok")
+                        .px_3()
+                        .py_1p5()
+                        .bg(rgb(0x13_171f))
+                        .border_1()
+                        .border_color(rgb(0x1f_242e))
+                        .rounded_md()
+                        .cursor_pointer()
+                        .child("OK")
+                        .on_click(|_, window, _| {
+                            window.remove_window();
+                        }),
+                ),
             )
             .on_action(|_: &CloseAbout, window, _| {
                 window.remove_window();

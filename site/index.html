@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Wisp — Fully offline recording &amp; transcription for macOS</title>
+    <meta
+      name="description"
+      content="Wisp captures your microphone and system audio at the same time and transcribes both on-device. Audio and text never leave your machine."
+    />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://github.com" />
+
+    <!-- Open Graph / social -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Wisp — Fully offline recording &amp; transcription" />
+    <meta
+      property="og:description"
+      content="Capture mic + system audio and transcribe both on-device. Works with Wi-Fi off. Audio and text never leave your machine."
+    />
+    <meta property="og:url" content="https://wisp.mokmok.dev/" />
+    <meta property="og:image" content="https://wisp.mokmok.dev/screenshot.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="glow" aria-hidden="true"></div>
+
+    <header class="nav">
+      <a class="brand" href="#top" aria-label="Wisp home">
+        <span class="brand-dot"></span>
+        <span class="brand-name">Wisp</span>
+      </a>
+      <nav class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#how">How it works</a>
+        <a href="#privacy">Privacy</a>
+        <a href="https://github.com/mokmok-dev/wisp" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+      <a
+        class="btn btn-primary nav-cta"
+        href="https://github.com/mokmok-dev/wisp/releases/latest"
+        target="_blank"
+        rel="noopener"
+        >Download</a
+      >
+    </header>
+
+    <main id="top">
+      <!-- Hero -->
+      <section class="hero">
+        <span class="pill">
+          <span class="pill-dot"></span>
+          Fully offline · works with Wi-Fi off
+        </span>
+        <h1>
+          Recording &amp; transcription<br />
+          that <span class="accent">never leaves your machine</span>.
+        </h1>
+        <p class="lede">
+          Wisp captures your microphone and the other side of the call at the
+          same time, then transcribes both on-device. No cloud APIs, no uploads —
+          just a clean, local transcript.
+        </p>
+        <div class="hero-actions">
+          <a
+            class="btn btn-primary"
+            href="https://github.com/mokmok-dev/wisp/releases/latest"
+            target="_blank"
+            rel="noopener"
+          >
+            Download for macOS
+          </a>
+          <a
+            class="btn btn-ghost"
+            href="https://github.com/mokmok-dev/wisp"
+            target="_blank"
+            rel="noopener"
+          >
+            View source
+          </a>
+        </div>
+        <p class="hero-note">
+          Apple Silicon · macOS 26 (Tahoe) · Windows &amp; Linux coming soon
+        </p>
+
+        <div class="shot">
+          <div class="shot-frame">
+            <img
+              src="screenshot.png"
+              alt="The Wisp main window, idle and ready to record."
+              width="900"
+              loading="lazy"
+            />
+          </div>
+        </div>
+      </section>
+
+      <!-- Features -->
+      <section id="features" class="section">
+        <div class="section-head">
+          <h2>Everything stays on-device</h2>
+          <p>A small, focused app that does one thing well — and keeps it private.</p>
+        </div>
+
+        <div class="grid">
+          <article class="card">
+            <div class="card-icon">
+              <!-- offline / shield -->
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                <path d="M12 3l7 3v5c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9V6l7-3z" stroke-linejoin="round"/>
+                <path d="M9 12l2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <h3>Fully offline</h3>
+            <p>
+              Audio and transcripts stay on your device. Turn off Wi-Fi and Wisp
+              keeps working exactly the same.
+            </p>
+          </article>
+
+          <article class="card">
+            <div class="card-icon">
+              <!-- waveform -->
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                <path d="M4 12h2M9 6v12M14 3v18M19 9v6M21.5 12H22" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <h3>On-device transcription</h3>
+            <p>
+              Powered by Apple's new <code>SpeechAnalyzer</code> API. Live, refining
+              transcripts with no cloud round-trips.
+            </p>
+          </article>
+
+          <article class="card">
+            <div class="card-icon">
+              <!-- two sources merge -->
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                <circle cx="6" cy="6" r="2.4"/>
+                <circle cx="6" cy="18" r="2.4"/>
+                <circle cx="18" cy="12" r="2.4"/>
+                <path d="M8.4 6.8L15.6 11M8.4 17.2L15.6 13" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <h3>Mic + system audio</h3>
+            <p>
+              Core Audio Process Taps capture meeting-app output without prompts,
+              mix it with your mic, and merge both sides into one transcript.
+            </p>
+          </article>
+
+          <article class="card">
+            <div class="card-icon">
+              <!-- chip -->
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                <rect x="6" y="6" width="12" height="12" rx="2"/>
+                <path d="M9 3v2M12 3v2M15 3v2M9 19v2M12 19v2M15 19v2M3 9h2M3 12h2M3 15h2M19 9h2M19 12h2M19 15h2" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <h3>Built in Rust, GPU-rendered</h3>
+            <p>
+              The UI runs on <a href="https://www.gpui.rs/" target="_blank" rel="noopener">GPUI</a>,
+              the framework behind the Zed editor — native-feeling and smooth.
+            </p>
+          </article>
+
+          <article class="card">
+            <div class="card-icon">
+              <!-- storage -->
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                <ellipse cx="12" cy="6" rx="7" ry="3"/>
+                <path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6" stroke-linecap="round"/>
+                <path d="M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <h3>Simple local storage</h3>
+            <p>
+              Recordings save as WAV, metadata as SQLite. Browse past sessions in
+              the library — easy to export and analyze later.
+            </p>
+          </article>
+
+          <article class="card">
+            <div class="card-icon">
+              <!-- lock -->
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                <rect x="5" y="10" width="14" height="10" rx="2"/>
+                <path d="M8 10V7a4 4 0 018 0v3" stroke-linecap="round"/>
+                <circle cx="12" cy="15" r="1.3" fill="currentColor" stroke="none"/>
+              </svg>
+            </div>
+            <h3>Yours, and only yours</h3>
+            <p>
+              No accounts, no telemetry, no servers. Nothing to sign up for and
+              nothing leaving your laptop.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <!-- How it works -->
+      <section id="how" class="section">
+        <div class="section-head">
+          <h2>How it works</h2>
+          <p>Two audio streams in, one tidy transcript out — every step on your Mac.</p>
+        </div>
+
+        <ol class="steps">
+          <li class="step">
+            <span class="step-num">1</span>
+            <div>
+              <h3>Capture both sides</h3>
+              <p>
+                A Core Audio Process Tap grabs system audio while your microphone
+                is recorded in parallel — no virtual cables or prompts.
+              </p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-num">2</span>
+            <div>
+              <h3>Transcribe on-device</h3>
+              <p>
+                Each stream flows through Apple's <code>SpeechAnalyzer</code>,
+                producing live segments that refine themselves as you speak.
+              </p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-num">3</span>
+            <div>
+              <h3>Merge &amp; store locally</h3>
+              <p>
+                Mic and system segments merge into a single timeline, then persist
+                as WAV + SQLite under your Application Support folder.
+              </p>
+            </div>
+          </li>
+        </ol>
+
+        <div class="flow" role="img" aria-label="Data flow: process tap and microphone feed into WispAudioKit and SpeechAnalyzer, then into the GPUI desktop app and local storage.">
+<pre>
+ Core Audio Process Tap ─┐
+                         ├─► WispAudioKit ─► GPUI desktop
+ Microphone input ───────┘        │              ▲
+                                  └─► SpeechAnalyzer
+                                          │
+                                          └─► WAV + SQLite (local)
+</pre>
+        </div>
+      </section>
+
+      <!-- Privacy -->
+      <section id="privacy" class="section privacy">
+        <div class="privacy-inner">
+          <span class="pill">
+            <span class="pill-dot"></span>
+            Privacy by architecture
+          </span>
+          <h2>The network is never in the loop</h2>
+          <p>
+            Wisp doesn't have a cloud backend to leak to. Capture, transcription,
+            and storage all happen locally, so your conversations stay between you
+            and your machine — by design, not by policy.
+          </p>
+          <div class="privacy-stats">
+            <div><strong>0</strong><span>bytes uploaded</span></div>
+            <div><strong>100%</strong><span>on-device</span></div>
+            <div><strong>WAV + SQLite</strong><span>open, local formats</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Requirements / download -->
+      <section id="download" class="section">
+        <div class="section-head">
+          <h2>Get Wisp</h2>
+          <p>Open-source and free. Built for the latest Apple Silicon Macs.</p>
+        </div>
+
+        <div class="download-card">
+          <div class="download-meta">
+            <h3>Download for macOS</h3>
+            <ul class="reqs">
+              <li>macOS 26 (Tahoe) — uses <code>SpeechAnalyzer</code> &amp; Core Audio Process Taps</li>
+              <li>Apple Silicon (aarch64) build, shipped as a signed <code>.dmg</code></li>
+              <li>Microphone &amp; system-audio permission, prompted on first launch</li>
+            </ul>
+          </div>
+          <div class="download-actions">
+            <a
+              class="btn btn-primary"
+              href="https://github.com/mokmok-dev/wisp/releases/latest"
+              target="_blank"
+              rel="noopener"
+              >Download latest release</a
+            >
+            <a
+              class="btn btn-ghost"
+              href="https://github.com/mokmok-dev/wisp#build--run"
+              target="_blank"
+              rel="noopener"
+              >Build from source</a
+            >
+          </div>
+        </div>
+
+        <p class="roadmap-note">
+          On the roadmap: Windows (WASAPI loopback) and Linux (PipeWire) support,
+          plus export to Markdown / SRT / JSON.
+        </p>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="footer-brand">
+        <span class="brand-dot"></span>
+        <span class="brand-name">Wisp</span>
+      </div>
+      <p class="footer-tag">Fully offline recording &amp; transcription.</p>
+      <nav class="footer-links">
+        <a href="https://github.com/mokmok-dev/wisp" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/mokmok-dev/wisp/releases" target="_blank" rel="noopener">Releases</a>
+        <a href="https://github.com/mokmok-dev/wisp/issues" target="_blank" rel="noopener">Issues</a>
+      </nav>
+      <p class="footer-fine">Made by mokmok.dev</p>
+    </footer>
+  </body>
+</html>

@@ -34,16 +34,21 @@ use gpui::{
 use wisp_core::SessionId;
 use wisp_storage::Storage;
 
+mod about_view;
 mod app;
+mod app_menu;
 mod library;
 mod permissions;
 mod session_runner;
+mod session_updates;
 mod transcript_view;
 
 use app::{AppModel, SessionState};
+use app_menu::configure as configure_app_menu;
 use library::SharedStorage;
-use session_runner::{SessionRunner, Update};
-use transcript_view::{TranscriptView, cursor_blink_period, now, ui_tick_period};
+use session_runner::SessionRunner;
+use session_updates::apply_update;
+use transcript_view::{TranscriptView, cursor_blink_period, ui_tick_period};
 
 /// How often we re-poll permission status from the OS while the
 /// onboarding screen is up. The user might flip the toggle in System
@@ -86,6 +91,8 @@ fn main() {
             model.clone(),
             recordings_dir,
         );
+
+        configure_app_menu(cx, runner.clone(), storage.clone(), model.clone());
 
         spawn_session_update_pump(cx, runner, storage, model.clone());
         spawn_cursor_blink(cx, window);
@@ -192,60 +199,6 @@ fn spawn_session_update_pump(
         }
     })
     .detach();
-}
-
-fn apply_update(
-    update: Update,
-    model: &mut AppModel,
-    storage: &SharedStorage,
-) {
-    match update {
-        Update::Started => {
-            let started_at = Utc::now();
-            model.set_state(SessionState::Recording { started_at: now() });
-            // Best-effort: if the DB write fails we still let the user
-            // record; we just won't persist this session.
-            if let Ok(store) = storage.lock() {
-                let dir_name = library::session_dir_name(started_at);
-                if let Ok(session_id) = library::create_session(&store, started_at, &dir_name) {
-                    model.current_session_id = Some(session_id);
-                }
-            }
-        },
-        Update::Event(e) => model.ingest(e),
-        Update::Stopped => {
-            model.finalize_all_segments();
-            model.set_state(SessionState::Idle);
-            persist_finished_session(model, storage);
-        },
-        Update::Error(msg) => {
-            // Clear the in-flight DB row — without this it dangles in the
-            // library forever with ended_at = NULL.
-            if let Some(id) = model.current_session_id.take()
-                && let Ok(store) = storage.lock()
-            {
-                let _ = store.sessions().delete(id);
-            }
-            model.fail(msg);
-        },
-    }
-}
-
-fn persist_finished_session(
-    model: &mut AppModel,
-    storage: &SharedStorage,
-) {
-    let Some(session_id) = model.current_session_id.take() else {
-        return;
-    };
-    let Ok(store) = storage.lock() else {
-        return;
-    };
-    let ended_at = Utc::now();
-    let _ = library::finalise_session(&store, session_id, &model.segments, ended_at);
-    if let Ok(list) = store.sessions().list() {
-        model.set_library(list);
-    }
 }
 
 /// Toggle the ghost-text cursor and refresh the status-bar elapsed counter.

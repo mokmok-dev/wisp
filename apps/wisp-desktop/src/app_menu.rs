@@ -1,5 +1,7 @@
-//! macOS menu bar: application menu (About, Quit) and Cmd+Q.
+//! macOS menu bar: application menu (About, Start/Stop Recording, Quit)
+//! plus the Cmd+Q and Cmd+R shortcuts.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +13,7 @@ use crate::library::SharedStorage;
 use crate::session_runner::SessionRunner;
 use crate::session_updates::apply_update;
 
-actions!(wisp_desktop, [Quit, About]);
+actions!(wisp_desktop, [Quit, About, ToggleRecording]);
 
 /// Wire up the menu bar, keyboard shortcuts, and quit handlers.
 pub fn configure(
@@ -19,6 +21,7 @@ pub fn configure(
     runner: Arc<SessionRunner>,
     storage: SharedStorage,
     model: Entity<AppModel>,
+    recordings_dir: PathBuf,
 ) {
     let runner_for_quit = runner.clone();
     let model_for_quit = model.clone();
@@ -33,16 +36,33 @@ pub fn configure(
         about_view::open(cx);
     });
 
-    cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+    // Start/stop recording straight from the menu bar (and Cmd+R), so the
+    // user doesn't have to reach for the in-window Record button. Reuses the
+    // same state machine as that button via `toggle_recording`.
+    let runner_for_toggle = runner.clone();
+    let model_for_toggle = model.clone();
+    cx.on_action(move |_: &ToggleRecording, cx| {
+        crate::toggle_recording(&runner_for_toggle, &model_for_toggle, &recordings_dir, cx);
+    });
 
-    cx.set_menus(vec![Menu {
-        name: "Wisp".into(),
-        items: vec![
-            MenuItem::action("About Wisp", About),
-            MenuItem::separator(),
-            MenuItem::action("Quit Wisp", Quit),
-        ],
-    }]);
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-r", ToggleRecording, None),
+    ]);
+
+    // The recording item's label flips between "Start" and "Stop" with the
+    // session state. `set_menus` rebuilds the whole native menu, so we only
+    // call it when the label actually changes (not on every transcript tick).
+    let mut last_label = recording_menu_label(model.read(cx).state);
+    cx.set_menus(build_menus(last_label));
+    cx.observe(&model, move |model, cx| {
+        let label = recording_menu_label(model.read(cx).state);
+        if label != last_label {
+            last_label = label;
+            cx.set_menus(build_menus(label));
+        }
+    })
+    .detach();
 
     let runner_for_shutdown = runner;
     let model_for_shutdown = model;
@@ -56,6 +76,31 @@ pub fn configure(
         );
         async move {}
     });
+}
+
+/// The recording menu item's label for the given session state: "Stop" while
+/// a session is live (or transitioning), "Start" otherwise.
+fn recording_menu_label(state: SessionState) -> &'static str {
+    match state {
+        SessionState::Recording { .. } | SessionState::Starting | SessionState::Stopping => {
+            "Stop Recording"
+        },
+        SessionState::Idle | SessionState::Failed => "Start Recording",
+    }
+}
+
+/// Build the application menu with the recording item carrying `record_label`.
+fn build_menus(record_label: &'static str) -> Vec<Menu> {
+    vec![Menu {
+        name: "Wisp".into(),
+        items: vec![
+            MenuItem::action("About Wisp", About),
+            MenuItem::separator(),
+            MenuItem::action(record_label, ToggleRecording),
+            MenuItem::separator(),
+            MenuItem::action("Quit Wisp", Quit),
+        ],
+    }]
 }
 
 /// If a recording is active (or stopping), request stop and wait for the

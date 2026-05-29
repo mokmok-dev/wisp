@@ -89,10 +89,16 @@ fn main() {
             runner.clone(),
             storage.clone(),
             model.clone(),
-            recordings_dir,
+            recordings_dir.clone(),
         );
 
-        configure_app_menu(cx, runner.clone(), storage.clone(), model.clone());
+        configure_app_menu(
+            cx,
+            runner.clone(),
+            storage.clone(),
+            model.clone(),
+            recordings_dir,
+        );
 
         spawn_session_update_pump(cx, runner, storage, model.clone());
         spawn_cursor_blink(cx, window);
@@ -245,7 +251,7 @@ fn spawn_permission_refresh(
     .detach();
 }
 
-fn toggle_recording(
+pub(crate) fn toggle_recording(
     runner: &SessionRunner,
     model: &gpui::Entity<AppModel>,
     recordings_dir: &std::path::Path,

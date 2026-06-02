@@ -10,6 +10,11 @@
 
 #![allow(unsafe_code, non_camel_case_types)]
 
+// Pull the Windows staticlib/rlib into the link line so the `extern "C"` symbols
+// below resolve for dependents (macOS uses `build.rs` + Swift instead).
+#[cfg(all(target_os = "windows", feature = "windows-backend"))]
+extern crate wisp_audiokit_win;
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::os::raw::c_int;
 use std::os::raw::{c_char, c_void};

@@ -29,6 +29,7 @@ jobs:
           Expand-Archive -Path $voskZip -DestinationPath .
           $voskDir = Join-Path $PWD "vosk-win64-0.3.45"
           echo "$voskDir" >> $env:GITHUB_PATH
+          echo "LIB=$voskDir;$env:LIB" >> $env:GITHUB_ENV
       - name: Build and test wisp-audiokit (Windows backend)
         run: cargo test -p wisp-audiokit --locked
       - name: Build wisp-desktop (release)

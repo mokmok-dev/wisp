@@ -21,13 +21,8 @@ unsafe_code = "allow"
 
 [dependencies]
 crossbeam-channel = { workspace = true }
-hound = "3.5.1"
-parking_lot = "0.12.5"
-rubato = "0.16.2"
-wasapi = "0.23.0"
-vosk = "0.3.1"
-windows = { version = "0.61.3", features = [
-    "Win32_Foundation",
-    "Win32_Media_Audio",
-    "Win32_System_Com",
-] }
+hound = { workspace = true }
+parking_lot = { workspace = true }
+rubato = { workspace = true }
+vosk = { workspace = true }
+wasapi = { workspace = true }

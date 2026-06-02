@@ -66,66 +66,74 @@ pub unsafe extern "C" fn wisp_session_new(
     on_log: Option<WispLogCallback>,
     user_data: *mut c_void,
 ) -> *mut WispSession {
-    if output_dir.is_null() || locale.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        if output_dir.is_null() || locale.is_null() {
+            return ptr::null_mut();
+        }
+        let output_dir = match CStr::from_ptr(output_dir).to_str() {
+            Ok(s) => PathBuf::from(s),
+            Err(_) => return ptr::null_mut(),
+        };
+        let locale = match CStr::from_ptr(locale).to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => return ptr::null_mut(),
+        };
+        let data_root = parent_data_root(&output_dir);
+        let session = WispSession {
+            inner: Mutex::new(SessionState::new(
+                output_dir,
+                locale.clone(),
+                data_root.clone(),
+                on_result,
+                on_log,
+                user_data as usize,
+            )),
+            locale,
+            data_root,
+        };
+        Box::into_raw(Box::new(session))
     }
-    let output_dir = match CStr::from_ptr(output_dir).to_str() {
-        Ok(s) => PathBuf::from(s),
-        Err(_) => return ptr::null_mut(),
-    };
-    let locale = match CStr::from_ptr(locale).to_str() {
-        Ok(s) => s.to_string(),
-        Err(_) => return ptr::null_mut(),
-    };
-    let data_root = parent_data_root(&output_dir);
-    let session = WispSession {
-        inner: Mutex::new(SessionState::new(
-            output_dir,
-            locale.clone(),
-            data_root.clone(),
-            on_result,
-            on_log,
-            user_data as usize,
-        )),
-        locale,
-        data_root,
-    };
-    Box::into_raw(Box::new(session))
 }
 
 /// # Safety
 /// See `wisp_audiokit.h`.
 #[no_mangle]
 pub unsafe extern "C" fn wisp_session_start(session: *mut WispSession) -> c_int {
-    if session.is_null() {
-        return 1;
+    unsafe {
+        if session.is_null() {
+            return 1;
+        }
+        let session = &*session;
+        let mut inner = session.inner.lock();
+        inner.start()
     }
-    let session = &*session;
-    let mut inner = session.inner.lock();
-    inner.start()
 }
 
 /// # Safety
 /// See `wisp_audiokit.h`.
 #[no_mangle]
 pub unsafe extern "C" fn wisp_session_stop(session: *mut WispSession) {
-    if session.is_null() {
-        return;
+    unsafe {
+        if session.is_null() {
+            return;
+        }
+        let session = &*session;
+        session.inner.lock().stop();
     }
-    let session = &*session;
-    session.inner.lock().stop();
 }
 
 /// # Safety
 /// See `wisp_audiokit.h`.
 #[no_mangle]
 pub unsafe extern "C" fn wisp_session_free(session: *mut WispSession) {
-    if session.is_null() {
-        return;
+    unsafe {
+        if session.is_null() {
+            return;
+        }
+        let boxed = Box::from_raw(session);
+        boxed.inner.lock().stop();
+        drop(boxed);
     }
-    let mut boxed = Box::from_raw(session);
-    boxed.inner.lock().stop();
-    drop(boxed);
 }
 
 /// # Safety
@@ -134,13 +142,15 @@ pub unsafe extern "C" fn wisp_session_free(session: *mut WispSession) {
 pub unsafe extern "C" fn wisp_session_last_error_message(
     session: *mut WispSession
 ) -> *const c_char {
-    if session.is_null() {
-        return ptr::null();
-    }
-    let session = &*session;
-    match session.inner.lock().last_error_cstr() {
-        Some(s) => s.as_ptr(),
-        None => ptr::null(),
+    unsafe {
+        if session.is_null() {
+            return ptr::null();
+        }
+        let session = &*session;
+        match session.inner.lock().last_error_cstr() {
+            Some(s) => s.as_ptr(),
+            None => ptr::null(),
+        }
     }
 }
 

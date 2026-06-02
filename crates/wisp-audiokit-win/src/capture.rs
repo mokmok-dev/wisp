@@ -59,7 +59,9 @@ fn capture_loop(
     pcm_tx: Sender<PcmChunk>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    initialize_mta().map_err(|e| format!("COM init failed: {e}"))?;
+    initialize_mta()
+        .ok()
+        .map_err(|e| format!("COM init failed: {e:?}"))?;
 
     let enumerator = DeviceEnumerator::new().map_err(|e| e.to_string())?;
     let device_dir = if loopback {
@@ -227,7 +229,7 @@ fn bytes_to_mono_f32(
 /// Probe whether the default capture device can be opened (microphone permission).
 pub fn probe_microphone() -> bool {
     initialize_mta().is_ok()
-        && (|| {
+        && (|| -> Option<()> {
             let enumerator = DeviceEnumerator::new().ok()?;
             let device = enumerator.get_default_device(&Direction::Capture).ok()?;
             let mut client = device.get_iaudioclient().ok()?;

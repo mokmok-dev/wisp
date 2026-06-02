@@ -26,10 +26,7 @@
         # uses the Rust `wasapi` crate and needs no extra Nix package. Not used on
         # macOS (Swift SpeechAnalyzer instead).
         voskApi =
-          if pkgs.stdenv.hostPlatform.isDarwin then
-            null
-          else
-            pkgs.callPackage ./nix/vosk-api.nix { };
+          if pkgs.stdenv.hostPlatform.isDarwin then null else pkgs.callPackage ./nix/vosk-api.nix { };
         voskModelJa = pkgs.callPackage ./nix/vosk-model-small-ja.nix { };
 
         voskDevHook = pkgs.lib.optionalString (voskApi != null) ''
@@ -40,7 +37,10 @@
           export WISP_VOSK_MODEL="${voskModelJa}"
         '';
 
-        voskPackages = pkgs.lib.filter (p: p != null) [ voskApi voskModelJa ];
+        voskPackages = pkgs.lib.filter (p: p != null) [
+          voskApi
+          voskModelJa
+        ];
 
         # Shared by both devShells on macOS. Nix injects its own apple-sdk +
         # xcrun wrapper, both of which are too old for what WispAudioKit and
@@ -77,13 +77,26 @@
 
         devShells = {
           ci = pkgs.mkShell {
-            packages = with pkgs; [ rustToolchain nixfmt swiftformat ] ++ voskPackages;
+            packages =
+              with pkgs;
+              [
+                rustToolchain
+                nixfmt
+                swiftformat
+              ]
+              ++ voskPackages;
 
             shellHook = voskDevHook + darwinToolchainHook;
           };
 
           default = pkgs.mkShell {
-            packages = with pkgs; [ rustToolchain sccache ] ++ voskPackages;
+            packages =
+              with pkgs;
+              [
+                rustToolchain
+                sccache
+              ]
+              ++ voskPackages;
 
             shellHook = ''
               export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"

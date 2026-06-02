@@ -11,6 +11,8 @@ on:
       - ".github/workflows/rust.yaml"
       - "flake.lock"
       - "flake.nix"
+      - "crates/wisp-audiokit-win/**"
+      - "nix/**"
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-rust
   cancel-in-progress: true
@@ -28,5 +30,5 @@ jobs:
       - run: nix develop .#ci --quiet --command cargo fmt --all -- --check
       # wisp-desktop is macOS-only (GPUI + WispAudioKit); Linux lacks the X11
       # libs GPUI links against. macOS coverage lives in rust-macos.yaml.
-      - run: nix develop .#ci --quiet --command cargo clippy --workspace --exclude wisp-desktop --all-targets -- -D warnings
-      - run: nix develop .#ci --quiet --command cargo test --workspace --exclude wisp-desktop --all-targets
+      - run: nix develop .#ci --quiet --command cargo clippy --workspace --exclude wisp-desktop --exclude wisp-audiokit-win --all-targets -- -D warnings
+      - run: nix develop .#ci --quiet --command cargo test --workspace --exclude wisp-desktop --exclude wisp-audiokit-win --all-targets

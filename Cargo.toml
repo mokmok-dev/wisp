@@ -12,10 +12,15 @@ resolver = "3"
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
 crossbeam-channel = "0.5.15"
 gpui = "0.2.2"
+hound = "3.5.1"
+parking_lot = "0.12.5"
+rubato = "0.16.2"
 rusqlite = { version = "0.40.0", features = ["bundled", "chrono"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tempfile = "3.27.0"
 thiserror = "2.0.18"
+vosk = "0.3.1"
+wasapi = "0.23.0"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -50,13 +50,7 @@ pub fn spawn_pipeline(
                                 if !text.is_empty() && text != last_partial {
                                     last_partial = text.clone();
                                     let now = started.elapsed().as_secs_f64();
-                                    on_result(
-                                        source,
-                                        segment_id,
-                                        text,
-                                        now.saturating_sub(1.0),
-                                        now,
-                                    );
+                                    on_result(source, segment_id, text, (now - 1.0).max(0.0), now);
                                 }
                             },
                             Ok(DecodingState::Finalized) => {
@@ -67,7 +61,7 @@ pub fn spawn_pipeline(
                                         source,
                                         segment_id,
                                         final_text,
-                                        now.saturating_sub(2.0),
+                                        (now - 2.0).max(0.0),
                                         now,
                                     );
                                     segment_id = segment_id.saturating_add(1);
@@ -87,7 +81,7 @@ pub fn spawn_pipeline(
             let final_text = complete_text(&recognizer.final_result());
             if !final_text.is_empty() {
                 let now = started.elapsed().as_secs_f64();
-                on_result(source, segment_id, final_text, now.saturating_sub(2.0), now);
+                on_result(source, segment_id, final_text, (now - 2.0).max(0.0), now);
             }
         })
         .expect("spawn vosk pipeline thread")

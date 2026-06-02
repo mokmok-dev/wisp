@@ -6909,7 +6909,6 @@ dependencies = [
  "rubato",
  "vosk",
  "wasapi",
- "windows 0.61.3",
 ]
 
 [[package]]

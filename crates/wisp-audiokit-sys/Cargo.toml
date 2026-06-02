@@ -19,5 +19,10 @@ unwrap_used = "warn"
 # This crate is the FFI boundary: `extern "C"` requires unsafe.
 unsafe_code = "allow"
 
-[target.'cfg(windows)'.dependencies]
-wisp-audiokit-win = { path = "../wisp-audiokit-win" }
+[features]
+# Enabled by `wisp-audiokit` on Windows only so Linux/macOS CI never resolves
+# `wisp-audiokit-win` (and its WASAPI/Vosk graph) in the workspace.
+windows-backend = ["dep:wisp-audiokit-win"]
+
+[dependencies]
+wisp-audiokit-win = { path = "../wisp-audiokit-win", optional = true }

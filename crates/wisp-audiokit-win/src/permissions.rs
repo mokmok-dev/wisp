@@ -1,6 +1,7 @@
 //! Windows privacy settings for microphone access.
 
 use crate::capture;
+use crate::model_download;
 use crate::speech;
 
 const STATUS_UNDETERMINED: i32 = 0;
@@ -42,10 +43,13 @@ pub fn request_speech(
     data_root: &std::path::Path,
     locale: &str,
 ) -> i32 {
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "ms-settings:privacy-speech"])
-        .spawn();
-    speech_status(data_root, locale)
+    match model_download::ensure_model(locale, data_root, |_, _| {}) {
+        Ok(_) => STATUS_GRANTED,
+        Err(err) => {
+            eprintln!("wisp: Vosk model download failed: {err}");
+            speech_status(data_root, locale)
+        },
+    }
 }
 
 #[cfg(test)]

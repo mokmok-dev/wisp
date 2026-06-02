@@ -113,7 +113,7 @@ pub fn resolve_model_path(
     None
 }
 
-fn model_candidates_for_locale(locale: &str) -> &'static [&'static str] {
+pub fn model_candidates_for_locale(locale: &str) -> &'static [&'static str] {
     match locale {
         "ja" | "ja-JP" => &["vosk-model-small-ja-0.22", "vosk-model-ja-0.22"],
         "en" | "en-US" => &["vosk-model-small-en-us-0.15", "vosk-model-en-us-0.22"],

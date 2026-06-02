@@ -331,11 +331,13 @@ impl TranscriptView {
             Permission::Microphone,
             permissions.microphone,
             pending == Some(Permission::Microphone),
+            None,
         );
         let row_speech = self.render_permission_row(
             Permission::SpeechRecognition,
             permissions.speech,
             pending == Some(Permission::SpeechRecognition),
+            permissions.speech_download,
         );
 
         let card = div()
@@ -379,10 +381,25 @@ impl TranscriptView {
         perm: Permission,
         status: PermissionStatus,
         is_pending: bool,
+        download: Option<crate::app::SpeechDownloadProgress>,
     ) -> impl IntoElement {
         let title_text = perms::label(perm);
         let rationale_text = perms::rationale(perm);
-        let status_text = perms::status_label(status);
+        let status_text = if is_pending {
+            #[cfg(target_os = "windows")]
+            if let Some(progress) = download {
+                perms::speech_download_status(progress)
+            } else {
+                perms::status_label(status).to_string()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = download;
+                perms::status_label(status).to_string()
+            }
+        } else {
+            perms::status_label(status).to_string()
+        };
 
         let info = div()
             .flex()
@@ -460,15 +477,16 @@ impl TranscriptView {
                 .py(px(7.0))
                 .text_sm()
                 .text_color(theme::text_tertiary())
-                .child("Waiting…")
+                .child("Please wait…")
                 .into_any_element();
         }
 
         // Undetermined → can re-trigger the OS prompt.
         // Denied → can't, OS won't prompt again; jump straight to Settings.
-        let (label, action_kind) = match status {
-            PermissionStatus::Denied => ("Open Settings", ActionKind::OpenSettings),
-            _ => ("Allow", ActionKind::Request),
+        let label = perms::action_label(perm, status);
+        let action_kind = match status {
+            PermissionStatus::Denied => ActionKind::OpenSettings,
+            _ => ActionKind::Request,
         };
         let on_request = self.on_request_permission.clone();
         let on_open = self.on_open_settings.clone();

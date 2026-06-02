@@ -24,5 +24,7 @@ crossbeam-channel = { workspace = true }
 hound = { workspace = true }
 parking_lot = { workspace = true }
 rubato = { workspace = true }
+ureq = { workspace = true }
 vosk = { workspace = true }
 wasapi = { workspace = true }
+zip = { workspace = true }

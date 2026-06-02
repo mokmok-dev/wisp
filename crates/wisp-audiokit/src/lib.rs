@@ -97,6 +97,22 @@ mod imp {
         status_from_raw(raw)
     }
 
+    /// Download the Vosk speech model for `locale` when missing (Windows only).
+    ///
+    /// `on_progress` is called with `(bytes_received, total_bytes)` while the
+    /// zip is streaming. Returns once the model directory exists.
+    #[cfg(target_os = "windows")]
+    pub fn ensure_speech_model(
+        locale: &str,
+        mut on_progress: impl FnMut(u64, Option<u64>),
+    ) -> Result<(), String> {
+        let data_root = wisp_audiokit_win::session::default_data_root();
+        wisp_audiokit_win::model_download::ensure_model(locale, &data_root, |received, total| {
+            on_progress(received, total);
+        })
+        .map(|_| ())
+    }
+
     /// `WispAudioKit` library version (e.g. `"0.1.0"`).
     ///
     /// # Panics
@@ -435,6 +451,8 @@ mod imp {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub use imp::ensure_speech_model;
 pub use imp::version;
 pub use imp::{Event, Session, SessionResult, check_permission, request_permission};
 pub use wisp_core::SourceLabel;

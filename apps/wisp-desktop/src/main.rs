@@ -37,6 +37,7 @@ use wisp_storage::Storage;
 mod about_view;
 mod app;
 mod app_menu;
+mod data_dir;
 mod library;
 mod permissions;
 mod session_runner;
@@ -62,7 +63,7 @@ fn main() {
     Application::new().run(|cx| {
         cx.activate(true);
 
-        let data_dir = default_data_directory();
+        let data_dir = data_dir::wisp_data_root();
         let recordings_dir = data_dir.join("recordings");
         let storage = open_storage(&data_dir);
         let runner = Arc::new(SessionRunner::spawn());
@@ -338,37 +339,4 @@ fn open_storage(data_dir: &std::path::Path) -> SharedStorage {
     });
     let storage = storage.expect("open in-memory storage as last-resort fallback");
     Arc::new(Mutex::new(storage))
-}
-
-fn default_data_directory() -> PathBuf {
-    if let Ok(dir) = std::env::var("WISP_DATA_DIR") {
-        return PathBuf::from(dir);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // %LOCALAPPDATA%\dev.mokmok.wisp\
-        return std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join("dev.mokmok.wisp");
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // ~/Library/Application Support/dev.mokmok.wisp/
-        let mut p = std::env::var_os("HOME").map_or_else(std::env::temp_dir, PathBuf::from);
-        p.push("Library");
-        p.push("Application Support");
-        p.push("dev.mokmok.wisp");
-        return p;
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join("dev.mokmok.wisp")
-    }
 }

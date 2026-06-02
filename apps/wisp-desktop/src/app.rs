@@ -44,11 +44,20 @@ pub enum View {
 /// are `Granted`. While `pending` is `Some(p)`, a previous
 /// `request_permission(p)` call is still waiting on the OS dialog — the
 /// onboarding row for that permission shows a spinner instead of a button.
+/// Bytes received / optional total while a Vosk model zip is downloading (Windows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeechDownloadProgress {
+    pub received: u64,
+    pub total: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Permissions {
     pub microphone: PermissionStatus,
     pub speech: PermissionStatus,
     pub pending: Option<Permission>,
+    /// Set during Windows onboarding while the speech model is downloading.
+    pub speech_download: Option<SpeechDownloadProgress>,
 }
 
 impl Permissions {
@@ -57,6 +66,7 @@ impl Permissions {
             microphone: PermissionStatus::Undetermined,
             speech: PermissionStatus::Undetermined,
             pending: None,
+            speech_download: None,
         }
     }
 

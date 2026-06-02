@@ -5,6 +5,7 @@
 
 mod capture;
 mod ffi;
+mod model_download;
 mod permissions;
 mod session;
 mod speech;

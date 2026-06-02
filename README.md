@@ -59,7 +59,7 @@ Microphone input ───────┘        │                            
 - **Windows 10/11** (x64)
 - **Rust 1.95+** — pinned in `rust-toolchain.toml`.
 - **[Vosk](https://alphacephei.com/vosk/)** native library on `PATH` (see [vosk-api releases](https://github.com/alphacep/vosk-api/releases); CI uses `vosk-win64-0.3.45.zip`).
-- A Vosk language model under `%LOCALAPPDATA%\dev.mokmok.wisp\models\` (e.g. `vosk-model-small-ja-0.22` for Japanese), or set `WISP_VOSK_MODEL` to the model directory.
+- A Vosk language model: the first-run onboarding screen downloads `vosk-model-small-ja-0.22` into `%LOCALAPPDATA%\dev.mokmok.wisp\models\` automatically (~40 MB). You can also place a model manually or set `WISP_VOSK_MODEL` to its directory.
 - Microphone privacy enabled for desktop apps (Settings → Privacy → Microphone).
 
 ## Build & run
@@ -93,7 +93,8 @@ See `.github/workflows/release.yaml` for release builds — pushing a `v*` tag b
 
 ```powershell
 # Install Vosk DLLs (add the extracted folder to PATH)
-# Download a model, e.g. vosk-model-small-ja-0.22, into:
+# On first launch, use the onboarding "Download" button for the speech model,
+# or place vosk-model-small-ja-0.22 under:
 #   %LOCALAPPDATA%\dev.mokmok.wisp\models\vosk-model-small-ja-0.22\
 
 cargo build -p wisp-desktop --release

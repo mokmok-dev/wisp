@@ -663,8 +663,13 @@ fn render_transcript(
                 };
                 let active_idx = app.active_segment_index();
                 let is_active = Some(ix) == active_idx;
-                render_segment(seg, is_active && cursor_visible, is_active && !seg.is_final)
-                    .into_any_element()
+                render_segment_row(
+                    ix,
+                    seg,
+                    is_active && cursor_visible,
+                    is_active && !seg.is_final,
+                )
+                .into_any_element()
             })
             .w_full()
             .h_full(),
@@ -695,7 +700,24 @@ fn render_empty_state() -> impl IntoElement {
         )
 }
 
-fn render_segment(
+/// One transcript row in the virtualized list. GPUI's `list` stacks items by
+/// measured height and does not leave space for margins between siblings, so
+/// the inter-segment gap is applied as top padding on the wrapper (matching
+/// the old flex column's `gap(px(10.0))`).
+fn render_segment_row(
+    index: usize,
+    seg: &Segment,
+    show_cursor: bool,
+    is_active: bool,
+) -> impl IntoElement {
+    let gap = if index > 0 { px(10.0) } else { px(0.0) };
+    div()
+        .w_full()
+        .pt(gap)
+        .child(render_segment_card(seg, show_cursor, is_active))
+}
+
+fn render_segment_card(
     seg: &Segment,
     show_cursor: bool,
     is_active: bool,
@@ -737,7 +759,6 @@ fn render_segment(
         .flex()
         .items_start()
         .w_full()
-        .mb(px(10.0))
         .gap(px(12.0))
         .py(px(8.0))
         .px(px(12.0))

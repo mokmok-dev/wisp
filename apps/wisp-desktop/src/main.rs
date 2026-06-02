@@ -41,6 +41,7 @@ mod library;
 mod permissions;
 mod session_runner;
 mod session_updates;
+mod transcript_export;
 mod transcript_view;
 
 use app::{AppModel, SessionState};

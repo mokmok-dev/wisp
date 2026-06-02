@@ -8,12 +8,22 @@ use std::time::Duration;
 use gpui::{App, Entity, KeyBinding, Menu, MenuItem, actions};
 
 use crate::about_view;
-use crate::app::{AppModel, SessionState};
+use crate::app::{AppModel, SessionState, View};
 use crate::library::SharedStorage;
 use crate::session_runner::SessionRunner;
 use crate::session_updates::apply_update;
+use crate::transcript_export::{self, suggested_export_name};
 
-actions!(wisp_desktop, [Quit, About, ToggleRecording]);
+actions!(
+    wisp_desktop,
+    [
+        Quit,
+        About,
+        ToggleRecording,
+        CopyTranscript,
+        ExportTranscript
+    ]
+);
 
 /// Wire up the menu bar, keyboard shortcuts, and quit handlers.
 pub fn configure(
@@ -45,9 +55,31 @@ pub fn configure(
         crate::toggle_recording(&runner_for_toggle, &model_for_toggle, &recordings_dir, cx);
     });
 
+    let model_for_copy = model.clone();
+    cx.on_action(move |_: &CopyTranscript, cx| {
+        let app = model_for_copy.read(cx);
+        if !matches!(app.view, View::LiveSession | View::History { .. }) {
+            return;
+        }
+        transcript_export::copy_transcript_to_clipboard(&app.segments, cx);
+    });
+
+    let model_for_export = model.clone();
+    cx.on_action(move |_: &ExportTranscript, cx| {
+        let app = model_for_export.read(cx);
+        if !matches!(app.view, View::LiveSession | View::History { .. }) {
+            return;
+        }
+        let title = app.viewed_session.as_ref().map(|s| s.title.as_str());
+        let name = suggested_export_name(title, "transcript");
+        transcript_export::export_transcript(app.segments.clone(), &name, cx);
+    });
+
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-r", ToggleRecording, None),
+        KeyBinding::new("cmd-shift-c", CopyTranscript, None),
+        KeyBinding::new("cmd-shift-e", ExportTranscript, None),
     ]);
 
     // The recording item's label flips between "Start" and "Stop" with the
@@ -97,6 +129,9 @@ fn build_menus(record_label: &'static str) -> Vec<Menu> {
             MenuItem::action("About Wisp", About),
             MenuItem::separator(),
             MenuItem::action(record_label, ToggleRecording),
+            MenuItem::separator(),
+            MenuItem::action("Copy Transcript", CopyTranscript),
+            MenuItem::action("Export Transcript…", ExportTranscript),
             MenuItem::separator(),
             MenuItem::action("Quit Wisp", Quit),
         ],

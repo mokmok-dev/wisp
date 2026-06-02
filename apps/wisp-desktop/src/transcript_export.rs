@@ -84,11 +84,12 @@ pub fn export_transcript(
 /// Default folder for the save dialog — `~/Downloads` when available.
 fn default_export_directory() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
-        let downloads = PathBuf::from(home).join("Downloads");
+        let home_path = PathBuf::from(&home);
+        let downloads = home_path.join("Downloads");
         if downloads.is_dir() {
             return downloads;
         }
-        return PathBuf::from(home);
+        return home_path;
     }
     std::env::temp_dir()
 }

@@ -38,16 +38,23 @@ fn build_windows() {
         .join("src");
     println!("cargo:rerun-if-changed={}", win_src.display());
     println!("cargo:rustc-link-lib=user32");
-    // Vosk native library (CI adds vosk-win64 to PATH; local dev sets LIB).
+    // Vosk import library (CI sets LIB to vosk-win64-*; local dev does the same).
     if let Ok(path) = env::var("LIB") {
         for dir in env::split_paths(&path) {
-            if dir.join("vosk.lib").exists() || dir.join("libvosk.lib").exists() {
+            let libvosk = dir.join("libvosk.lib");
+            let vosk = dir.join("vosk.lib");
+            if libvosk.exists() {
                 println!("cargo:rustc-link-search=native={}", dir.display());
+                println!("cargo:rustc-link-lib=libvosk");
+                break;
+            }
+            if vosk.exists() {
+                println!("cargo:rustc-link-search=native={}", dir.display());
+                println!("cargo:rustc-link-lib=vosk");
                 break;
             }
         }
     }
-    println!("cargo:rustc-link-lib=vosk");
 }
 
 fn build_macos() {

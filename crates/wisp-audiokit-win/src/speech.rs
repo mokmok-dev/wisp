@@ -68,6 +68,9 @@ pub fn spawn_pipeline(
                                     last_partial.clear();
                                 }
                             },
+                            Ok(DecodingState::Failed) => {
+                                on_log("Vosk decoding failed".into());
+                            },
                             Err(err) => {
                                 on_log(format!("Vosk accept_waveform: {err}"));
                             },

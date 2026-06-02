@@ -51,14 +51,14 @@ fn version_string() -> &'static CStr {
 
 /// # Safety
 /// See `wisp_audiokit.h`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wisp_audiokit_version() -> *const c_char {
     version_string().as_ptr()
 }
 
 /// # Safety
 /// See `wisp_audiokit.h`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wisp_session_new(
     output_dir: *const c_char,
     locale: *const c_char,
@@ -97,7 +97,7 @@ pub unsafe extern "C" fn wisp_session_new(
 
 /// # Safety
 /// See `wisp_audiokit.h`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wisp_session_start(session: *mut WispSession) -> c_int {
     unsafe {
         if session.is_null() {
@@ -111,7 +111,7 @@ pub unsafe extern "C" fn wisp_session_start(session: *mut WispSession) -> c_int 
 
 /// # Safety
 /// See `wisp_audiokit.h`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wisp_session_stop(session: *mut WispSession) {
     unsafe {
         if session.is_null() {
@@ -124,7 +124,7 @@ pub unsafe extern "C" fn wisp_session_stop(session: *mut WispSession) {
 
 /// # Safety
 /// See `wisp_audiokit.h`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wisp_session_free(session: *mut WispSession) {
     unsafe {
         if session.is_null() {
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn wisp_session_free(session: *mut WispSession) {
 
 /// # Safety
 /// See `wisp_audiokit.h`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wisp_session_last_error_message(
     session: *mut WispSession
 ) -> *const c_char {
@@ -156,7 +156,7 @@ pub unsafe extern "C" fn wisp_session_last_error_message(
 
 /// # Safety
 /// See `wisp_audiokit.h`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wisp_permission_status(permission: i32) -> c_int {
     let data_root = default_data_root();
     let locale = "ja-JP".to_string();
@@ -169,7 +169,7 @@ pub unsafe extern "C" fn wisp_permission_status(permission: i32) -> c_int {
 
 /// # Safety
 /// See `wisp_audiokit.h`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wisp_permission_request(permission: i32) -> c_int {
     let data_root = default_data_root();
     let locale = "ja-JP".to_string();

@@ -105,10 +105,10 @@ fn capture_loop(
         bits_per_sample: 16,
         sample_format: SampleFormat::Int,
     };
-    let wav_writer = Mutex::new(
+    let wav_writer: Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>> = Mutex::new(Some(
         WavWriter::create(&wav_path, wav_spec)
             .map_err(|e| format!("create wav {}: {e}", wav_path.display()))?,
-    );
+    ));
 
     let mut resampler = build_resampler(sample_rate as usize)?;
     let mut raw_queue: VecDeque<u8> = VecDeque::new();
@@ -139,7 +139,10 @@ fn capture_loop(
             }
 
             {
-                let writer = wav_writer.lock();
+                let mut writer = wav_writer.lock();
+                let Some(writer) = writer.as_mut() else {
+                    return Err("wav writer already finalized".into());
+                };
                 for sample in &pcm_i16 {
                     writer
                         .write_sample(*sample)
@@ -155,7 +158,9 @@ fn capture_loop(
     }
 
     audio_client.stop_stream().ok();
-    wav_writer.lock().finalize().map_err(|e| e.to_string())?;
+    if let Some(writer) = wav_writer.lock().take() {
+        writer.finalize().map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

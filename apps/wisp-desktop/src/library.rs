@@ -18,7 +18,7 @@ use wisp_audiokit::SourceLabel;
 use wisp_core::{NewSegment, NewSession, SessionId};
 use wisp_storage::{Storage, StorageError};
 
-use crate::app::Segment as UiSegment;
+use crate::app::{Segment as UiSegment, break_on_sentence_end};
 
 /// Format a `started_at` timestamp into the default session title:
 /// `2026-05-29 14:30` in the user's local timezone. Users can rename
@@ -115,13 +115,17 @@ pub fn load_history(
     let segs = storage.segments().list_by_session(session_id)?;
     Ok(segs
         .into_iter()
-        .map(|s| UiSegment {
-            source: s.source,
-            id: u64::from(s.segment_index),
-            text: s.text,
-            start_seconds: s.start_seconds,
-            end_seconds: s.end_seconds,
-            is_final: true,
+        .map(|s| {
+            let display_text = break_on_sentence_end(&s.text);
+            UiSegment {
+                source: s.source,
+                id: u64::from(s.segment_index),
+                text: s.text,
+                display_text,
+                start_seconds: s.start_seconds,
+                end_seconds: s.end_seconds,
+                is_final: true,
+            }
         })
         .collect())
 }

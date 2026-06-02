@@ -144,6 +144,7 @@ mod tests {
             source,
             id: 1,
             text: text.into(),
+            display_text: text.into(),
             start_seconds: start,
             end_seconds: start + 1.0,
             is_final: true,

@@ -49,7 +49,9 @@ use app_menu::configure as configure_app_menu;
 use library::SharedStorage;
 use session_runner::SessionRunner;
 use session_updates::apply_update;
-use transcript_view::{TranscriptView, cursor_blink_period, ui_tick_period};
+use transcript_view::{
+    TranscriptView, cursor_blink_period, new_transcript_list_state, ui_tick_period,
+};
 
 /// How often we re-poll permission status from the OS while the
 /// onboarding screen is up. The user might flip the toggle in System
@@ -125,10 +127,15 @@ fn open_main_window(
             let storage_for_open_history = storage.clone();
             let recordings_for_toggle = recordings_dir.clone();
             let runner_for_toggle = runner.clone();
+            let (transcript_list, follow_transcript) = new_transcript_list_state();
             let view = TranscriptView {
                 app: model.clone(),
                 cursor_visible: true,
-                scroll_handle: gpui::ScrollHandle::new(),
+                transcript_list,
+                transcript_list_count: 0,
+                transcript_active_len: 0,
+                transcript_list_view: app::View::Library,
+                follow_transcript,
                 last_signature: (0, 0),
                 on_toggle_record: Arc::new(move |_window, cx| {
                     toggle_recording(
@@ -221,6 +228,9 @@ fn spawn_cursor_blink(
             let ticks = elapsed.as_millis() / cursor_blink_period().as_millis();
             let blink = ticks.is_multiple_of(2);
             let result = window.update(cx, |view, _, cx| {
+                if !view.app.read(cx).needs_live_ui_tick() {
+                    return;
+                }
                 view.cursor_visible = blink;
                 cx.notify();
             });

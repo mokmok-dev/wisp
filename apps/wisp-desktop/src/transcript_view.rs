@@ -8,11 +8,14 @@
 //! Color palette (see `theme` mod) is a deep-slate dark mode with warm
 //! mic/system accents.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
-    Context, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    ScrollHandle, StatefulInteractiveElement, Styled, Window, div, px, rgb,
+    App, Context, ElementId, Entity, FontWeight, InteractiveElement, IntoElement, ListAlignment,
+    ListState, ParentElement, Render, StatefulInteractiveElement, Styled, Window, div, list, px,
+    rgb,
 };
 use wisp_audiokit::{Permission, PermissionStatus, SessionError, SourceLabel};
 use wisp_core::{Session as StoredSession, SessionId};
@@ -40,8 +43,13 @@ pub struct TranscriptView {
     /// Toggled by the cursor-blink animation timer in main.rs so the
     /// ghost-text caret pulses.
     pub cursor_visible: bool,
-    /// Persistent scroll position for the transcript list.
-    pub scroll_handle: ScrollHandle,
+    /// Virtualized transcript list — only visible rows are laid out.
+    pub transcript_list: ListState,
+    pub(crate) transcript_list_count: usize,
+    pub(crate) transcript_active_len: usize,
+    pub(crate) transcript_list_view: View,
+    /// When true, new transcript lines keep the viewport pinned to the bottom.
+    pub follow_transcript: Rc<RefCell<bool>>,
     /// Cheap fingerprint of the transcript on the previous render. When it
     /// changes between renders we know an event landed (new segment or
     /// partial text grew) and pin the scroll position to the bottom — but
@@ -103,50 +111,98 @@ impl Render for TranscriptView {
         }
 
         let view = app.view.clone();
-        let segments = app.segments.clone();
+        let segment_count = app.segments.len();
+        let text_len_sum: usize = app.segments.iter().map(|s| s.text.len()).sum();
         let active_idx = app.active_segment_index();
+        let active_text_len = active_idx.map(|i| app.segments[i].text.len());
         let state = app.state;
         let log_count = app.recent_log.len();
         let last_error = app.last_error.clone();
         let viewed_session = app.viewed_session.clone();
         let current_session_id = app.current_session_id;
         let library = app.library.clone();
+        let model = self.app.clone();
 
         match view {
             View::Library => self.render_library(&library).into_any_element(),
             View::LiveSession => {
-                self.update_scroll_signature(&segments);
+                self.sync_transcript_list(&view, segment_count, active_idx, active_text_len);
+                self.update_scroll_signature(segment_count, text_len_sum);
                 let live_export_title = current_session_id
                     .and_then(|id| library.iter().find(|s| s.id == id).map(|s| s.title.clone()));
                 self.render_live_session(
                     state,
-                    &segments,
-                    active_idx,
+                    model,
+                    segment_count,
                     log_count,
                     last_error.as_ref(),
                     live_export_title.as_deref(),
+                    cx,
                 )
                 .into_any_element()
             },
-            View::History { .. } => self
-                .render_history(viewed_session.as_ref(), &segments)
-                .into_any_element(),
+            View::History { .. } => {
+                self.sync_transcript_list(&view, segment_count, active_idx, active_text_len);
+                self.render_history(viewed_session.as_ref(), model, segment_count, cx)
+                    .into_any_element()
+            },
         }
     }
 }
 
 impl TranscriptView {
+    /// Keep `ListState` in sync with the model — append/splice rows instead
+    /// of rebuilding the whole list each frame.
+    fn sync_transcript_list(
+        &mut self,
+        view: &View,
+        segment_count: usize,
+        active_idx: Option<usize>,
+        active_text_len: Option<usize>,
+    ) {
+        if *view != self.transcript_list_view {
+            self.transcript_list.reset(segment_count);
+            self.transcript_list_count = segment_count;
+            self.transcript_active_len = 0;
+            self.transcript_list_view = view.clone();
+            *self.follow_transcript.borrow_mut() = matches!(view, View::LiveSession);
+            return;
+        }
+
+        if segment_count != self.transcript_list_count {
+            let old = self.transcript_list_count;
+            if segment_count > old {
+                self.transcript_list.splice(old..old, segment_count - old);
+            } else {
+                self.transcript_list.reset(segment_count);
+            }
+            self.transcript_list_count = segment_count;
+            self.transcript_active_len = 0;
+        }
+
+        if let (Some(idx), Some(len)) = (active_idx, active_text_len) {
+            if len != self.transcript_active_len {
+                self.transcript_list.splice(idx..idx + 1, 1);
+                self.transcript_active_len = len;
+            }
+        } else {
+            self.transcript_active_len = 0;
+        }
+    }
+
     /// Refresh `last_signature` and pin scroll to bottom on transcript
     /// growth. Only the live-session view calls this — library and history
     /// don't have a streaming partial to follow.
     fn update_scroll_signature(
         &mut self,
-        segments: &[Segment],
+        segment_count: usize,
+        text_len_sum: usize,
     ) {
-        let signature = (segments.len(), segments.iter().map(|s| s.text.len()).sum());
+        let signature = (segment_count, text_len_sum);
         if signature != self.last_signature {
-            if is_at_bottom(&self.scroll_handle) {
-                self.scroll_handle.scroll_to_bottom();
+            if *self.follow_transcript.borrow() && segment_count > 0 {
+                self.transcript_list
+                    .scroll_to_reveal_item(segment_count - 1);
             }
             self.last_signature = signature;
         }
@@ -155,11 +211,12 @@ impl TranscriptView {
     fn render_live_session(
         &self,
         state: SessionState,
-        segments: &[Segment],
-        active_idx: Option<usize>,
+        model: Entity<AppModel>,
+        segment_count: usize,
         log_count: usize,
         last_error: Option<&SessionError>,
         export_title: Option<&str>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let export_name = suggested_export_name(export_title, "transcript");
         div()
@@ -168,16 +225,16 @@ impl TranscriptView {
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text_primary())
-            .child(self.render_live_top_bar(state, segments, &export_name))
+            .child(self.render_live_top_bar(state, model.clone(), &export_name, cx))
             .child(render_transcript(
-                segments,
-                active_idx,
+                self.transcript_list.clone(),
+                model,
+                segment_count,
                 self.cursor_visible,
-                &self.scroll_handle,
             ))
             .child(render_status_bar(
                 state,
-                segments.len(),
+                segment_count,
                 log_count,
                 last_error,
             ))
@@ -186,7 +243,9 @@ impl TranscriptView {
     fn render_history(
         &self,
         session: Option<&StoredSession>,
-        segments: &[Segment],
+        model: Entity<AppModel>,
+        segment_count: usize,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let title = session.map_or_else(|| "Session".to_string(), |s| s.title.clone());
         let subtitle = session.map(history_subtitle);
@@ -198,17 +257,20 @@ impl TranscriptView {
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text_primary())
-            .child(self.render_history_top_bar(&title, subtitle.as_deref(), segments, &export_name))
-            .child(render_transcript(
-                segments,
-                None,
-                false,
-                &self.scroll_handle,
+            .child(self.render_history_top_bar(
+                &title,
+                subtitle.as_deref(),
+                model.clone(),
+                &export_name,
+                cx,
             ))
-            .child(render_count_status_bar(format!(
-                "{} segments",
-                segments.len()
-            )))
+            .child(render_transcript(
+                self.transcript_list.clone(),
+                model,
+                segment_count,
+                false,
+            ))
+            .child(render_count_status_bar(format!("{segment_count} segments")))
     }
 
     fn render_library(
@@ -250,8 +312,9 @@ impl TranscriptView {
     fn render_live_top_bar(
         &self,
         state: SessionState,
-        segments: &[Segment],
+        model: Entity<AppModel>,
         export_name: &str,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let toggle = self.on_toggle_record.clone();
         let on_back = self.on_back_to_library.clone();
@@ -276,7 +339,7 @@ impl TranscriptView {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(render_transcript_actions(segments, export_name))
+                    .child(render_transcript_actions(model, export_name, cx))
                     .child(render_record_button(state, toggle)),
             )
     }
@@ -285,8 +348,9 @@ impl TranscriptView {
         &self,
         title: &str,
         subtitle: Option<&str>,
-        segments: &[Segment],
+        model: Entity<AppModel>,
         export_name: &str,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let on_back = self.on_back_to_library.clone();
         let mut title_block = div().flex().flex_col().gap(px(2.0)).child(
@@ -319,7 +383,7 @@ impl TranscriptView {
                     .child(render_back_button("library-back-history", on_back))
                     .child(title_block),
             )
-            .child(render_transcript_actions(segments, export_name))
+            .child(render_transcript_actions(model, export_name, cx))
     }
 
     fn render_onboarding(
@@ -576,32 +640,35 @@ fn render_record_button(
 }
 
 fn render_transcript(
-    segments: &[Segment],
-    active_idx: Option<usize>,
+    list_state: ListState,
+    model: Entity<AppModel>,
+    segment_count: usize,
     cursor_visible: bool,
-    scroll_handle: &ScrollHandle,
 ) -> impl IntoElement {
     let mut container = div()
         .id(ElementId::Name("transcript-scroll".into()))
-        .track_scroll(scroll_handle)
         .flex()
         .flex_col()
-        .flex_grow()
-        .overflow_y_scroll()
-        .px(px(20.0))
-        .py(px(16.0))
-        .gap(px(10.0));
+        .flex_grow();
 
-    if segments.is_empty() {
+    if segment_count == 0 {
         container = container.child(render_empty_state());
     } else {
-        for (i, seg) in segments.iter().enumerate() {
-            container = container.child(render_segment(
-                seg,
-                Some(i) == active_idx && cursor_visible,
-                !seg.is_final && Some(i) == active_idx,
-            ));
-        }
+        let model_for_list = model.clone();
+        container = container.px(px(20.0)).py(px(16.0)).child(
+            list(list_state, move |ix, _window, cx| {
+                let app = model_for_list.read(cx);
+                let Some(seg) = app.segments.get(ix) else {
+                    return div().into_any_element();
+                };
+                let active_idx = app.active_segment_index();
+                let is_active = Some(ix) == active_idx;
+                render_segment(seg, is_active && cursor_visible, is_active && !seg.is_final)
+                    .into_any_element()
+            })
+            .w_full()
+            .h_full(),
+        );
     }
     container
 }
@@ -647,15 +714,9 @@ fn render_segment(
         theme::text_primary()
     };
 
-    // Break the displayed text after each sentence-ending 。 so the row
-    // doesn't read as one giant paragraph. Trailing 。 isn't broken — when
-    // the next sentence comes in the line break appears naturally, giving
-    // the partial a typewriter feel.
-    //
-    // The caret is then appended to the text string so it sits inline; the
-    // blink is driven by a timer in main.rs toggling `cursor_visible` and
-    // re-rendering.
-    let mut display = break_on_sentence_end(&seg.text);
+    // `display_text` is kept in sync with `text` on ingest; append the caret
+    // inline for the active partial. Blink is driven by main.rs.
+    let mut display = seg.display_text.clone();
     if is_active {
         display.push(if show_cursor { '▊' } else { ' ' });
     }
@@ -676,6 +737,7 @@ fn render_segment(
         .flex()
         .items_start()
         .w_full()
+        .mb(px(10.0))
         .gap(px(12.0))
         .py(px(8.0))
         .px(px(12.0))
@@ -719,15 +781,21 @@ fn render_new_session_button(
 }
 
 fn render_transcript_actions(
-    segments: &[Segment],
+    model: Entity<AppModel>,
     export_name: &str,
+    cx: &App,
 ) -> gpui::AnyElement {
-    if transcript_export::format_transcript_plain(segments).is_empty() {
+    let has_content = model
+        .read(cx)
+        .segments
+        .iter()
+        .any(|seg| !seg.text.trim().is_empty());
+    if !has_content {
         return div().into_any_element();
     }
 
-    let segments_copy = segments.to_vec();
-    let segments_export = segments.to_vec();
+    let segments_copy = model.read(cx).segments.clone();
+    let segments_export = segments_copy.clone();
     let export_name = export_name.to_string();
 
     div()
@@ -742,7 +810,6 @@ fn render_transcript_actions(
             },
         ))
         .child(render_toolbar_button("transcript-export", "Export", {
-            let segments_export = segments_export.clone();
             let export_name = export_name.clone();
             move |_window, cx| {
                 transcript_export::export_transcript(segments_export.clone(), &export_name, cx);
@@ -999,37 +1066,6 @@ fn render_status_bar(
         )
 }
 
-/// Is the scroll handle close enough to the bottom that we should
-/// continue auto-following new content?
-///
-/// GPUI's vertical scroll offset is in `[-max_offset.height, 0]` — `0`
-/// is the top of the content, `-max_offset.height` is the bottom. We
-/// allow a few pixels of slack so wheel inertia / one-pixel rounding
-/// don't accidentally disable auto-follow. On the very first render
-/// (`max_offset.height == 0`) this also returns true, so the initial
-/// arrival of segments gets scrolled into view.
-fn is_at_bottom(handle: &ScrollHandle) -> bool {
-    let slack = px(8.0);
-    let bottom = -handle.max_offset().height;
-    handle.offset().y <= bottom + slack
-}
-
-/// Insert a `\n` after each sentence-ending 。 *except* the trailing
-/// one — that way the partial line doesn't visibly break the moment the
-/// punctuation is recognised; the break only appears once the next
-/// sentence starts arriving.
-fn break_on_sentence_end(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 8);
-    let mut iter = text.chars().peekable();
-    while let Some(c) = iter.next() {
-        out.push(c);
-        if c == '。' && iter.peek().is_some() {
-            out.push('\n');
-        }
-    }
-    out
-}
-
 /// Public helper used by main.rs to pick a polling interval.
 pub fn cursor_blink_period() -> std::time::Duration {
     std::time::Duration::from_millis(500)
@@ -1046,25 +1082,14 @@ pub fn now() -> Instant {
     Instant::now()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::break_on_sentence_end;
-
-    #[test]
-    fn breaks_between_sentences_but_not_at_trailing_period() {
-        assert_eq!(
-            break_on_sentence_end("一文目。二文目。"),
-            "一文目。\n二文目。"
-        );
-    }
-
-    #[test]
-    fn passes_through_text_without_period() {
-        assert_eq!(break_on_sentence_end("途中"), "途中");
-    }
-
-    #[test]
-    fn preserves_text_with_only_a_trailing_period() {
-        assert_eq!(break_on_sentence_end("こんにちは。"), "こんにちは。");
-    }
+/// Construct a virtualized transcript list and scroll-follow flag.
+pub fn new_transcript_list_state() -> (ListState, Rc<RefCell<bool>>) {
+    let follow_transcript = Rc::new(RefCell::new(true));
+    let follow_for_scroll = follow_transcript.clone();
+    let list = ListState::new(0, ListAlignment::Top, px(100.));
+    list.set_scroll_handler(move |event, _, _| {
+        let at_bottom = event.visible_range.end >= event.count.saturating_sub(1);
+        *follow_for_scroll.borrow_mut() = at_bottom;
+    });
+    (list, follow_transcript)
 }

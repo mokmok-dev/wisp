@@ -74,6 +74,13 @@ nix develop
 cargo run -p wisp-desktop
 ```
 
+On **Linux** and **Windows**, `nix develop` also provides **Vosk** (`libvosk` + a small Japanese model) for the Windows audio backend. **WASAPI** is handled by the Rust `wasapi` crate at build time and does not need a separate Nix package. macOS dev shells use Xcode/Swift instead.
+
+```bash
+# Optional: build only the Vosk packages
+nix build .#vosk-api .#vosk-model-small-ja
+```
+
 If you'd rather use Rust + Xcode directly:
 
 ```bash

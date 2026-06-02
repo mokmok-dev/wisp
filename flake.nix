@@ -22,6 +22,26 @@
         };
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
+        # Windows backend: offline transcription via Vosk (libvosk). Audio capture
+        # uses the Rust `wasapi` crate and needs no extra Nix package. Not used on
+        # macOS (Swift SpeechAnalyzer instead).
+        voskApi =
+          if pkgs.stdenv.hostPlatform.isDarwin then
+            null
+          else
+            pkgs.callPackage ./nix/vosk-api.nix { };
+        voskModelJa = pkgs.callPackage ./nix/vosk-model-small-ja.nix { };
+
+        voskDevHook = pkgs.lib.optionalString (voskApi != null) ''
+          export LIBRARY_PATH="${voskApi}/lib''${LIBRARY_PATH:+:$LIBRARY_PATH}"
+          export LD_LIBRARY_PATH="${voskApi}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export CPATH="${voskApi}/include''${CPATH:+:$CPATH}"
+          export PATH="${voskApi}/lib''${PATH:+:$PATH}"
+          export WISP_VOSK_MODEL="${voskModelJa}"
+        '';
+
+        voskPackages = pkgs.lib.filter (p: p != null) [ voskApi voskModelJa ];
+
         # Shared by both devShells on macOS. Nix injects its own apple-sdk +
         # xcrun wrapper, both of which are too old for what WispAudioKit and
         # GPUI need (Speech.SpeechAnalyzer, Core Audio Process Tap, the
@@ -46,26 +66,29 @@
         '';
       in
       {
+        packages =
+          if voskApi != null then
+            {
+              vosk-api = voskApi;
+              vosk-model-small-ja = voskModelJa;
+            }
+          else
+            { };
+
         devShells = {
           ci = pkgs.mkShell {
-            packages = with pkgs; [
-              rustToolchain
-              nixfmt
-              swiftformat
-            ];
+            packages = with pkgs; [ rustToolchain nixfmt swiftformat ] ++ voskPackages;
 
-            shellHook = darwinToolchainHook;
+            shellHook = voskDevHook + darwinToolchainHook;
           };
 
           default = pkgs.mkShell {
-            packages = with pkgs; [
-              rustToolchain
-              sccache
-            ];
+            packages = with pkgs; [ rustToolchain sccache ] ++ voskPackages;
 
             shellHook = ''
               export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
             ''
+            + voskDevHook
             + darwinToolchainHook;
           };
         };

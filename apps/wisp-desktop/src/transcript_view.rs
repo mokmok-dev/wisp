@@ -19,6 +19,7 @@ use wisp_core::{Session as StoredSession, SessionId};
 
 use crate::app::{AppModel, Permissions, Segment, SessionState, View};
 use crate::permissions as perms;
+use crate::transcript_export::{self, suggested_export_name};
 
 pub struct TranscriptView {
     pub app: gpui::Entity<AppModel>,
@@ -102,24 +103,28 @@ impl Render for TranscriptView {
         }
 
         let view = app.view.clone();
-        let library = app.library.clone();
         let segments = app.segments.clone();
         let active_idx = app.active_segment_index();
         let state = app.state;
         let log_count = app.recent_log.len();
         let last_error = app.last_error.clone();
         let viewed_session = app.viewed_session.clone();
+        let current_session_id = app.current_session_id;
+        let library = app.library.clone();
 
         match view {
             View::Library => self.render_library(&library).into_any_element(),
             View::LiveSession => {
                 self.update_scroll_signature(&segments);
+                let live_export_title = current_session_id
+                    .and_then(|id| library.iter().find(|s| s.id == id).map(|s| s.title.clone()));
                 self.render_live_session(
                     state,
                     &segments,
                     active_idx,
                     log_count,
                     last_error.as_ref(),
+                    live_export_title.as_deref(),
                 )
                 .into_any_element()
             },
@@ -154,14 +159,16 @@ impl TranscriptView {
         active_idx: Option<usize>,
         log_count: usize,
         last_error: Option<&SessionError>,
+        export_title: Option<&str>,
     ) -> impl IntoElement {
+        let export_name = suggested_export_name(export_title, "transcript");
         div()
             .flex()
             .flex_col()
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text_primary())
-            .child(self.render_live_top_bar(state))
+            .child(self.render_live_top_bar(state, segments, &export_name))
             .child(render_transcript(
                 segments,
                 active_idx,
@@ -183,6 +190,7 @@ impl TranscriptView {
     ) -> impl IntoElement {
         let title = session.map_or_else(|| "Session".to_string(), |s| s.title.clone());
         let subtitle = session.map(history_subtitle);
+        let export_name = suggested_export_name(Some(&title), "transcript");
 
         div()
             .flex()
@@ -190,7 +198,7 @@ impl TranscriptView {
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text_primary())
-            .child(self.render_history_top_bar(&title, subtitle.as_deref()))
+            .child(self.render_history_top_bar(&title, subtitle.as_deref(), segments, &export_name))
             .child(render_transcript(
                 segments,
                 None,
@@ -242,6 +250,8 @@ impl TranscriptView {
     fn render_live_top_bar(
         &self,
         state: SessionState,
+        segments: &[Segment],
+        export_name: &str,
     ) -> impl IntoElement {
         let toggle = self.on_toggle_record.clone();
         let on_back = self.on_back_to_library.clone();
@@ -261,13 +271,22 @@ impl TranscriptView {
                     .child(render_back_button("library-back-live", on_back))
                     .child(render_brand()),
             )
-            .child(render_record_button(state, toggle))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(render_transcript_actions(segments, export_name))
+                    .child(render_record_button(state, toggle)),
+            )
     }
 
     fn render_history_top_bar(
         &self,
         title: &str,
         subtitle: Option<&str>,
+        segments: &[Segment],
+        export_name: &str,
     ) -> impl IntoElement {
         let on_back = self.on_back_to_library.clone();
         let mut title_block = div().flex().flex_col().gap(px(2.0)).child(
@@ -300,6 +319,7 @@ impl TranscriptView {
                     .child(render_back_button("library-back-history", on_back))
                     .child(title_block),
             )
+            .child(render_transcript_actions(segments, export_name))
     }
 
     fn render_onboarding(
@@ -698,6 +718,58 @@ fn render_new_session_button(
         })
 }
 
+fn render_transcript_actions(
+    segments: &[Segment],
+    export_name: &str,
+) -> gpui::AnyElement {
+    if transcript_export::format_transcript_plain(segments).is_empty() {
+        return div().into_any_element();
+    }
+
+    let segments_copy = segments.to_vec();
+    let segments_export = segments.to_vec();
+    let export_name = export_name.to_string();
+
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(render_toolbar_button(
+            "transcript-copy",
+            "Copy",
+            move |_window, cx| {
+                transcript_export::copy_transcript_to_clipboard(&segments_copy, cx);
+            },
+        ))
+        .child(render_toolbar_button("transcript-export", "Export", {
+            let segments_export = segments_export.clone();
+            let export_name = export_name.clone();
+            move |_window, cx| {
+                transcript_export::export_transcript(segments_export.clone(), &export_name, cx);
+            }
+        }))
+        .into_any_element()
+}
+
+fn render_toolbar_button(
+    id: &'static str,
+    label: &'static str,
+    on_click: impl Fn(&mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(ElementId::Name(id.into()))
+        .px(px(12.0))
+        .py(px(6.0))
+        .rounded_full()
+        .bg(theme::record_idle())
+        .text_color(theme::text_primary())
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .child(label)
+        .on_click(move |_event, window, cx| on_click(window, cx))
+}
+
 fn render_back_button(
     id: &'static str,
     on_click: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
@@ -853,7 +925,6 @@ fn render_count_status_bar(text: String) -> impl IntoElement {
         .h(px(32.0))
         .flex()
         .items_center()
-        .justify_between()
         .px(px(20.0))
         .border_t_1()
         .border_color(theme::border())

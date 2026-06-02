@@ -79,6 +79,7 @@ Set `WISP_OUTPUT_DIR` to override where recordings are written. When unset, Wisp
 
 - [ ] **Windows support** — exploring WASAPI loopback paired with `Windows.Media.SpeechRecognition` or a local model.
 - [ ] **Linux support** — exploring PipeWire monitor sources paired with a local Whisper-family model.
+- [x] Copy transcript to clipboard and export as plain text (.txt).
 - [ ] Export to Markdown / SRT / JSON.
 - [ ] Speaker diarization within a single channel.
 

@@ -86,11 +86,37 @@ pub struct Segment {
     /// means the previous one is finalised.
     pub id: u64,
     pub text: String,
+    /// Pre-rendered transcript body (sentence breaks applied). Kept in
+    /// sync with `text` so long history views don't re-walk every segment
+    /// on each frame.
+    pub display_text: String,
     pub start_seconds: f64,
     pub end_seconds: f64,
     /// True once a later segment from the same source has appeared, which
     /// means the speech engine has stopped revising this one.
     pub is_final: bool,
+}
+
+/// Insert a `\n` after each sentence-ending 。 *except* the trailing
+/// one — that way the partial line doesn't visibly break the moment the
+/// punctuation is recognised; the break only appears once the next
+/// sentence starts arriving.
+pub fn break_on_sentence_end(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut iter = text.chars().peekable();
+    while let Some(c) = iter.next() {
+        out.push(c);
+        if c == '。' && iter.peek().is_some() {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+impl Segment {
+    fn refresh_display(&mut self) {
+        self.display_text = break_on_sentence_end(&self.text);
+    }
 }
 
 #[derive(Debug)]
@@ -172,6 +198,9 @@ impl AppModel {
         self.viewed_session = Some(session);
         // Historical segments are already finalized.
         self.finalize_all_segments();
+        for seg in &mut self.segments {
+            seg.refresh_display();
+        }
     }
 
     pub fn set_state(
@@ -237,6 +266,7 @@ impl AppModel {
                 seg.text = result.text;
                 seg.start_seconds = result.start_seconds;
                 seg.end_seconds = result.end_seconds;
+                seg.refresh_display();
                 return;
             }
             // Different segment ID for the same source. If the text looks
@@ -249,19 +279,23 @@ impl AppModel {
                 seg.text = result.text;
                 seg.start_seconds = result.start_seconds;
                 seg.end_seconds = result.end_seconds;
+                seg.refresh_display();
                 return;
             }
             seg.is_final = true;
             break;
         }
-        self.segments.push(Segment {
+        let mut segment = Segment {
             source: result.source,
             id: result.segment_id,
             text: result.text,
+            display_text: String::new(),
             start_seconds: result.start_seconds,
             end_seconds: result.end_seconds,
             is_final: false,
-        });
+        };
+        segment.refresh_display();
+        self.segments.push(segment);
     }
 
     /// The most recent non-final segment, if any (used by the renderer to
@@ -272,6 +306,16 @@ impl AppModel {
             .enumerate()
             .rev()
             .find_map(|(i, s)| (!s.is_final).then_some(i))
+    }
+
+    /// Whether the 250ms UI tick should repaint (elapsed timer + cursor
+    /// blink). History and library are static between model updates.
+    pub fn needs_live_ui_tick(&self) -> bool {
+        if self.view != View::LiveSession {
+            return false;
+        }
+        matches!(self.state, SessionState::Recording { .. })
+            || self.active_segment_index().is_some()
     }
 }
 
@@ -321,7 +365,25 @@ fn looks_like_continuation(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{break_on_sentence_end, *};
+
+    #[test]
+    fn breaks_between_sentences_but_not_at_trailing_period() {
+        assert_eq!(
+            break_on_sentence_end("一文目。二文目。"),
+            "一文目。\n二文目。"
+        );
+    }
+
+    #[test]
+    fn passes_through_text_without_period() {
+        assert_eq!(break_on_sentence_end("途中"), "途中");
+    }
+
+    #[test]
+    fn preserves_text_with_only_a_trailing_period() {
+        assert_eq!(break_on_sentence_end("こんにちは。"), "こんにちは。");
+    }
 
     fn r(
         source: SourceLabel,
@@ -439,6 +501,31 @@ mod tests {
         assert!(!m.segments[0].is_final);
         m.finalize_all_segments();
         assert!(m.segments[0].is_final);
+    }
+
+    #[test]
+    fn needs_live_ui_tick_only_on_active_live_session() {
+        let mut m = AppModel::new();
+        m.view = View::History {
+            session_id: SessionId::from(1),
+        };
+        assert!(!m.needs_live_ui_tick());
+
+        m.view = View::LiveSession;
+        m.state = SessionState::Idle;
+        assert!(!m.needs_live_ui_tick());
+
+        m.ingest(Event::Result(r(SourceLabel::Mic, 1, "partial")));
+        assert!(m.needs_live_ui_tick());
+
+        m.finalize_all_segments();
+        m.state = SessionState::Idle;
+        assert!(!m.needs_live_ui_tick());
+
+        m.state = SessionState::Recording {
+            started_at: std::time::Instant::now(),
+        };
+        assert!(m.needs_live_ui_tick());
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 Wisp captures your microphone and system audio (the other side of a call) at the same time and transcribes both on-device. Audio and text never leave your machine.
 
-> Currently macOS 26 (Tahoe) only. Windows and Linux support is coming soon.
+> macOS 26 (Tahoe) and Windows are supported. Linux support is coming soon.
 
 ---
 
@@ -31,7 +31,8 @@ Wisp is a small Cargo workspace with cleanly separated concerns:
 | `crates/wisp-audiokit` | Safe Rust wrapper around the Swift `WispAudioKit` framework. |
 | `crates/wisp-audiokit-sys` | Raw C ABI bindings to `WispAudioKit`. |
 | `crates/wisp-storage` | Session/segment persistence on SQLite (bundled `rusqlite`). |
-| `native/WispAudioKit` | Swift package handling Core Audio Process Tap capture and `SpeechAnalyzer` transcription. Linked into the Rust binary as a static library. |
+| `native/WispAudioKit` | Swift package (macOS) handling Core Audio Process Tap capture and `SpeechAnalyzer` transcription. |
+| `crates/wisp-audiokit-win` | Windows static library: WASAPI mic + loopback capture and Vosk on-device transcription. |
 
 Roughly, data flows like this:
 
@@ -46,10 +47,20 @@ Microphone input ───────┘        │                            
 
 ## Requirements
 
-- **macOS 26 (Tahoe)** — Wisp relies on `SpeechAnalyzer`, Core Audio Process Taps, and the new Metal Toolchain, so macOS 26 is required for now.
+### macOS
+
+- **macOS 26 (Tahoe)** — Wisp relies on `SpeechAnalyzer`, Core Audio Process Taps, and the new Metal Toolchain.
 - **Xcode 26** — for the Swift 6.0 / macOS 26 SDK.
-- **Rust 1.95** — pinned in `rust-toolchain.toml`.
-- Microphone and system-audio recording permissions. macOS will prompt on first launch.
+- **Rust 1.95+** — pinned in `rust-toolchain.toml`.
+- Microphone and speech-recognition permissions (macOS prompts on first launch).
+
+### Windows
+
+- **Windows 10/11** (x64)
+- **Rust 1.95+** — pinned in `rust-toolchain.toml`.
+- **[Vosk](https://alphacephei.com/vosk/)** native library on `PATH` (see [vosk-api releases](https://github.com/alphacep/vosk-api/releases); CI uses `vosk-win64-0.3.45.zip`).
+- A Vosk language model under `%LOCALAPPDATA%\dev.mokmok.wisp\models\` (e.g. `vosk-model-small-ja-0.22` for Japanese), or set `WISP_VOSK_MODEL` to the model directory.
+- Microphone privacy enabled for desktop apps (Settings → Privacy → Microphone).
 
 ## Build & run
 
@@ -69,15 +80,30 @@ If you'd rather use Rust + Xcode directly:
 cargo build -p wisp-desktop --release
 ```
 
-See `.github/workflows/release.yaml` for how the release `.app` bundle is produced — pushing a `v*` tag builds `Wisp.app` on a macOS 26 runner.
+See `.github/workflows/release.yaml` for release builds — pushing a `v*` tag builds `Wisp.app` on macOS and `wisp-desktop.exe` on Windows.
+
+### Windows build
+
+```powershell
+# Install Vosk DLLs (add the extracted folder to PATH)
+# Download a model, e.g. vosk-model-small-ja-0.22, into:
+#   %LOCALAPPDATA%\dev.mokmok.wisp\models\vosk-model-small-ja-0.22\
+
+cargo build -p wisp-desktop --release
+```
+
+Recordings and the SQLite database live under `%LOCALAPPDATA%\dev.mokmok.wisp\` (override with `WISP_DATA_DIR`).
 
 ### Custom output directory
 
-Set `WISP_OUTPUT_DIR` to override where recordings are written. When unset, Wisp uses `~/Library/Application Support/dev.mokmok.wisp/recordings`.
+Set `WISP_DATA_DIR` to override the application data root (sessions DB, recordings, Vosk models). When unset:
+
+- macOS: `~/Library/Application Support/dev.mokmok.wisp/`
+- Windows: `%LOCALAPPDATA%\dev.mokmok.wisp\`
 
 ## Roadmap
 
-- [ ] **Windows support** — exploring WASAPI loopback paired with `Windows.Media.SpeechRecognition` or a local model.
+- [x] **Windows support** — WASAPI loopback + microphone capture with Vosk on-device transcription.
 - [ ] **Linux support** — exploring PipeWire monitor sources paired with a local Whisper-family model.
 - [x] Copy transcript to clipboard and export as plain text (.txt).
 - [ ] Export to Markdown / SRT / JSON.

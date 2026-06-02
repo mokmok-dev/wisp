@@ -71,17 +71,27 @@ pub fn request(
 /// Used when the permission is already `Denied`, because in that state
 /// `request_permission` is a no-op and only the user can re-enable it.
 pub fn open_settings(perm: Permission) {
-    let url = match perm {
-        Permission::Microphone => {
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
-        },
-        Permission::SpeechRecognition => {
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
-        },
-    };
-    // Best-effort: if `open` fails (e.g. URL scheme not registered) there's
-    // nothing useful we can show the user without their attention here.
-    let _ = Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    {
+        let url = match perm {
+            Permission::Microphone => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+            },
+            Permission::SpeechRecognition => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
+            },
+        };
+        let _ = Command::new("open").arg(url).spawn();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let url = match perm {
+            Permission::Microphone => "ms-settings:privacy-microphone",
+            Permission::SpeechRecognition => "ms-settings:privacy-speech",
+        };
+        let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    }
 }
 
 /// Human-readable label for an onboarding row.
@@ -96,7 +106,14 @@ pub fn label(perm: Permission) -> &'static str {
 pub fn rationale(perm: Permission) -> &'static str {
     match perm {
         Permission::Microphone => "Capture your voice for on-device transcription.",
+        #[cfg(target_os = "macos")]
         Permission::SpeechRecognition => "Run Apple's on-device speech model on captured audio.",
+        #[cfg(target_os = "windows")]
+        Permission::SpeechRecognition => {
+            "Run a local Vosk speech model on captured audio (download once into the Wisp data folder)."
+        },
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        Permission::SpeechRecognition => "Run on-device speech recognition on captured audio.",
     }
 }
 

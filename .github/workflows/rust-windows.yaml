@@ -1,0 +1,35 @@
+name: rust-windows
+on:
+  pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/wisp-audiokit-win/**"
+      - ".github/workflows/rust-windows.yaml"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-rust-windows
+  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: write
+  id-token: write
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-rust-cache
+      - name: Install Vosk native library
+        shell: pwsh
+        run: |
+          $voskZip = "vosk-win64-0.3.45.zip"
+          Invoke-WebRequest -Uri "https://github.com/alphacep/vosk-api/releases/download/v0.3.45/$voskZip" -OutFile $voskZip
+          Expand-Archive -Path $voskZip -DestinationPath .
+          $voskDir = Join-Path $PWD "vosk-win64-0.3.45"
+          echo "$voskDir" >> $env:GITHUB_PATH
+      - name: Build and test wisp-audiokit (Windows backend)
+        run: cargo test -p wisp-audiokit --locked
+      - name: Build wisp-desktop (release)
+        run: cargo build -p wisp-desktop --release --locked

@@ -21,10 +21,26 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-        return;
+    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("macos") => build_macos(),
+        Ok("windows") => build_windows(),
+        _ => {},
     }
+}
 
+fn build_windows() {
+    let manifest_dir = PathBuf::from(
+        env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is always set by cargo"),
+    );
+    let win_src = manifest_dir
+        .join("..")
+        .join("wisp-audiokit-win")
+        .join("src");
+    println!("cargo:rerun-if-changed={}", win_src.display());
+    println!("cargo:rustc-link-lib=user32");
+}
+
+fn build_macos() {
     let manifest_dir = PathBuf::from(
         env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is always set by cargo"),
     );

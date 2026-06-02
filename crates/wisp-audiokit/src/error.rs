@@ -1,24 +1,24 @@
 /// Errors surfaced by [`crate::Session`] operations.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SessionError {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[error("path contains a NUL byte or is not representable as a C string: {0:?}")]
     InvalidPath(std::path::PathBuf),
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[error("locale contains a NUL byte: {0}")]
     InvalidLocale(String),
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[error("WispAudioKit session construction failed")]
     Construction,
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[error("WispAudioKit session start failed: {0}")]
     Start(String),
 
-    #[cfg(not(target_os = "macos"))]
-    #[error("WispAudioKit is only available on macOS")]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[error("WispAudioKit is only available on macOS and Windows")]
     UnsupportedPlatform,
 }
 

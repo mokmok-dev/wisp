@@ -344,13 +344,31 @@ fn default_data_directory() -> PathBuf {
     if let Ok(dir) = std::env::var("WISP_DATA_DIR") {
         return PathBuf::from(dir);
     }
-    // ~/Library/Application Support/dev.mokmok.wisp/ on macOS, or
-    // a temp dir if we can't resolve $HOME. The sessions DB lives at
-    // <this>/sessions.db and per-session WAV directories under
-    // <this>/recordings/<dir-name>/.
-    let mut p = std::env::var_os("HOME").map_or_else(std::env::temp_dir, PathBuf::from);
-    p.push("Library");
-    p.push("Application Support");
-    p.push("dev.mokmok.wisp");
-    p
+
+    #[cfg(target_os = "windows")]
+    {
+        // %LOCALAPPDATA%\dev.mokmok.wisp\
+        return std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("dev.mokmok.wisp");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // ~/Library/Application Support/dev.mokmok.wisp/
+        let mut p = std::env::var_os("HOME").map_or_else(std::env::temp_dir, PathBuf::from);
+        p.push("Library");
+        p.push("Application Support");
+        p.push("dev.mokmok.wisp");
+        return p;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("dev.mokmok.wisp")
+    }
 }

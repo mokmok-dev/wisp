@@ -1,0 +1,33 @@
+[package]
+name = "wisp-audiokit-win"
+edition.workspace = true
+version.workspace = true
+publish = false
+description = "Windows native audio capture and speech recognition for Wisp (static C ABI)."
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+expect_used = "warn"
+panic = "warn"
+pedantic = { level = "warn", priority = -1 }
+todo = "warn"
+unwrap_used = "warn"
+
+[lints.rust]
+unsafe_code = "allow"
+
+[dependencies]
+crossbeam-channel = { workspace = true }
+hound = "3.5.1"
+parking_lot = "0.12.5"
+rubato = "0.16.2"
+wasapi = "0.23.0"
+vosk = "0.3.1"
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+] }

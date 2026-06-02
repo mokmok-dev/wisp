@@ -102,3 +102,59 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: ${{ steps.dmg.outputs.path }}
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve tag and version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-rust-cache
+
+      - name: Install Vosk native library
+        shell: pwsh
+        run: |
+          $voskZip = "vosk-win64-0.3.45.zip"
+          Invoke-WebRequest -Uri "https://github.com/alphacep/vosk-api/releases/download/v0.3.45/$voskZip" -OutFile $voskZip
+          Expand-Archive -Path $voskZip -DestinationPath .
+          $voskDir = Join-Path $PWD "vosk-win64-0.3.45"
+          echo "$voskDir" >> $env:GITHUB_PATH
+
+      - name: Build wisp-desktop (release)
+        run: cargo build -p wisp-desktop --release --locked
+
+      - name: Stage Windows release artifact
+        shell: pwsh
+        run: |
+          $out = "wisp-${{ steps.meta.outputs.version }}-x86_64-pc-windows-msvc.zip"
+          $stage = "wisp-windows"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target/release/wisp-desktop.exe $stage/
+          Copy-Item vosk-win64-0.3.45/libvosk.dll $stage/
+          Copy-Item vosk-win64-0.3.45/libgcc_s_seh-1.dll $stage/ -ErrorAction SilentlyContinue
+          Copy-Item vosk-win64-0.3.45/libstdc++-6.dll $stage/ -ErrorAction SilentlyContinue
+          Copy-Item vosk-win64-0.3.45/libwinpthread-1.dll $stage/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path $stage/* -DestinationPath $out
+          echo "path=$out" >> $env:GITHUB_OUTPUT
+        id: zip
+
+      - name: Publish release (Windows)
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: false
+          files: ${{ steps.zip.outputs.path }}

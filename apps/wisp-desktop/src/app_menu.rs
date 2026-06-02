@@ -75,11 +75,20 @@ pub fn configure(
         transcript_export::export_transcript(app.segments.clone(), &name, cx);
     });
 
+    #[cfg(target_os = "macos")]
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-r", ToggleRecording, None),
         KeyBinding::new("cmd-shift-c", CopyTranscript, None),
         KeyBinding::new("cmd-shift-e", ExportTranscript, None),
+    ]);
+
+    #[cfg(target_os = "windows")]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("ctrl-r", ToggleRecording, None),
+        KeyBinding::new("ctrl-shift-c", CopyTranscript, None),
+        KeyBinding::new("ctrl-shift-e", ExportTranscript, None),
     ]);
 
     // The recording item's label flips between "Start" and "Stop" with the

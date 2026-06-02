@@ -4,14 +4,13 @@
 //! crate's `build.rs` into a static library (`libWispAudioKit.a`). The C ABI
 //! surface is hand-mirrored from `native/WispAudioKit/include/wisp_audiokit.h`.
 //!
-//! `WispAudioKit` is macOS-only, so the `extern "C"` block below is gated to
-//! `target_os = "macos"`. On other targets the crate exposes only the type
-//! aliases and constants — there are no function symbols to link against,
-//! and consumers must (and do) cfg-gate any code that touches them.
+//! The `extern "C"` block is available on macOS (Swift `WispAudioKit`) and
+//! Windows (`wisp-audiokit-win`). On other targets the crate exposes only the
+//! type aliases and constants.
 
 #![allow(unsafe_code, non_camel_case_types)]
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::os::raw::c_int;
 use std::os::raw::{c_char, c_void};
 
@@ -57,7 +56,7 @@ pub type WispResultCallback = unsafe extern "C" fn(
 pub type WispLogCallback =
     unsafe extern "C" fn(message_utf8: *const c_char, message_len: usize, user_data: *mut c_void);
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 unsafe extern "C" {
     /// Returns a static, NUL-terminated UTF-8 version string for the
     /// `WispAudioKit` library. The pointer lives for the lifetime of the

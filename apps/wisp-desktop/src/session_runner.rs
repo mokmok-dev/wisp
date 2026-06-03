@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use wisp_audiokit::{Event, Session, SessionError};
+use wisp_audiokit::{Event, Session, SessionConfig, SessionError};
 
 /// How often the running session checks for UI commands (Stop / Shutdown)
 /// while waiting for the next audio event. Sets the worst-case latency for
@@ -20,7 +20,10 @@ const CMD_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Commands the UI sends to the worker.
 pub enum Command {
-    Start { output_dir: PathBuf, locale: String },
+    Start {
+        output_dir: PathBuf,
+        config: SessionConfig,
+    },
     Stop,
     Shutdown,
 }
@@ -61,9 +64,9 @@ impl SessionRunner {
     pub fn start(
         &self,
         output_dir: PathBuf,
-        locale: String,
+        config: SessionConfig,
     ) {
-        let _ = self.cmd_tx.send(Command::Start { output_dir, locale });
+        let _ = self.cmd_tx.send(Command::Start { output_dir, config });
     }
 
     pub fn stop(&self) {
@@ -120,8 +123,8 @@ fn worker_loop(
 ) {
     loop {
         match cmd_rx.recv() {
-            Ok(Command::Start { output_dir, locale }) => {
-                run_session(&output_dir, &locale, cmd_rx, update_tx);
+            Ok(Command::Start { output_dir, config }) => {
+                run_session(&output_dir, config, cmd_rx, update_tx);
             },
             Ok(Command::Stop) => {}, // no-op, nothing running
             Ok(Command::Shutdown) | Err(_) => return,
@@ -131,11 +134,11 @@ fn worker_loop(
 
 fn run_session(
     output_dir: &std::path::Path,
-    locale: &str,
+    config: SessionConfig,
     cmd_rx: &Receiver<Command>,
     update_tx: &Sender<Update>,
 ) {
-    let session = match Session::new(output_dir, locale) {
+    let mut session = match Session::new_with_config(output_dir, config) {
         Ok(s) => s,
         Err(e) => {
             let _ = update_tx.send(Update::Error(e));

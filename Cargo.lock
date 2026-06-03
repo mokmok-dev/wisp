@@ -6740,6 +6740,8 @@ version = "0.0.0"
 dependencies = [
  "crossbeam-channel",
  "thiserror 2.0.18",
+ "windows 0.61.3",
+ "windows-future",
  "wisp-audiokit-sys",
  "wisp-core",
 ]

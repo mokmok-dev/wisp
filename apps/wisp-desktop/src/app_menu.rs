@@ -31,6 +31,7 @@ pub fn configure(
     runner: Arc<SessionRunner>,
     storage: SharedStorage,
     model: Entity<AppModel>,
+    data_dir: PathBuf,
     recordings_dir: PathBuf,
 ) {
     let runner_for_quit = runner.clone();
@@ -51,8 +52,15 @@ pub fn configure(
     // same state machine as that button via `toggle_recording`.
     let runner_for_toggle = runner.clone();
     let model_for_toggle = model.clone();
+    let data_for_toggle = data_dir;
     cx.on_action(move |_: &ToggleRecording, cx| {
-        crate::toggle_recording(&runner_for_toggle, &model_for_toggle, &recordings_dir, cx);
+        crate::toggle_recording(
+            &runner_for_toggle,
+            &model_for_toggle,
+            &data_for_toggle,
+            &recordings_dir,
+            cx,
+        );
     });
 
     let model_for_copy = model.clone();

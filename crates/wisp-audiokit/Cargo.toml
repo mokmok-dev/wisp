@@ -23,3 +23,11 @@ wisp-audiokit-sys = { path = "../wisp-audiokit-sys" }
 wisp-core = { path = "../wisp-core" }
 crossbeam-channel = { workspace = true }
 thiserror = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61.3", features = [
+  "Foundation",
+  "Globalization",
+  "Media_SpeechRecognition",
+] }
+windows-future = "0.2.1"

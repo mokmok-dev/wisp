@@ -71,6 +71,12 @@ pub fn request(
 /// Used when the permission is already `Denied`, because in that state
 /// `request_permission` is a no-op and only the user can re-enable it.
 pub fn open_settings(perm: Permission) {
+    #[cfg(target_os = "windows")]
+    let url = match perm {
+        Permission::Microphone => "ms-settings:privacy-microphone",
+        Permission::SpeechRecognition => "ms-settings:privacy-speech",
+    };
+    #[cfg(target_os = "macos")]
     let url = match perm {
         Permission::Microphone => {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
@@ -79,9 +85,21 @@ pub fn open_settings(perm: Permission) {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
         },
     };
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let url = "";
+
+    #[cfg(target_os = "windows")]
+    let opener = "cmd";
+    #[cfg(target_os = "windows")]
+    let args = ["/C", "start", "", url];
+    #[cfg(not(target_os = "windows"))]
+    let opener = "open";
+    #[cfg(not(target_os = "windows"))]
+    let args = [url];
+
     // Best-effort: if `open` fails (e.g. URL scheme not registered) there's
     // nothing useful we can show the user without their attention here.
-    let _ = Command::new("open").arg(url).spawn();
+    let _ = Command::new(opener).args(args).spawn();
 }
 
 /// Human-readable label for an onboarding row.
@@ -96,7 +114,13 @@ pub fn label(perm: Permission) -> &'static str {
 pub fn rationale(perm: Permission) -> &'static str {
     match perm {
         Permission::Microphone => "Capture your voice for on-device transcription.",
-        Permission::SpeechRecognition => "Run Apple's on-device speech model on captured audio.",
+        Permission::SpeechRecognition => {
+            if cfg!(target_os = "windows") {
+                "Use Windows speech recognition when the platform backend is selected."
+            } else {
+                "Run Apple's on-device speech model on captured audio."
+            }
+        },
     }
 }
 

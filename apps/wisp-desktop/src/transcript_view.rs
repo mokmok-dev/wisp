@@ -17,10 +17,12 @@ use gpui::{
     ListState, ParentElement, Render, StatefulInteractiveElement, Styled, Window, div, list, px,
     rgb,
 };
-use wisp_audiokit::{Permission, PermissionStatus, SessionError, SourceLabel};
+use wisp_audiokit::{
+    LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SessionError, SourceLabel,
+};
 use wisp_core::{Session as StoredSession, SessionId};
 
-use crate::app::{AppModel, Permissions, Segment, SessionState, View};
+use crate::app::{AppModel, ModelDownloadState, Permissions, Segment, SessionState, Setup, View};
 use crate::permissions as perms;
 use crate::transcript_export::{self, suggested_export_name};
 
@@ -34,6 +36,11 @@ pub struct TranscriptView {
     /// Open the System Settings privacy pane for a permission. Used when
     /// the permission is already denied and only the user can re-enable it.
     pub on_open_settings: std::sync::Arc<dyn Fn(Permission, &mut Window, &mut gpui::App) + 'static>,
+    /// Select the transcription backend used for new sessions.
+    pub on_select_recognizer:
+        std::sync::Arc<dyn Fn(RecognizerBackend, &mut Window, &mut gpui::App) + 'static>,
+    /// Download the local transcription model on a background thread.
+    pub on_download_local_model: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
     /// Switch from the library screen to the empty recording screen.
     pub on_new_session: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
     /// Load a session's transcript from storage and switch to history view.
@@ -100,14 +107,17 @@ impl Render for TranscriptView {
     ) -> impl IntoElement {
         let app = self.app.read(cx);
         let permissions = app.permissions;
+        let setup = app.setup.clone();
 
         // Gate the main UI on having both required permissions. Until then,
         // we show an onboarding screen with per-permission rows the user
         // can act on. This avoids the previous failure mode where the user
         // presses Record and only then learns the app needs permissions
         // they may or may not be able to grant.
-        if !permissions.all_granted() {
-            return self.render_onboarding(permissions).into_any_element();
+        if !app.setup_complete() {
+            return self
+                .render_onboarding(permissions, &setup)
+                .into_any_element();
         }
 
         let view = app.view.clone();
@@ -389,8 +399,14 @@ impl TranscriptView {
     fn render_onboarding(
         &self,
         permissions: Permissions,
+        setup: &Setup,
     ) -> impl IntoElement {
         let pending = permissions.pending;
+        let setup_title = if wisp_audiokit::requires_recognizer_setup() {
+            "Wisp needs a quick setup"
+        } else {
+            "Wisp needs a couple of permissions"
+        };
         let row_mic = self.render_permission_row(
             Permission::Microphone,
             permissions.microphone,
@@ -402,7 +418,7 @@ impl TranscriptView {
             pending == Some(Permission::SpeechRecognition),
         );
 
-        let card = div()
+        let mut card = div()
             .flex()
             .flex_col()
             .gap(px(16.0))
@@ -416,7 +432,7 @@ impl TranscriptView {
                 div()
                     .text_color(theme::text_primary())
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Wisp needs a couple of permissions"),
+                    .child(setup_title),
             )
             .child(
                 div()
@@ -426,6 +442,11 @@ impl TranscriptView {
             )
             .child(row_mic)
             .child(row_speech);
+        if wisp_audiokit::requires_recognizer_setup() {
+            card = card
+                .child(self.render_recognizer_row(setup))
+                .child(self.render_local_model_row(setup));
+        }
 
         div()
             .flex()
@@ -487,6 +508,202 @@ impl TranscriptView {
             .border_color(status_color(status))
             .child(info)
             .child(action)
+    }
+
+    fn render_recognizer_row(
+        &self,
+        setup: &Setup,
+    ) -> impl IntoElement {
+        let selected = setup.recognizer;
+        let platform_action =
+            self.render_recognizer_option(RecognizerBackend::Platform, selected, "Platform");
+        let local_action =
+            self.render_recognizer_option(RecognizerBackend::LocalModel, selected, "Local");
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .py(px(12.0))
+            .px(px(12.0))
+            .bg(theme::bg())
+            .rounded(px(8.0))
+            .border_l_2()
+            .border_color(if setup.is_complete() {
+                theme::mic_accent()
+            } else {
+                theme::text_tertiary()
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .flex_grow()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_color(theme::text_primary())
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Transcription backend"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::text_tertiary())
+                            .child("Use Windows speech for the OS mic path, or a local model for WASAPI mic + system audio."),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::text_secondary())
+                            .child(selected.label()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .p(px(2.0))
+                    .rounded_full()
+                    .bg(theme::record_idle())
+                    .child(platform_action)
+                    .child(local_action),
+            )
+    }
+
+    fn render_recognizer_option(
+        &self,
+        recognizer: RecognizerBackend,
+        selected: RecognizerBackend,
+        label: &'static str,
+    ) -> impl IntoElement {
+        let is_selected = recognizer == selected;
+        let on_select = self.on_select_recognizer.clone();
+        let id = match recognizer {
+            RecognizerBackend::Platform => "recognizer-platform",
+            RecognizerBackend::LocalModel => "recognizer-local",
+        };
+        let mut button = div()
+            .id(ElementId::Name(id.into()))
+            .px(px(12.0))
+            .py(px(5.0))
+            .rounded_full()
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(if is_selected {
+                theme::text_primary()
+            } else {
+                theme::text_secondary()
+            })
+            .child(label);
+        if is_selected {
+            button = button.bg(theme::surface());
+        } else {
+            button = button.cursor_pointer().on_click(move |_event, window, cx| {
+                on_select(recognizer, window, cx);
+            });
+        }
+        button
+    }
+
+    fn render_local_model_row(
+        &self,
+        setup: &Setup,
+    ) -> impl IntoElement {
+        let (status_text, status_color) = match &setup.local_model {
+            LocalModelStatus::Ready { bytes, .. } => (
+                format!("Ready ({:.0} MB)", *bytes as f64 / 1024.0 / 1024.0),
+                theme::mic_accent(),
+            ),
+            LocalModelStatus::Missing { spec, .. } => (
+                format!(
+                    "Not downloaded ({:.0} MB)",
+                    spec.approx_bytes as f64 / 1024.0 / 1024.0
+                ),
+                if setup.recognizer == RecognizerBackend::LocalModel {
+                    theme::record_red()
+                } else {
+                    theme::text_tertiary()
+                },
+            ),
+        };
+        let mut info = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .flex_grow()
+            .min_w_0()
+            .child(
+                div()
+                    .text_color(theme::text_primary())
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Local transcription model"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_tertiary())
+                    .child("Downloaded once, stored locally, and used without network access."),
+            )
+            .child(div().text_xs().text_color(status_color).child(status_text));
+        if let Some(error) = &setup.model_error {
+            info = info.child(
+                div()
+                    .text_xs()
+                    .text_color(theme::record_red())
+                    .child(error.clone()),
+            );
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .py(px(12.0))
+            .px(px(12.0))
+            .bg(theme::bg())
+            .rounded(px(8.0))
+            .border_l_2()
+            .border_color(status_color)
+            .child(info)
+            .child(self.render_local_model_action(setup))
+    }
+
+    fn render_local_model_action(
+        &self,
+        setup: &Setup,
+    ) -> gpui::AnyElement {
+        if setup.model_download == ModelDownloadState::Downloading {
+            return div()
+                .px(px(14.0))
+                .py(px(7.0))
+                .text_sm()
+                .text_color(theme::text_tertiary())
+                .child("Downloading…")
+                .into_any_element();
+        }
+        if setup.local_model.is_ready() {
+            return div()
+                .px(px(14.0))
+                .py(px(7.0))
+                .text_sm()
+                .text_color(theme::text_tertiary())
+                .child("Installed")
+                .into_any_element();
+        }
+        let on_download = self.on_download_local_model.clone();
+        div()
+            .id(ElementId::Name("download-local-model".into()))
+            .px(px(14.0))
+            .py(px(7.0))
+            .rounded_full()
+            .bg(theme::record_idle())
+            .text_color(theme::text_primary())
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .on_click(move |_event, window, cx| on_download(window, cx))
+            .child("Download")
+            .into_any_element()
     }
 
     fn render_permission_action(

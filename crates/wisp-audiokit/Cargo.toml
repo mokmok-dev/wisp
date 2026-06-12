@@ -30,4 +30,4 @@ windows = { version = "0.61.3", features = [
   "Globalization",
   "Media_SpeechRecognition",
 ] }
-windows-future = "0.2.1"
+windows-future = "0.3.2"

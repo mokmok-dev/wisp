@@ -41,6 +41,7 @@ mod library;
 mod permissions;
 mod session_runner;
 mod session_updates;
+mod setup;
 mod transcript_export;
 mod transcript_view;
 
@@ -68,7 +69,7 @@ fn main() {
         let recordings_dir = data_dir.join("recordings");
         let storage = open_storage(&data_dir);
         let runner = Arc::new(SessionRunner::spawn());
-        let model = cx.new(|_| AppModel::new());
+        let model = cx.new(|_| AppModel::new_with_data_dir(&data_dir));
 
         // Populate the library list synchronously at launch so the first
         // paint of the window already shows the user's saved sessions.
@@ -84,6 +85,7 @@ fn main() {
         // Populate the model with the initial permission state so the
         // window opens straight onto onboarding or the library screen,
         // without a flash of the wrong content.
+        setup::refresh(&model, &data_dir, cx);
         permissions::refresh(&model, cx);
 
         let window = open_main_window(
@@ -92,6 +94,7 @@ fn main() {
             runner.clone(),
             storage.clone(),
             model.clone(),
+            data_dir.clone(),
             recordings_dir.clone(),
         );
 
@@ -100,6 +103,7 @@ fn main() {
             runner.clone(),
             storage.clone(),
             model.clone(),
+            data_dir.clone(),
             recordings_dir,
         );
 
@@ -115,16 +119,21 @@ fn open_main_window(
     runner: Arc<SessionRunner>,
     storage: SharedStorage,
     model: Entity<AppModel>,
+    data_dir: PathBuf,
     recordings_dir: PathBuf,
 ) -> WindowHandle<TranscriptView> {
     cx.open_window(window_options, move |_, cx| {
         cx.new(|cx| {
             let model_for_toggle = model.clone();
             let model_for_request = model.clone();
+            let model_for_select = model.clone();
+            let model_for_download = model.clone();
             let model_for_new = model.clone();
             let model_for_open_history = model.clone();
             let model_for_back = model.clone();
             let storage_for_open_history = storage.clone();
+            let data_for_toggle = data_dir.clone();
+            let data_for_download = data_dir.clone();
             let recordings_for_toggle = recordings_dir.clone();
             let runner_for_toggle = runner.clone();
             let (transcript_list, follow_transcript) = new_transcript_list_state();
@@ -141,6 +150,7 @@ fn open_main_window(
                     toggle_recording(
                         &runner_for_toggle,
                         &model_for_toggle,
+                        &data_for_toggle,
                         &recordings_for_toggle,
                         cx,
                     );
@@ -152,6 +162,16 @@ fn open_main_window(
                     permissions::open_settings(perm);
                     // The next periodic permission refresh picks up the
                     // toggle once the user flips it in System Settings.
+                }),
+                on_select_recognizer: Arc::new(move |recognizer, _window, cx| {
+                    setup::select_recognizer(recognizer, &model_for_select, cx);
+                }),
+                on_download_local_model: Arc::new(move |_window, cx| {
+                    setup::download_model(
+                        model_for_download.clone(),
+                        data_for_download.clone(),
+                        cx,
+                    );
                 }),
                 on_new_session: Arc::new(move |_window, cx| {
                     model_for_new.update(cx, |m, cx| {
@@ -265,12 +285,24 @@ fn spawn_permission_refresh(
 pub(crate) fn toggle_recording(
     runner: &SessionRunner,
     model: &gpui::Entity<AppModel>,
+    data_dir: &std::path::Path,
     recordings_dir: &std::path::Path,
     cx: &mut gpui::App,
 ) {
-    let state = model.read(cx).state;
+    setup::refresh(model, data_dir, cx);
+    let (state, setup_complete, config) = {
+        let app = model.read(cx);
+        (
+            app.state,
+            app.setup_complete(),
+            app.setup.session_config("ja-JP"),
+        )
+    };
     match state {
         SessionState::Idle | SessionState::Failed => {
+            if !setup_complete {
+                return;
+            }
             // Per-session subdirectory so each recording's WAVs stay
             // grouped and we can show them as a single library row.
             let session_dir = recordings_dir.join(library::session_dir_name(Utc::now()));
@@ -280,7 +312,7 @@ pub(crate) fn toggle_recording(
                 m.set_state(SessionState::Starting);
                 cx.notify();
             });
-            runner.start(session_dir, "ja-JP".to_string());
+            runner.start(session_dir, config);
         },
         SessionState::Recording { .. } => {
             model.update(cx, |m, cx| {

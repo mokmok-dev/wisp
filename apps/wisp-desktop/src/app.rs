@@ -9,10 +9,12 @@
 //!     marked `final` (the speech engine has locked it in).
 
 use std::collections::VecDeque;
+use std::path::Path;
 use std::time::Instant;
 
 use wisp_audiokit::{
-    Event, Permission, PermissionStatus, SessionError, SessionResult, SourceLabel,
+    Event, LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SessionConfig,
+    SessionError, SessionResult, SourceLabel, local_model_spec, local_model_status,
 };
 use wisp_core::{Session as StoredSession, SessionId};
 
@@ -78,6 +80,68 @@ impl Permissions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelDownloadState {
+    Idle,
+    Downloading,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setup {
+    pub recognizer: RecognizerBackend,
+    pub local_model: LocalModelStatus,
+    pub model_download: ModelDownloadState,
+    pub model_error: Option<String>,
+}
+
+impl Setup {
+    pub fn new(data_dir: impl AsRef<Path>) -> Self {
+        Self {
+            recognizer: RecognizerBackend::Platform,
+            local_model: local_model_status(data_dir),
+            model_download: ModelDownloadState::Idle,
+            model_error: None,
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        if !wisp_audiokit::requires_recognizer_setup() {
+            return true;
+        }
+        match self.recognizer {
+            RecognizerBackend::Platform => true,
+            RecognizerBackend::LocalModel => self.local_model.is_ready(),
+        }
+    }
+
+    pub fn session_config(
+        &self,
+        locale: impl Into<String>,
+    ) -> SessionConfig {
+        let locale = locale.into();
+        match self.recognizer {
+            RecognizerBackend::Platform => SessionConfig::platform_default(locale),
+            RecognizerBackend::LocalModel => {
+                SessionConfig::local_model(locale, self.local_model.path().to_path_buf())
+            },
+        }
+    }
+}
+
+impl Default for Setup {
+    fn default() -> Self {
+        Self {
+            recognizer: RecognizerBackend::Platform,
+            local_model: LocalModelStatus::Missing {
+                spec: local_model_spec(),
+                path: std::path::PathBuf::new(),
+            },
+            model_download: ModelDownloadState::Idle,
+            model_error: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Segment {
     pub source: SourceLabel,
@@ -138,6 +202,7 @@ pub struct AppModel {
     pub recent_log: VecDeque<String>,
     pub last_error: Option<SessionError>,
     pub permissions: Permissions,
+    pub setup: Setup,
 }
 
 impl AppModel {
@@ -152,7 +217,14 @@ impl AppModel {
             recent_log: VecDeque::new(),
             last_error: None,
             permissions: Permissions::unknown(),
+            setup: Setup::default(),
         }
+    }
+
+    pub fn new_with_data_dir(data_dir: impl AsRef<Path>) -> Self {
+        let mut model = Self::new();
+        model.setup = Setup::new(data_dir);
+        model
     }
 
     /// Replace the cached library list. Called after storage reads (launch,
@@ -316,6 +388,10 @@ impl AppModel {
         }
         matches!(self.state, SessionState::Recording { .. })
             || self.active_segment_index().is_some()
+    }
+
+    pub fn setup_complete(&self) -> bool {
+        self.permissions.all_granted() && self.setup.is_complete()
     }
 }
 

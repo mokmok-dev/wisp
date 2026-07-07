@@ -610,9 +610,9 @@ impl TranscriptView {
         &self,
         setup: &Setup,
     ) -> impl IntoElement {
-        let (status_text, status_color) = match &setup.local_model {
+        let (status_text, status_color) = match setup.local_model.clone() {
             LocalModelStatus::Ready { bytes, .. } => (
-                format!("Ready ({:.0} MB)", *bytes as f64 / 1024.0 / 1024.0),
+                format!("Ready ({:.0} MB)", bytes as f64 / 1024.0 / 1024.0),
                 theme::mic_accent(),
             ),
             LocalModelStatus::Missing { spec, .. } => (

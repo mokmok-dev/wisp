@@ -1,0 +1,11 @@
+[package]
+name = "wisp-mcp"
+edition.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }

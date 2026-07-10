@@ -22,7 +22,9 @@ use wisp_audiokit::{
 };
 use wisp_core::{Session as StoredSession, SessionId};
 
-use crate::app::{AppModel, ModelDownloadState, Permissions, Segment, SessionState, Setup, View};
+use crate::app::{
+    AppModel, LocalMcpBridge, ModelDownloadState, Permissions, Segment, SessionState, Setup, View,
+};
 use crate::permissions as perms;
 use crate::transcript_export::{self, suggested_export_name};
 
@@ -47,6 +49,8 @@ pub struct TranscriptView {
     pub on_open_history: std::sync::Arc<dyn Fn(SessionId, &mut Window, &mut gpui::App) + 'static>,
     /// Return to the library screen from a live or historical session view.
     pub on_back_to_library: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
+    /// Enable/disable the local MCP bridge from the library settings card.
+    pub on_toggle_local_mcp: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
     /// Toggled by the cursor-blink animation timer in main.rs so the
     /// ghost-text caret pulses.
     pub cursor_visible: bool,
@@ -131,10 +135,11 @@ impl Render for TranscriptView {
         let viewed_session = app.viewed_session.clone();
         let current_session_id = app.current_session_id;
         let library = app.library.clone();
+        let local_mcp = app.local_mcp.clone();
         let model = self.app.clone();
 
         match view {
-            View::Library => self.render_library(&library).into_any_element(),
+            View::Library => self.render_library(&library, &local_mcp).into_any_element(),
             View::LiveSession => {
                 self.sync_transcript_list(&view, segment_count, active_idx, active_text_len);
                 self.update_scroll_signature(segment_count, text_len_sum);
@@ -286,6 +291,7 @@ impl TranscriptView {
     fn render_library(
         &self,
         sessions: &[StoredSession],
+        local_mcp: &LocalMcpBridge,
     ) -> impl IntoElement {
         let on_new = self.on_new_session.clone();
         let header = div()
@@ -299,11 +305,12 @@ impl TranscriptView {
             .child(render_brand())
             .child(render_new_session_button(on_new));
 
-        let body = if sessions.is_empty() {
-            render_empty_library().into_any_element()
-        } else {
-            render_session_list(sessions, self.on_open_history.clone()).into_any_element()
-        };
+        let body = render_session_list(
+            sessions,
+            self.on_open_history.clone(),
+            local_mcp,
+            self.on_toggle_local_mcp.clone(),
+        );
 
         div()
             .flex()
@@ -1121,6 +1128,8 @@ fn render_empty_library() -> impl IntoElement {
 fn render_session_list(
     sessions: &[StoredSession],
     on_open: std::sync::Arc<dyn Fn(SessionId, &mut Window, &mut gpui::App) + 'static>,
+    local_mcp: &LocalMcpBridge,
+    on_toggle_local_mcp: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
 ) -> impl IntoElement {
     let mut list = div()
         .id(ElementId::Name("library-scroll".into()))
@@ -1131,10 +1140,80 @@ fn render_session_list(
         .px(px(20.0))
         .py(px(16.0))
         .gap(px(8.0));
+    list = list.child(render_local_mcp_bridge_card(local_mcp, on_toggle_local_mcp));
+    if sessions.is_empty() {
+        return list.child(render_empty_library());
+    }
     for s in sessions {
         list = list.child(render_session_row(s, on_open.clone()));
     }
     list
+}
+
+fn render_local_mcp_bridge_card(
+    local_mcp: &LocalMcpBridge,
+    on_toggle: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
+) -> impl IntoElement {
+    let (status_text, status_color) = if let Some(error) = &local_mcp.error {
+        (format!("Failed: {error}"), theme::record_red())
+    } else if local_mcp.running {
+        ("Running".to_owned(), theme::mic_accent())
+    } else if local_mcp.enabled {
+        ("Enabled, not running".to_owned(), theme::text_secondary())
+    } else {
+        ("Off".to_owned(), theme::text_tertiary())
+    };
+    let action_label = if local_mcp.enabled {
+        "Disable"
+    } else {
+        "Enable"
+    };
+
+    div()
+        .id(ElementId::Name("local-mcp-bridge-card".into()))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(14.0))
+        .py(px(12.0))
+        .px(px(14.0))
+        .bg(theme::surface())
+        .rounded(px(8.0))
+        .border_l_2()
+        .border_color(if local_mcp.running {
+            theme::mic_accent()
+        } else {
+            theme::border()
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .min_w_0()
+                .flex_grow()
+                .child(
+                    div()
+                        .text_color(theme::text_primary())
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Local MCP Bridge"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text_secondary())
+                        .child(format!(
+                            "IPC: {} · MCP command: {}",
+                            local_mcp.addr, local_mcp.command_path
+                        )),
+                )
+                .child(div().text_xs().text_color(status_color).child(status_text)),
+        )
+        .child(render_toolbar_button(
+            "local-mcp-toggle",
+            action_label,
+            move |window, cx| on_toggle(window, cx),
+        ))
 }
 
 fn render_session_row(

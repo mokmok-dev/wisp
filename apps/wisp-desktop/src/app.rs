@@ -94,6 +94,31 @@ pub struct Setup {
     pub model_error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalMcpBridge {
+    pub enabled: bool,
+    pub running: bool,
+    pub addr: String,
+    pub command_path: String,
+    pub error: Option<String>,
+}
+
+impl LocalMcpBridge {
+    pub fn new(
+        enabled: bool,
+        addr: impl Into<String>,
+        command_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            enabled,
+            running: false,
+            addr: addr.into(),
+            command_path: command_path.into(),
+            error: None,
+        }
+    }
+}
+
 impl Setup {
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
         Self {
@@ -203,6 +228,7 @@ pub struct AppModel {
     pub last_error: Option<SessionError>,
     pub permissions: Permissions,
     pub setup: Setup,
+    pub local_mcp: LocalMcpBridge,
 }
 
 impl AppModel {
@@ -218,12 +244,22 @@ impl AppModel {
             last_error: None,
             permissions: Permissions::unknown(),
             setup: Setup::default(),
+            local_mcp: LocalMcpBridge::new(false, "127.0.0.1:8765", "wisp-mcp"),
         }
     }
 
     pub fn new_with_data_dir(data_dir: impl AsRef<Path>) -> Self {
         let mut model = Self::new();
         model.setup = Setup::new(data_dir);
+        model
+    }
+
+    pub fn new_with_data_dir_and_local_mcp(
+        data_dir: impl AsRef<Path>,
+        local_mcp: LocalMcpBridge,
+    ) -> Self {
+        let mut model = Self::new_with_data_dir(data_dir);
+        model.local_mcp = local_mcp;
         model
     }
 

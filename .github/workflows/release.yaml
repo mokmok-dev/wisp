@@ -44,8 +44,8 @@ jobs:
       - uses: ./.github/actions/setup-nix
       - uses: ./.github/actions/setup-rust-cache
 
-      - name: Build wisp-desktop (release)
-        run: nix develop .#ci --quiet --command cargo build -p wisp-desktop --release --locked
+      - name: Build Wisp binaries (release)
+        run: nix develop .#ci --quiet --command cargo build -p wisp-desktop -p wisp-mcp --release --locked
 
       - name: Assemble Wisp.app bundle
         run: |
@@ -54,7 +54,9 @@ jobs:
           rm -rf "$APP"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/release/wisp-desktop "$APP/Contents/MacOS/wisp-desktop"
+          cp target/release/wisp-mcp "$APP/Contents/MacOS/wisp-mcp"
           chmod +x "$APP/Contents/MacOS/wisp-desktop"
+          chmod +x "$APP/Contents/MacOS/wisp-mcp"
           cp apps/wisp-desktop/assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
           sed "s/__VERSION__/${{ steps.meta.outputs.version }}/g" \
             apps/wisp-desktop/Info.plist > "$APP/Contents/Info.plist"

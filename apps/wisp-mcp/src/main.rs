@@ -21,12 +21,18 @@ fn main() -> io::Result<()> {
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = BufWriter::new(stdout.lock());
 
-    while let Some(message) = read_stdio_message(&mut reader)? {
+    while let Some((message, framing)) = read_stdio_message(&mut reader)? {
         if let Some(response) = handle_json_rpc(&message, &config) {
-            write_stdio_message(&mut writer, &response)?;
+            write_stdio_message(&mut writer, &response, framing)?;
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdioFraming {
+    ContentLength,
+    JsonLine,
 }
 
 #[derive(Debug, Clone)]
@@ -46,7 +52,7 @@ impl IpcConfig {
     }
 }
 
-fn read_stdio_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
+fn read_stdio_message(reader: &mut impl BufRead) -> io::Result<Option<(Value, StdioFraming)>> {
     let mut content_length = None;
     loop {
         let mut line = String::new();
@@ -55,6 +61,17 @@ fn read_stdio_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
             return Ok(None);
         }
         let trimmed = line.trim_end_matches(['\r', '\n']);
+        let json_line = trimmed.trim_start();
+        if content_length.is_none() && (json_line.starts_with('{') || json_line.starts_with('[')) {
+            return serde_json::from_str(json_line)
+                .map(|value| Some((value, StdioFraming::JsonLine)))
+                .map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid JSON-RPC line message: {err}"),
+                    )
+                });
+        }
         if trimmed.is_empty() {
             break;
         }
@@ -72,17 +89,21 @@ fn read_stdio_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
     };
     let mut body = vec![0; content_length];
     reader.read_exact(&mut body)?;
-    serde_json::from_slice(&body).map(Some).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid JSON-RPC message: {err}"),
-        )
-    })
+    serde_json::from_slice(&body)
+        .map(Some)
+        .map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid JSON-RPC message: {err}"),
+            )
+        })
+        .map(|message| message.map(|value| (value, StdioFraming::ContentLength)))
 }
 
 fn write_stdio_message(
     writer: &mut impl Write,
     value: &Value,
+    framing: StdioFraming,
 ) -> io::Result<()> {
     let body = serde_json::to_vec(value).map_err(|err| {
         io::Error::new(
@@ -90,8 +111,13 @@ fn write_stdio_message(
             format!("failed to serialize JSON-RPC response: {err}"),
         )
     })?;
-    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+    if framing == StdioFraming::ContentLength {
+        write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+    }
     writer.write_all(&body)?;
+    if framing == StdioFraming::JsonLine {
+        writer.write_all(b"\n")?;
+    }
     writer.flush()
 }
 
@@ -335,9 +361,14 @@ fn rpc_error(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use serde_json::json;
 
-    use super::{IpcConfig, handle_json_rpc, tool_context};
+    use super::{
+        IpcConfig, StdioFraming, handle_json_rpc, read_stdio_message, tool_context,
+        write_stdio_message,
+    };
 
     #[test]
     fn tools_list_exposes_current_conversation_tool() {
@@ -354,6 +385,31 @@ mod tests {
             response["result"]["tools"][0]["name"],
             "ask_current_conversation"
         );
+    }
+
+    #[test]
+    fn reads_json_line_framed_messages() {
+        let mut input =
+            Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\"}\n".to_vec());
+        let (message, framing) = read_stdio_message(&mut input)
+            .expect("read")
+            .expect("message");
+        assert_eq!(framing, StdioFraming::JsonLine);
+        assert_eq!(message["method"], "initialize");
+    }
+
+    #[test]
+    fn writes_json_line_framed_messages() {
+        let mut output = Vec::new();
+        write_stdio_message(
+            &mut output,
+            &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            StdioFraming::JsonLine,
+        )
+        .expect("write");
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(!output.starts_with("Content-Length"));
+        assert!(output.ends_with('\n'));
     }
 
     #[test]

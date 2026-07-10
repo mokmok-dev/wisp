@@ -6,8 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v0.1.0). Must already exist."
+        description: "Tag to release (e.g. v0.1.0). Required only when artifact_only is false."
+        required: false
+      artifact_only:
+        description: "Build a test app artifact without publishing a GitHub Release."
         required: true
+        type: boolean
+        default: true
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -24,14 +29,24 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_only && github.ref || github.event.inputs.tag || github.ref }}
 
       - name: Resolve tag and version
         id: meta
         run: |
           set -euo pipefail
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          VERSION="${TAG#v}"
+          ARTIFACT_ONLY="${{ github.event_name == 'workflow_dispatch' && inputs.artifact_only }}"
+          if [ "$ARTIFACT_ONLY" = "true" ]; then
+            TAG=""
+            VERSION="0.0.0"
+          else
+            TAG="${{ github.event.inputs.tag || github.ref_name }}"
+            if [ -z "$TAG" ]; then
+              echo "tag is required when artifact_only is false" >&2
+              exit 1
+            fi
+            VERSION="${TAG#v}"
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -44,8 +59,8 @@ jobs:
       - uses: ./.github/actions/setup-nix
       - uses: ./.github/actions/setup-rust-cache
 
-      - name: Build wisp-desktop (release)
-        run: nix develop .#ci --quiet --command cargo build -p wisp-desktop --release --locked
+      - name: Build Wisp binaries (release)
+        run: nix develop .#ci --quiet --command cargo build -p wisp-desktop -p wisp-mcp --release --locked
 
       - name: Assemble Wisp.app bundle
         run: |
@@ -54,7 +69,9 @@ jobs:
           rm -rf "$APP"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/release/wisp-desktop "$APP/Contents/MacOS/wisp-desktop"
+          cp target/release/wisp-mcp "$APP/Contents/MacOS/wisp-mcp"
           chmod +x "$APP/Contents/MacOS/wisp-desktop"
+          chmod +x "$APP/Contents/MacOS/wisp-mcp"
           cp apps/wisp-desktop/assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
           sed "s/__VERSION__/${{ steps.meta.outputs.version }}/g" \
             apps/wisp-desktop/Info.plist > "$APP/Contents/Info.plist"
@@ -81,7 +98,17 @@ jobs:
         id: dmg
         run: |
           set -euo pipefail
-          DMG="wisp-${{ steps.meta.outputs.version }}-aarch64-apple-darwin.dmg"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          ARTIFACT_ONLY="${{ github.event_name == 'workflow_dispatch' && inputs.artifact_only }}"
+          if [ "$ARTIFACT_ONLY" = "true" ]; then
+            DMG="wisp-test-${SHORT_SHA}-aarch64-apple-darwin.dmg"
+            ZIP="wisp-test-${SHORT_SHA}-aarch64-apple-darwin.zip"
+            ditto -c -k --sequesterRsrc --keepParent Wisp.app "$ZIP"
+            echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          else
+            DMG="wisp-${{ steps.meta.outputs.version }}-aarch64-apple-darwin.dmg"
+            echo "zip=" >> "$GITHUB_OUTPUT"
+          fi
           STAGE="$(mktemp -d)"
           ditto Wisp.app "$STAGE/Wisp.app"
           ln -s /Applications "$STAGE/Applications"
@@ -92,7 +119,19 @@ jobs:
             "$DMG"
           echo "path=$DMG" >> "$GITHUB_OUTPUT"
 
+      - name: Upload test app artifact
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_only }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wisp-macos-app-${{ github.sha }}
+          path: |
+            ${{ steps.dmg.outputs.path }}
+            ${{ steps.dmg.outputs.zip }}
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Publish release
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.artifact_only }}
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           tag_name: ${{ steps.meta.outputs.tag }}

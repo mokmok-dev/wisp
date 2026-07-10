@@ -37,15 +37,17 @@ use wisp_storage::Storage;
 mod about_view;
 mod app;
 mod app_menu;
+mod ipc_server;
 mod library;
 mod permissions;
 mod session_runner;
 mod session_updates;
+mod settings;
 mod setup;
 mod transcript_export;
 mod transcript_view;
 
-use app::{AppModel, SessionState};
+use app::{AppModel, LocalMcpBridge, SessionState};
 use app_menu::configure as configure_app_menu;
 use library::SharedStorage;
 use session_runner::SessionRunner;
@@ -69,7 +71,21 @@ fn main() {
         let recordings_dir = data_dir.join("recordings");
         let storage = open_storage(&data_dir);
         let runner = Arc::new(SessionRunner::spawn());
-        let model = cx.new(|_| AppModel::new_with_data_dir(&data_dir));
+        let mut app_settings = settings::load(&data_dir);
+        if let Some(addr) = ipc_server::env_addr_override() {
+            app_settings.local_mcp.addr = addr;
+        }
+        if ipc_server::env_enabled() {
+            app_settings.local_mcp.enabled = true;
+        }
+        let local_mcp = LocalMcpBridge::new(
+            app_settings.local_mcp.enabled,
+            app_settings.local_mcp.addr.clone(),
+            bundled_mcp_command_path(),
+        );
+        let model = cx.new(|_| AppModel::new_with_data_dir_and_local_mcp(&data_dir, local_mcp));
+        let ipc_snapshot = ipc_server::new_shared_snapshot();
+        let ipc_handle = Arc::new(Mutex::new(None));
 
         // Populate the library list synchronously at launch so the first
         // paint of the window already shows the user's saved sessions.
@@ -87,15 +103,23 @@ fn main() {
         // without a flash of the wrong content.
         setup::refresh(&model, &data_dir, cx);
         permissions::refresh(&model, cx);
+        ipc_server::refresh_snapshot(&ipc_snapshot, model.read(cx));
+        if model.read(cx).local_mcp.enabled {
+            start_local_mcp_bridge(&ipc_handle, &ipc_snapshot, &model, cx);
+        }
 
         let window = open_main_window(
             cx,
             window_options,
-            runner.clone(),
-            storage.clone(),
-            model.clone(),
-            data_dir.clone(),
-            recordings_dir.clone(),
+            MainWindowDeps {
+                runner: runner.clone(),
+                storage: storage.clone(),
+                model: model.clone(),
+                ipc_handle: ipc_handle.clone(),
+                ipc_snapshot: ipc_snapshot.clone(),
+                data_dir: data_dir.clone(),
+                recordings_dir: recordings_dir.clone(),
+            },
         );
 
         configure_app_menu(
@@ -109,19 +133,35 @@ fn main() {
 
         spawn_session_update_pump(cx, runner, storage, model.clone());
         spawn_cursor_blink(cx, window);
-        spawn_permission_refresh(cx, model);
+        spawn_permission_refresh(cx, model.clone());
+        spawn_ipc_snapshot_sync(cx, ipc_snapshot, model);
     });
+}
+
+struct MainWindowDeps {
+    runner: Arc<SessionRunner>,
+    storage: SharedStorage,
+    model: Entity<AppModel>,
+    ipc_handle: Arc<Mutex<Option<ipc_server::IpcServer>>>,
+    ipc_snapshot: ipc_server::SharedSnapshot,
+    data_dir: PathBuf,
+    recordings_dir: PathBuf,
 }
 
 fn open_main_window(
     cx: &mut App,
     window_options: WindowOptions,
-    runner: Arc<SessionRunner>,
-    storage: SharedStorage,
-    model: Entity<AppModel>,
-    data_dir: PathBuf,
-    recordings_dir: PathBuf,
+    deps: MainWindowDeps,
 ) -> WindowHandle<TranscriptView> {
+    let MainWindowDeps {
+        runner,
+        storage,
+        model,
+        ipc_handle,
+        ipc_snapshot,
+        data_dir,
+        recordings_dir,
+    } = deps;
     cx.open_window(window_options, move |_, cx| {
         cx.new(|cx| {
             let model_for_toggle = model.clone();
@@ -131,11 +171,15 @@ fn open_main_window(
             let model_for_new = model.clone();
             let model_for_open_history = model.clone();
             let model_for_back = model.clone();
+            let model_for_local_mcp = model.clone();
             let storage_for_open_history = storage.clone();
             let data_for_toggle = data_dir.clone();
             let data_for_download = data_dir.clone();
+            let data_for_local_mcp = data_dir.clone();
             let recordings_for_toggle = recordings_dir.clone();
             let runner_for_toggle = runner.clone();
+            let ipc_for_local_mcp = ipc_handle.clone();
+            let ipc_snapshot_for_local_mcp = ipc_snapshot.clone();
             let (transcript_list, follow_transcript) = new_transcript_list_state();
             let view = TranscriptView {
                 app: model.clone(),
@@ -192,6 +236,15 @@ fn open_main_window(
                         m.show_library();
                         cx.notify();
                     });
+                }),
+                on_toggle_local_mcp: Arc::new(move |_window, cx| {
+                    toggle_local_mcp_bridge(
+                        &ipc_for_local_mcp,
+                        &ipc_snapshot_for_local_mcp,
+                        &model_for_local_mcp,
+                        &data_for_local_mcp,
+                        cx,
+                    );
                 }),
             };
             // Re-render whenever the underlying model changes.
@@ -280,6 +333,124 @@ fn spawn_permission_refresh(
         }
     })
     .detach();
+}
+
+/// Keep the local IPC endpoint's read-only transcript snapshot fresh without
+/// letting the HTTP thread touch GPUI state directly.
+fn spawn_ipc_snapshot_sync(
+    cx: &mut App,
+    snapshot: ipc_server::SharedSnapshot,
+    model: Entity<AppModel>,
+) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        loop {
+            Timer::after(Duration::from_millis(250)).await;
+            let snapshot_for_update = snapshot.clone();
+            let result = model.update(cx, move |model, _cx| {
+                ipc_server::refresh_snapshot(&snapshot_for_update, model);
+            });
+            if result.is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+fn toggle_local_mcp_bridge(
+    ipc_handle: &Arc<Mutex<Option<ipc_server::IpcServer>>>,
+    snapshot: &ipc_server::SharedSnapshot,
+    model: &Entity<AppModel>,
+    data_dir: &std::path::Path,
+    cx: &mut App,
+) {
+    if model.read(cx).local_mcp.enabled {
+        stop_local_mcp_bridge(ipc_handle, model, cx);
+    } else {
+        start_local_mcp_bridge(ipc_handle, snapshot, model, cx);
+    }
+    save_local_mcp_settings(data_dir, model, cx);
+}
+
+fn start_local_mcp_bridge(
+    ipc_handle: &Arc<Mutex<Option<ipc_server::IpcServer>>>,
+    snapshot: &ipc_server::SharedSnapshot,
+    model: &Entity<AppModel>,
+    cx: &mut App,
+) {
+    let addr = model.read(cx).local_mcp.addr.clone();
+    let config = ipc_server::IpcConfig {
+        addr,
+        token: ipc_server::env_token(),
+    };
+    match ipc_server::start(config, snapshot.clone()) {
+        Ok(server) => {
+            let previous = if let Ok(mut slot) = ipc_handle.lock() {
+                let previous = slot.take();
+                *slot = Some(server);
+                previous
+            } else {
+                model.update(cx, |m, cx| {
+                    m.local_mcp.enabled = true;
+                    m.local_mcp.running = false;
+                    m.local_mcp.error = Some("failed to lock IPC server handle".into());
+                    cx.notify();
+                });
+                return;
+            };
+            if let Some(previous) = previous {
+                previous.stop();
+            }
+            model.update(cx, |m, cx| {
+                m.local_mcp.enabled = true;
+                m.local_mcp.running = true;
+                m.local_mcp.error = None;
+                cx.notify();
+            });
+        },
+        Err(err) => {
+            model.update(cx, |m, cx| {
+                m.local_mcp.enabled = true;
+                m.local_mcp.running = false;
+                m.local_mcp.error = Some(err);
+                cx.notify();
+            });
+        },
+    }
+}
+
+fn stop_local_mcp_bridge(
+    ipc_handle: &Arc<Mutex<Option<ipc_server::IpcServer>>>,
+    model: &Entity<AppModel>,
+    cx: &mut App,
+) {
+    let server = ipc_handle.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(server) = server {
+        server.stop();
+    }
+    model.update(cx, |m, cx| {
+        m.local_mcp.enabled = false;
+        m.local_mcp.running = false;
+        m.local_mcp.error = None;
+        cx.notify();
+    });
+}
+
+fn save_local_mcp_settings(
+    data_dir: &std::path::Path,
+    model: &Entity<AppModel>,
+    cx: &App,
+) {
+    let local_mcp = model.read(cx).local_mcp.clone();
+    let app_settings = settings::AppSettings {
+        local_mcp: settings::LocalMcpSettings {
+            enabled: local_mcp.enabled,
+            addr: local_mcp.addr,
+        },
+    };
+    if let Err(err) = settings::save(data_dir, &app_settings) {
+        eprintln!("wisp: failed to save settings: {err}");
+    }
 }
 
 pub(crate) fn toggle_recording(
@@ -395,4 +566,14 @@ fn default_data_directory() -> PathBuf {
     p.push("Application Support");
     p.push("dev.mokmok.wisp");
     p
+}
+
+fn bundled_mcp_command_path() -> String {
+    std::env::current_exe().map_or_else(
+        |_| "wisp-mcp".to_owned(),
+        |mut path| {
+            path.set_file_name("wisp-mcp");
+            path.display().to_string()
+        },
+    )
 }

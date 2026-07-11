@@ -1,7 +1,9 @@
-//! macOS menu bar: application menu (About, Start/Stop Recording, Quit)
-//! plus the Cmd+Q and Cmd+R shortcuts.
+//! macOS menu bar: application menu (About, MCP Setup, recording, export,
+//! and Quit) plus their keyboard shortcuts.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +12,7 @@ use gpui::{App, Entity, KeyBinding, Menu, MenuItem, actions};
 use crate::about_view;
 use crate::app::{AppModel, SessionState, View};
 use crate::library::SharedStorage;
+use crate::mcp_setup_view;
 use crate::session_runner::SessionRunner;
 use crate::session_updates::apply_update;
 use crate::transcript_export::{self, suggested_export_name};
@@ -19,6 +22,7 @@ actions!(
     [
         Quit,
         About,
+        OpenMcpSetup,
         ToggleRecording,
         CopyTranscript,
         ExportTranscript
@@ -31,6 +35,7 @@ pub fn configure(
     runner: Arc<SessionRunner>,
     storage: SharedStorage,
     model: Entity<AppModel>,
+    on_set_local_mcp_enabled: Arc<dyn Fn(bool, &mut App)>,
     data_dir: PathBuf,
     recordings_dir: PathBuf,
 ) {
@@ -45,6 +50,31 @@ pub fn configure(
 
     cx.on_action(|_: &About, cx| {
         about_view::open(cx);
+    });
+
+    let model_for_mcp_setup = model.clone();
+    let mcp_setup_window: Rc<RefCell<Option<gpui::WindowHandle<mcp_setup_view::McpSetupView>>>> =
+        Rc::new(RefCell::new(None));
+    cx.on_action(move |_: &OpenMcpSetup, cx| {
+        let existing = *mcp_setup_window.borrow();
+        if let Some(handle) = existing {
+            if cx.active_window() == Some(handle.into()) {
+                return;
+            }
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+        }
+
+        let window = mcp_setup_view::open(
+            cx,
+            model_for_mcp_setup.clone(),
+            on_set_local_mcp_enabled.clone(),
+        );
+        *mcp_setup_window.borrow_mut() = Some(window);
     });
 
     // Start/stop recording straight from the menu bar (and Cmd+R), so the
@@ -85,6 +115,7 @@ pub fn configure(
 
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-,", OpenMcpSetup, None),
         KeyBinding::new("cmd-r", ToggleRecording, None),
         KeyBinding::new("cmd-shift-c", CopyTranscript, None),
         KeyBinding::new("cmd-shift-e", ExportTranscript, None),
@@ -136,6 +167,8 @@ fn build_menus(record_label: &'static str) -> Vec<Menu> {
         items: vec![
             MenuItem::action("About Wisp", About),
             MenuItem::separator(),
+            MenuItem::action("MCP Setup…", OpenMcpSetup),
+            MenuItem::separator(),
             MenuItem::action(record_label, ToggleRecording),
             MenuItem::separator(),
             MenuItem::action("Copy Transcript", CopyTranscript),
@@ -176,10 +209,37 @@ fn graceful_stop_session(
     }
 
     let updates = runner.wait_for_idle(Duration::from_secs(5));
-    let _ = model.update(cx, |m, cx| {
+    model.update(cx, |m, cx| {
         for update in updates {
             apply_update(update, m, storage);
         }
         cx.notify();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::MenuItem;
+
+    use super::{OpenMcpSetup, build_menus};
+
+    #[test]
+    fn menu_exposes_mcp_setup_action() {
+        let menus = build_menus("Start Recording");
+        let menu = menus.first().expect("Wisp menu");
+
+        let actions = menu
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { name, action, .. } if name.as_ref() == "MCP Setup…" => {
+                    Some(action.as_ref())
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].as_any().is::<OpenMcpSetup>());
+    }
 }

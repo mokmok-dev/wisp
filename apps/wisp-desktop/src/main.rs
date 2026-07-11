@@ -39,6 +39,7 @@ mod app;
 mod app_menu;
 mod ipc_server;
 mod library;
+mod mcp_setup_view;
 mod permissions;
 mod session_runner;
 mod session_updates;
@@ -108,6 +109,23 @@ fn main() {
             start_local_mcp_bridge(&ipc_handle, &ipc_snapshot, &model, cx);
         }
 
+        let on_set_local_mcp_enabled: Arc<dyn Fn(bool, &mut App)> = {
+            let ipc_handle = ipc_handle.clone();
+            let ipc_snapshot = ipc_snapshot.clone();
+            let model = model.clone();
+            let data_dir = data_dir.clone();
+            Arc::new(move |enabled, cx| {
+                set_local_mcp_bridge_enabled(
+                    enabled,
+                    &ipc_handle,
+                    &ipc_snapshot,
+                    &model,
+                    &data_dir,
+                    cx,
+                );
+            })
+        };
+
         let window = open_main_window(
             cx,
             window_options,
@@ -115,8 +133,7 @@ fn main() {
                 runner: runner.clone(),
                 storage: storage.clone(),
                 model: model.clone(),
-                ipc_handle: ipc_handle.clone(),
-                ipc_snapshot: ipc_snapshot.clone(),
+                on_set_local_mcp_enabled: on_set_local_mcp_enabled.clone(),
                 data_dir: data_dir.clone(),
                 recordings_dir: recordings_dir.clone(),
             },
@@ -127,6 +144,7 @@ fn main() {
             runner.clone(),
             storage.clone(),
             model.clone(),
+            on_set_local_mcp_enabled,
             data_dir.clone(),
             recordings_dir,
         );
@@ -142,8 +160,7 @@ struct MainWindowDeps {
     runner: Arc<SessionRunner>,
     storage: SharedStorage,
     model: Entity<AppModel>,
-    ipc_handle: Arc<Mutex<Option<ipc_server::IpcServer>>>,
-    ipc_snapshot: ipc_server::SharedSnapshot,
+    on_set_local_mcp_enabled: Arc<dyn Fn(bool, &mut App)>,
     data_dir: PathBuf,
     recordings_dir: PathBuf,
 }
@@ -157,8 +174,7 @@ fn open_main_window(
         runner,
         storage,
         model,
-        ipc_handle,
-        ipc_snapshot,
+        on_set_local_mcp_enabled,
         data_dir,
         recordings_dir,
     } = deps;
@@ -175,11 +191,8 @@ fn open_main_window(
             let storage_for_open_history = storage.clone();
             let data_for_toggle = data_dir.clone();
             let data_for_download = data_dir.clone();
-            let data_for_local_mcp = data_dir.clone();
             let recordings_for_toggle = recordings_dir.clone();
             let runner_for_toggle = runner.clone();
-            let ipc_for_local_mcp = ipc_handle.clone();
-            let ipc_snapshot_for_local_mcp = ipc_snapshot.clone();
             let (transcript_list, follow_transcript) = new_transcript_list_state();
             let view = TranscriptView {
                 app: model.clone(),
@@ -238,13 +251,8 @@ fn open_main_window(
                     });
                 }),
                 on_toggle_local_mcp: Arc::new(move |_window, cx| {
-                    toggle_local_mcp_bridge(
-                        &ipc_for_local_mcp,
-                        &ipc_snapshot_for_local_mcp,
-                        &model_for_local_mcp,
-                        &data_for_local_mcp,
-                        cx,
-                    );
+                    let enabled = !model_for_local_mcp.read(cx).local_mcp.enabled;
+                    on_set_local_mcp_enabled(enabled, cx);
                 }),
             };
             // Re-render whenever the underlying model changes.
@@ -357,17 +365,21 @@ fn spawn_ipc_snapshot_sync(
     .detach();
 }
 
-fn toggle_local_mcp_bridge(
+fn set_local_mcp_bridge_enabled(
+    enabled: bool,
     ipc_handle: &Arc<Mutex<Option<ipc_server::IpcServer>>>,
     snapshot: &ipc_server::SharedSnapshot,
     model: &Entity<AppModel>,
     data_dir: &std::path::Path,
     cx: &mut App,
 ) {
-    if model.read(cx).local_mcp.enabled {
-        stop_local_mcp_bridge(ipc_handle, model, cx);
-    } else {
+    if enabled {
+        if model.read(cx).local_mcp.running {
+            return;
+        }
         start_local_mcp_bridge(ipc_handle, snapshot, model, cx);
+    } else {
+        stop_local_mcp_bridge(ipc_handle, model, cx);
     }
     save_local_mcp_settings(data_dir, model, cx);
 }

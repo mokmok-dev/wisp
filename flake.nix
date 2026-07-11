@@ -1,6 +1,9 @@
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
+    # Keep Linux swiftformat on the last known-good nixpkgs revision. Newer
+    # nixpkgs currently builds Swift 5.10 with a Clang-only TLS flag.
+    nixpkgs-swiftformat.url = "github:nixos/nixpkgs/b5aa0fbd538984f6e3d201be0005b4463d8b09f8";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
@@ -10,6 +13,7 @@
     {
       self,
       nixpkgs,
+      nixpkgs-swiftformat,
       flake-utils,
       rust-overlay,
     }:
@@ -20,6 +24,11 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
+        swiftformat =
+          if pkgs.stdenv.isLinux then
+            (import nixpkgs-swiftformat { inherit system; }).swiftformat
+          else
+            pkgs.swiftformat;
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
         # Shared by both devShells on macOS. Nix injects its own apple-sdk +

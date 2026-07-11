@@ -84,6 +84,8 @@ Enable **Local MCP Bridge** from the Wisp library screen to expose the visible t
 
 MCP hosts should run the bundled `wisp-mcp` binary over stdio, for example `/Applications/Wisp.app/Contents/MacOS/wisp-mcp`. The bridge provides the `ask_current_conversation` tool, fetches the current Wisp transcript from the IPC endpoint, and returns context for the host LLM to answer questions such as `いまの話ってどういうこと?`.
 
+`ask_current_conversation` accepts `loopback_seconds` (600 by default), `limit` (up to 500), and an opaque `cursor`. The time window is measured backward from the latest non-empty segment's end time. Without `limit`, it returns every non-empty segment that overlaps the window. With `limit`, the first page contains the last `limit` entries in Wisp display order. When the result's pagination data includes a non-null `next_cursor`, pass it back as `cursor` and provide `limit` to read the preceding page in display order. The cursor preserves the original session, view, and time window, and pins the original append boundary so later appended segments are excluded. This pagination limits the MCP response context; the local IPC endpoint remains backward-compatible and still returns the full visible snapshot.
+
 ## Roadmap
 
 - [ ] **Windows support** — preview setup and `Windows.Media.SpeechRecognition` route are in place; WASAPI loopback + local-model transcription is the remaining hardening path.

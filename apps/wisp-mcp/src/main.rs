@@ -4,11 +4,18 @@
 //! This process speaks MCP over stdio and fetches the current transcript from
 //! that endpoint only when a tool is called.
 
+mod pagination;
+
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::net::TcpStream;
 
 use serde_json::{Value, json};
+
+use pagination::{
+    DEFAULT_LOOPBACK_SECONDS, MAX_CURSOR_LENGTH, MAX_PAGE_LIMIT, ToolArguments, TranscriptPage,
+    paginate_transcript,
+};
 
 const DEFAULT_IPC_ADDR: &str = "127.0.0.1:8765";
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
@@ -179,6 +186,23 @@ fn tools_list_result() -> Value {
                         "question": {
                             "type": "string",
                             "description": "Question to answer from the current Wisp transcript."
+                        },
+                        "loopback_seconds": {
+                            "type": "number",
+                            "minimum": 0,
+                            "default": DEFAULT_LOOPBACK_SECONDS,
+                            "description": "How many seconds to look back from the latest non-empty transcript segment's end time. Defaults to 600. Only applies to the first page; a cursor preserves its original time window."
+                        },
+                        "cursor": {
+                            "type": "string",
+                            "maxLength": MAX_CURSOR_LENGTH,
+                            "description": "Opaque next_cursor returned by a previous call. Use it to fetch the preceding page in Wisp display order."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": MAX_PAGE_LIMIT,
+                            "description": "Maximum number of transcript segments to return per page. When omitted on the first call, all segments in the time window are returned. Required with cursor."
                         }
                     },
                     "required": ["question"]
@@ -201,16 +225,19 @@ fn handle_tools_call(
     if name != TOOL_NAME {
         return rpc_error(id, -32602, "Unknown tool");
     }
-    let question = params
-        .get("arguments")
-        .and_then(|arguments| arguments.get("question"))
-        .and_then(Value::as_str)
-        .unwrap_or("いまの話ってどういうこと?");
+    let arguments = match ToolArguments::from_params(params) {
+        Ok(arguments) => arguments,
+        Err(err) => return rpc_error(id, -32602, &err),
+    };
 
     match fetch_conversation(config) {
         Ok(snapshot) => {
-            let context = tool_context(question, &snapshot);
-            rpc_result(id, &tool_result(false, &context))
+            let page = match paginate_transcript(&snapshot, &arguments) {
+                Ok(page) => page,
+                Err(err) => return rpc_error(id, -32602, &err),
+            };
+            let context = tool_context(&arguments.question, &snapshot, &page);
+            rpc_result(id, &paginated_tool_result(&context, &page))
         },
         Err(err) => {
             let text = format!("Could not read the current Wisp transcript: {err}");
@@ -262,9 +289,31 @@ fn tool_result(
     })
 }
 
+fn paginated_tool_result(
+    text: &str,
+    page: &TranscriptPage,
+) -> Value {
+    let mut result = tool_result(false, text);
+    let mut pagination = json!({
+        "loopbackSeconds": page.loopback_seconds,
+        "anchorEndSeconds": page.anchor_end_seconds,
+        "limit": page.limit,
+        "returnedSegments": page.segments.len(),
+        "totalSegments": page.total_segments,
+        "remainingSegments": page.remaining_segments,
+        "hasMore": page.has_more()
+    });
+    if let Some(next_cursor) = &page.next_cursor {
+        pagination["nextCursor"] = json!(next_cursor);
+    }
+    result["_meta"] = json!({"dev.mokmok.wisp/pagination": pagination});
+    result
+}
+
 fn tool_context(
     question: &str,
     snapshot: &Value,
+    page: &TranscriptPage,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "User question: {question}");
@@ -283,13 +332,22 @@ fn tool_context(
     if let Some(error) = snapshot.get("last_error").and_then(Value::as_str) {
         let _ = writeln!(out, "Last recording error: {error}");
     }
-    out.push_str("\nVisible transcript:\n");
+    let mut pagination = json!({
+        "loopback_seconds": page.loopback_seconds,
+        "anchor_end_seconds": page.anchor_end_seconds,
+        "limit": page.limit,
+        "returned_segments": page.segments.len(),
+        "total_segments": page.total_segments,
+        "remaining_segments": page.remaining_segments,
+        "has_more": page.has_more()
+    });
+    if let Some(next_cursor) = &page.next_cursor {
+        pagination["next_cursor"] = json!(next_cursor);
+    }
+    let _ = writeln!(out, "Pagination: {pagination}");
+    out.push_str("\nTranscript page (Wisp display order):\n");
     let mut wrote_segment = false;
-    let segments = snapshot
-        .get("segments")
-        .and_then(Value::as_array)
-        .map_or(&[][..], Vec::as_slice);
-    for segment in segments {
+    for segment in &page.segments {
         let text = segment
             .get("text")
             .and_then(Value::as_str)
@@ -324,12 +382,18 @@ fn tool_context(
     }
     if !wrote_segment {
         out.push_str(
-            "No transcript segments are currently visible. Start or open a Wisp session, then ask again.\n",
+            "No transcript segments are available in this time window and page. Start or open a Wisp session, or request a wider window.\n",
         );
     }
-    out.push_str(
-        "\nInstruction for the host LLM: answer the user question using the Wisp transcript above. If the transcript is insufficient, say what is missing.",
-    );
+    if page.has_more() {
+        out.push_str(
+            "\nInstruction for the host LLM: if more transcript context is needed, call this tool again with next_cursor as cursor and provide limit. Otherwise answer the user question using the transcript pages already retrieved.",
+        );
+    } else {
+        out.push_str(
+            "\nInstruction for the host LLM: answer the user question using the transcript pages already retrieved. If the transcript is insufficient, say what is missing.",
+        );
+    }
     out
 }
 
@@ -363,12 +427,43 @@ fn rpc_error(
 mod tests {
     use std::io::Cursor;
 
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{
-        IpcConfig, StdioFraming, handle_json_rpc, read_stdio_message, tool_context,
-        write_stdio_message,
+        IpcConfig, StdioFraming, ToolArguments, handle_json_rpc, paginate_transcript,
+        paginated_tool_result, read_stdio_message, tool_context, write_stdio_message,
     };
+
+    fn segment(
+        text: &str,
+        start_seconds: f64,
+        end_seconds: f64,
+    ) -> Value {
+        json!({
+            "source": "mic",
+            "text": text,
+            "start_seconds": start_seconds,
+            "end_seconds": end_seconds,
+            "is_final": true
+        })
+    }
+
+    fn snapshot(
+        session_id: i64,
+        segments: &[Value],
+    ) -> Value {
+        json!({
+            "view": "live_session",
+            "state": "recording",
+            "session_id": session_id,
+            "title": "demo",
+            "segments": segments
+        })
+    }
+
+    fn arguments(value: &Value) -> ToolArguments {
+        ToolArguments::from_params(&json!({"arguments": value})).expect("valid arguments")
+    }
 
     #[test]
     fn tools_list_exposes_current_conversation_tool() {
@@ -385,6 +480,14 @@ mod tests {
             response["result"]["tools"][0]["name"],
             "ask_current_conversation"
         );
+        let schema = &response["result"]["tools"][0]["inputSchema"];
+        assert_eq!(schema["required"], json!(["question"]));
+        assert_eq!(schema["properties"]["loopback_seconds"]["default"], 600.0);
+        assert_eq!(schema["properties"]["cursor"]["type"], "string");
+        assert_eq!(schema["properties"]["cursor"]["maxLength"], 256);
+        assert_eq!(schema["properties"]["limit"]["type"], "integer");
+        assert_eq!(schema["properties"]["limit"]["maximum"], 500);
+        assert!(schema["properties"]["limit"].get("default").is_none());
     }
 
     #[test]
@@ -414,24 +517,68 @@ mod tests {
 
     #[test]
     fn context_includes_transcript_segments() {
-        let context = tool_context(
-            "いまの話ってどういうこと?",
-            &json!({
-                "view": "live_session",
-                "state": "recording",
-                "session_id": 7,
-                "title": "demo",
-                "segments": [
-                    {
-                        "source": "mic",
-                        "text": "今日はロードマップの話をしています。",
-                        "start_seconds": 0.0,
-                        "end_seconds": 2.0,
-                        "is_final": true
-                    }
-                ]
-            }),
+        let snapshot = snapshot(
+            7,
+            &[segment("今日はロードマップの話をしています。", 0.0, 2.0)],
         );
+        let page =
+            paginate_transcript(&snapshot, &arguments(&json!({"question": "q"}))).expect("page");
+        let context = tool_context("いまの話ってどういうこと?", &snapshot, &page);
         assert!(context.contains("ロードマップ"));
+        assert!(context.contains("\"loopback_seconds\":600.0"));
+    }
+
+    #[test]
+    fn pagination_metadata_is_available_in_text_and_meta() {
+        let current_snapshot = snapshot(7, &[segment("A", 0.0, 1.0), segment("B", 1.0, 2.0)]);
+        let page = paginate_transcript(
+            &current_snapshot,
+            &arguments(&json!({"question": "q", "limit": 1})),
+        )
+        .expect("page");
+        let next_cursor = page.next_cursor.as_deref().expect("cursor");
+        let context = tool_context("q", &current_snapshot, &page);
+        let result = paginated_tool_result(&context, &page);
+        let metadata = &result["_meta"]["dev.mokmok.wisp/pagination"];
+
+        assert!(context.contains(&format!("\"next_cursor\":\"{next_cursor}\"")));
+        assert_eq!(metadata["nextCursor"], next_cursor);
+        assert_eq!(metadata["limit"], 1);
+        assert_eq!(metadata["hasMore"], true);
+        assert_eq!(result["content"][0]["type"], "text");
+
+        let final_page = paginate_transcript(
+            &current_snapshot,
+            &arguments(&json!({"question": "q", "limit": 2})),
+        )
+        .expect("exact final page");
+        let final_context = tool_context("q", &current_snapshot, &final_page);
+        let final_result = paginated_tool_result(&final_context, &final_page);
+        let final_metadata = &final_result["_meta"]["dev.mokmok.wisp/pagination"];
+        assert!(!final_context.contains("next_cursor"));
+        assert!(final_metadata.get("nextCursor").is_none());
+        assert_eq!(final_metadata["hasMore"], false);
+    }
+
+    #[test]
+    fn invalid_tool_arguments_return_invalid_params() {
+        let config = IpcConfig {
+            addr: "127.0.0.1:8765".into(),
+            token: None,
+        };
+        let response = handle_json_rpc(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {
+                    "name": "ask_current_conversation",
+                    "arguments": "bad"
+                }
+            }),
+            &config,
+        )
+        .expect("invalid params response");
+        assert_eq!(response["error"]["code"], -32602);
     }
 }

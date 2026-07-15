@@ -8,6 +8,7 @@ public enum PoCError: Error, CustomStringConvertible {
     case converterCreationFailed
     case noDisplay
     case scStreamSetupFailed(String)
+    case outputFilesAlreadyExist(String)
 
     public var description: String {
         switch self {
@@ -16,6 +17,8 @@ public enum PoCError: Error, CustomStringConvertible {
         case .converterCreationFailed: "Failed to create AVAudioConverter"
         case .noDisplay: "No display available for system audio capture"
         case .scStreamSetupFailed(let msg): "SCStream setup failed: \(msg)"
+        case .outputFilesAlreadyExist(let path):
+            "Recording output files already exist in: \(path)"
         }
     }
 }

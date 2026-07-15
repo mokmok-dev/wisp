@@ -18,12 +18,13 @@ use gpui::{
     rgb,
 };
 use wisp_audiokit::{
-    LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SessionError, SourceLabel,
+    LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SourceLabel,
 };
 use wisp_core::{Session as StoredSession, SessionId};
 
 use crate::app::{
-    AppModel, LocalMcpBridge, ModelDownloadState, Permissions, Segment, SessionState, Setup, View,
+    AppError, AppModel, LocalMcpBridge, ModelDownloadState, Permissions, Segment, SessionState,
+    Setup, View,
 };
 use crate::permissions as perms;
 use crate::transcript_export::{self, suggested_export_name};
@@ -229,7 +230,7 @@ impl TranscriptView {
         model: Entity<AppModel>,
         segment_count: usize,
         log_count: usize,
-        last_error: Option<&SessionError>,
+        last_error: Option<&AppError>,
         export_title: Option<&str>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -335,6 +336,12 @@ impl TranscriptView {
     ) -> impl IntoElement {
         let toggle = self.on_toggle_record.clone();
         let on_back = self.on_back_to_library.clone();
+        let can_leave_live_session = !model.read(cx).live_session_is_protected();
+        let mut navigation = div().flex().items_center().gap(px(12.0));
+        if can_leave_live_session {
+            navigation = navigation.child(render_back_button("library-back-live", on_back));
+        }
+        navigation = navigation.child(render_brand());
         div()
             .h(px(56.0))
             .flex()
@@ -343,14 +350,7 @@ impl TranscriptView {
             .px(px(20.0))
             .border_b_1()
             .border_color(theme::border())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.0))
-                    .child(render_back_button("library-back-live", on_back))
-                    .child(render_brand()),
-            )
+            .child(navigation)
             .child(
                 div()
                     .flex()
@@ -1324,7 +1324,7 @@ fn render_status_bar(
     state: SessionState,
     segment_count: usize,
     log_count: usize,
-    last_error: Option<&SessionError>,
+    last_error: Option<&AppError>,
 ) -> impl IntoElement {
     let (dot, status_text) = match state {
         SessionState::Idle => (theme::record_idle(), "Idle".to_string()),

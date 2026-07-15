@@ -32,22 +32,29 @@ pub fn default_title(started_at: DateTime<Utc>) -> String {
 
 /// Format the directory name we hand to the Swift audio session so each
 /// recording lands in its own subfolder of the recordings root. Uses a
-/// filesystem-safe ISO-ish form: `2026-05-29T143000Z` (always UTC, no
-/// punctuation that needs escaping on any platform).
+/// filesystem-safe ISO-ish form: `2026-05-29T143000123456789Z` (always UTC,
+/// no punctuation that needs escaping on any platform). Nanosecond precision
+/// keeps separate recordings started within the same second in distinct
+/// directories.
 pub fn session_dir_name(started_at: DateTime<Utc>) -> String {
-    started_at.format("%Y-%m-%dT%H%M%SZ").to_string()
+    format!(
+        "{}{:09}Z",
+        started_at.format("%Y-%m-%dT%H%M%S"),
+        started_at.timestamp_subsec_nanos()
+    )
 }
 
 /// Create a new session row. `dir_name` is the per-session subdirectory
-/// passed to the Swift audio kit; we store `mic.wav` / `system.wav`
-/// relative paths (matches the convention in `wisp-storage` tests).
+/// passed to the Swift audio kit beneath the `recordings` directory. WAV
+/// paths are stored relative to the storage root, as required by
+/// `wisp_core::Session`.
 pub fn create_session(
     storage: &Storage,
     started_at: DateTime<Utc>,
     dir_name: &str,
 ) -> Result<SessionId, StorageError> {
-    let mic_rel = format!("{dir_name}/mic.wav");
-    let sys_rel = format!("{dir_name}/system.wav");
+    let mic_rel = format!("recordings/{dir_name}/mic.wav");
+    let sys_rel = format!("recordings/{dir_name}/system.wav");
     storage.sessions().create(&NewSession {
         started_at,
         title: default_title(started_at),
@@ -70,7 +77,7 @@ pub fn finalise_session(
     segments: &[UiSegment],
     ended_at: DateTime<Utc>,
 ) -> Result<(), StorageError> {
-    let segs = storage.segments();
+    let mut stored_segments = Vec::with_capacity(segments.len());
     let mut mic_idx: u32 = 0;
     let mut sys_idx: u32 = 0;
     for seg in segments {
@@ -91,7 +98,7 @@ pub fn finalise_session(
         if seg.text.trim().is_empty() {
             continue;
         }
-        segs.append(&NewSegment {
+        stored_segments.push(NewSegment {
             session_id,
             source,
             segment_index: idx,
@@ -99,10 +106,9 @@ pub fn finalise_session(
             end_seconds: seg.end_seconds,
             text: seg.text.clone(),
             speaker_label: None,
-        })?;
+        });
     }
-    storage.sessions().mark_ended(session_id, ended_at)?;
-    Ok(())
+    storage.finalise_session(session_id, &stored_segments, ended_at)
 }
 
 /// Load a session's full transcript and return it in the UI segment
@@ -134,3 +140,21 @@ pub fn load_history(
 /// passes around. `SQLite` serialises writers internally, so a plain
 /// `Mutex` is enough; we don't need a connection pool.
 pub type SharedStorage = Arc<Mutex<Storage>>;
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeDelta, TimeZone, Utc};
+
+    use super::session_dir_name;
+
+    #[test]
+    fn session_dir_name_distinguishes_starts_within_the_same_second() {
+        let base = Utc.with_ymd_and_hms(2026, 5, 29, 14, 30, 0).unwrap();
+        let first = base + TimeDelta::nanoseconds(1);
+        let second = base + TimeDelta::nanoseconds(2);
+
+        assert_eq!(session_dir_name(first), "2026-05-29T143000000000001Z");
+        assert_eq!(session_dir_name(second), "2026-05-29T143000000000002Z");
+        assert_ne!(session_dir_name(first), session_dir_name(second));
+    }
+}

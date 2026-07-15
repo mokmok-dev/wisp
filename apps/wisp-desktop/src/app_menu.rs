@@ -5,16 +5,15 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use gpui::{App, Entity, KeyBinding, Menu, MenuItem, actions};
 
 use crate::about_view;
-use crate::app::{AppModel, SessionState, View};
+use crate::app::{AppError, AppModel, SessionState, View};
 use crate::library::SharedStorage;
 use crate::mcp_setup_view;
 use crate::session_runner::SessionRunner;
-use crate::session_updates::apply_update;
+use crate::session_updates::{apply_update, retry_pending_session_write};
 use crate::transcript_export::{self, suggested_export_name};
 
 actions!(
@@ -44,8 +43,9 @@ pub fn configure(
     let storage_for_quit = storage.clone();
 
     cx.on_action(move |_: &Quit, cx| {
-        graceful_stop_session(&runner_for_quit, &model_for_quit, &storage_for_quit, cx);
-        cx.quit();
+        if graceful_stop_session(&runner_for_quit, &model_for_quit, &storage_for_quit, cx) {
+            cx.quit();
+        }
     });
 
     cx.on_action(|_: &About, cx| {
@@ -82,11 +82,13 @@ pub fn configure(
     // same state machine as that button via `toggle_recording`.
     let runner_for_toggle = runner.clone();
     let model_for_toggle = model.clone();
+    let storage_for_toggle = storage.clone();
     let data_for_toggle = data_dir;
     cx.on_action(move |_: &ToggleRecording, cx| {
         crate::toggle_recording(
             &runner_for_toggle,
             &model_for_toggle,
+            &storage_for_toggle,
             &data_for_toggle,
             &recordings_dir,
             cx,
@@ -139,7 +141,7 @@ pub fn configure(
     let model_for_shutdown = model;
     let storage_for_shutdown = storage;
     let _ = cx.on_app_quit(move |cx| {
-        graceful_stop_session(
+        let _ = graceful_stop_session(
             &runner_for_shutdown,
             &model_for_shutdown,
             &storage_for_shutdown,
@@ -186,7 +188,29 @@ fn graceful_stop_session(
     model: &Entity<AppModel>,
     storage: &SharedStorage,
     cx: &mut App,
-) {
+) -> bool {
+    let should_retry_persistence = {
+        let app = model.read(cx);
+        app.pending_session_write.is_some()
+    };
+    if should_retry_persistence {
+        return model.update(cx, |model, cx| {
+            let succeeded = match retry_pending_session_write(model, storage) {
+                Ok(()) => {
+                    model.set_state(SessionState::Idle);
+                    model.last_error = None;
+                    true
+                },
+                Err(error) => {
+                    model.fail(AppError::Persistence(error));
+                    false
+                },
+            };
+            cx.notify();
+            succeeded
+        });
+    }
+
     let needs_stop = model.read(cx).state;
     let needs_stop = matches!(
         needs_stop,
@@ -200,21 +224,29 @@ fn graceful_stop_session(
         });
     }
 
-    let should_wait = matches!(
-        model.read(cx).state,
-        SessionState::Recording { .. } | SessionState::Starting | SessionState::Stopping
-    );
-    if !should_wait {
-        return;
-    }
+    let session_id = {
+        let app = model.read(cx);
+        if matches!(
+            app.state,
+            SessionState::Recording { .. } | SessionState::Starting | SessionState::Stopping
+        ) {
+            app.current_session_id
+        } else {
+            None
+        }
+    };
+    let Some(session_id) = session_id else {
+        return !model.read(cx).live_session_is_protected();
+    };
 
-    let updates = runner.wait_for_idle(Duration::from_secs(5));
+    let updates = runner.wait_until_finished(session_id);
     model.update(cx, |m, cx| {
         for update in updates {
             apply_update(update, m, storage);
         }
         cx.notify();
     });
+    !model.read(cx).live_session_is_protected()
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@
 //! Three `cx.spawn` async tasks plumb everything together:
 //!
 //!   1. Drain `SessionRunner` updates into `AppModel` every ~33ms, doing
-//!      DB writes at session boundaries (Started / Stopped).
+//!      finalising the pre-allocated DB row when the worker stops.
 //!   2. Toggle the ghost-text cursor on the view every 500ms and refresh
 //!      the status bar's elapsed counter at 250ms so it stays smooth.
 //!   3. Re-poll permission status periodically.
@@ -31,6 +31,7 @@ use gpui::{
     App, AppContext, Application, AsyncApp, Bounds, Entity, Timer, TitlebarOptions, WindowBounds,
     WindowHandle, WindowOptions, px, size,
 };
+use wisp_audiokit::SessionError;
 use wisp_core::SessionId;
 use wisp_storage::Storage;
 
@@ -48,11 +49,11 @@ mod setup;
 mod transcript_export;
 mod transcript_view;
 
-use app::{AppModel, LocalMcpBridge, SessionState};
+use app::{AppError, AppModel, LocalMcpBridge, PendingSessionWrite, SessionState};
 use app_menu::configure as configure_app_menu;
 use library::SharedStorage;
-use session_runner::SessionRunner;
-use session_updates::apply_update;
+use session_runner::{SessionRunner, SessionStart};
+use session_updates::{apply_update, retry_pending_session_write};
 use transcript_view::{
     TranscriptView, cursor_blink_period, new_transcript_list_state, ui_tick_period,
 };
@@ -188,6 +189,7 @@ fn open_main_window(
             let model_for_open_history = model.clone();
             let model_for_back = model.clone();
             let model_for_local_mcp = model.clone();
+            let storage_for_toggle = storage.clone();
             let storage_for_open_history = storage.clone();
             let data_for_toggle = data_dir.clone();
             let data_for_download = data_dir.clone();
@@ -207,6 +209,7 @@ fn open_main_window(
                     toggle_recording(
                         &runner_for_toggle,
                         &model_for_toggle,
+                        &storage_for_toggle,
                         &data_for_toggle,
                         &recordings_for_toggle,
                         cx,
@@ -265,10 +268,9 @@ fn open_main_window(
 
 /// Drain `SessionRunner` updates into the model every ~33ms.
 ///
-/// At the same time, persist the recording lifecycle into storage:
-/// `Started` inserts a session row, `Stopped` writes finalised segments
-/// and stamps `ended_at`, `Error` clears the in-flight session so it
-/// doesn't dangle in the library as a half-recorded row.
+/// The session row is allocated before the worker starts. `Stopped` writes
+/// finalised segments and stamps `ended_at`; `Error` removes a row whose
+/// audio session never started.
 fn spawn_session_update_pump(
     cx: &mut App,
     runner: Arc<SessionRunner>,
@@ -468,6 +470,7 @@ fn save_local_mcp_settings(
 pub(crate) fn toggle_recording(
     runner: &SessionRunner,
     model: &gpui::Entity<AppModel>,
+    storage: &SharedStorage,
     data_dir: &std::path::Path,
     recordings_dir: &std::path::Path,
     cx: &mut gpui::App,
@@ -486,18 +489,70 @@ pub(crate) fn toggle_recording(
             if !setup_complete {
                 return;
             }
+            if state == SessionState::Failed
+                && model.read(cx).pending_session_write.is_some()
+                && !model.update(cx, |m, cx| match retry_pending_session_write(m, storage) {
+                    Ok(()) => {
+                        m.set_state(SessionState::Idle);
+                        m.last_error = None;
+                        cx.notify();
+                        true
+                    },
+                    Err(error) => {
+                        m.fail(AppError::Persistence(error));
+                        cx.notify();
+                        false
+                    },
+                })
+            {
+                return;
+            }
             // Per-session subdirectory so each recording's WAVs stay
             // grouped and we can show them as a single library row.
             let started_at = Utc::now();
             let dir_name = library::session_dir_name(started_at);
             let session_dir = recordings_dir.join(&dir_name);
+            let session_id =
+                match storage
+                    .lock()
+                    .map_err(|error| error.to_string())
+                    .and_then(|store| {
+                        library::create_session(&store, started_at, &dir_name)
+                            .map_err(|error| error.to_string())
+                    }) {
+                    Ok(session_id) => session_id,
+                    Err(error) => {
+                        model.update(cx, |m, cx| {
+                            m.begin_session();
+                            m.fail(AppError::Persistence(format!(
+                                "could not create the session record: {error}"
+                            )));
+                            cx.notify();
+                        });
+                        return;
+                    },
+                };
             model.update(cx, |m, cx| {
-                m.segments.clear();
-                m.last_error = None;
-                m.set_state(SessionState::Starting);
+                m.begin_session();
+                m.current_session_id = Some(session_id);
                 cx.notify();
             });
-            runner.start(started_at, dir_name, session_dir, config);
+            if !runner.start(session_dir, config, SessionStart { session_id }) {
+                model.update(cx, |m, cx| {
+                    if m.current_session_id == Some(session_id) {
+                        m.pending_session_write = Some(PendingSessionWrite::Delete);
+                        match retry_pending_session_write(m, storage) {
+                            Ok(()) => m.fail(SessionError::Start(
+                                "session runner is no longer available".into(),
+                            )),
+                            Err(error) => m.fail(AppError::Persistence(format!(
+                                "could not remove unstarted session {session_id}: {error}; session runner is no longer available"
+                            ))),
+                        }
+                        cx.notify();
+                    }
+                });
+            }
         },
         SessionState::Recording { .. } => {
             model.update(cx, |m, cx| {

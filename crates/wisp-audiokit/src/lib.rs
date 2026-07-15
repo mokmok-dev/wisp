@@ -478,6 +478,16 @@ mod imp {
             Err(SessionError::Start(detail))
         }
 
+        /// Whether microphone capture reached the running state. This is
+        /// useful after `start()` fails to distinguish an unstarted session
+        /// from one containing partial output that should be preserved.
+        #[must_use]
+        pub fn has_started_capture(&self) -> bool {
+            // SAFETY: handle is non-null and the getter does not mutate the
+            // Swift session.
+            unsafe { sys::wisp_session_has_started_capture(self.handle.as_ptr()) != 0 }
+        }
+
         /// Stop the session and wait for buffered results to drain. Blocks.
         /// Idempotent — safe to call multiple times.
         pub fn stop(&self) {
@@ -967,6 +977,12 @@ mod imp {
         /// Always returns [`SessionError::UnsupportedPlatform`].
         pub fn start(&mut self) -> Result<()> {
             Err(SessionError::UnsupportedPlatform)
+        }
+
+        /// Always false on non-macOS targets.
+        #[must_use]
+        pub fn has_started_capture(&self) -> bool {
+            false
         }
 
         /// No-op on non-macOS targets.

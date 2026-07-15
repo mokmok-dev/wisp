@@ -69,6 +69,11 @@ WispSession* wisp_session_new(
  * wisp_session_last_error_message for details on failure. */
 int32_t wisp_session_start(WispSession* session);
 
+/* Returns 1 if microphone capture reached the running state, otherwise 0.
+ * Query after a failed start and before stopping to decide whether partial
+ * output must be preserved. */
+int32_t wisp_session_has_started_capture(WispSession* session);
+
 /* Stop capture and wait for results to drain. Blocks. */
 void wisp_session_stop(WispSession* session);
 

@@ -77,6 +77,9 @@ unsafe extern "C" {
     /// Returns 0 on success, non-zero on failure.
     pub fn wisp_session_start(session: *mut WispSession) -> c_int;
 
+    /// Returns non-zero if microphone capture reached the running state.
+    pub fn wisp_session_has_started_capture(session: *mut WispSession) -> c_int;
+
     /// Stop capture and wait for results to drain. Blocks.
     pub fn wisp_session_stop(session: *mut WispSession);
 

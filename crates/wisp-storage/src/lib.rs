@@ -15,7 +15,9 @@ mod sessions;
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, params};
+use wisp_core::{NewSegment, SessionId};
 
 pub use crate::error::{Result, StorageError};
 pub use crate::segments::Segments;
@@ -92,11 +94,89 @@ impl Storage {
     pub fn segments(&self) -> Segments<'_> {
         Segments::new(&self.conn)
     }
+
+    /// Persist all final transcript segments and mark their session ended in
+    /// one transaction.
+    ///
+    /// If any segment fails to insert, or the session update fails, every
+    /// write made by this call is rolled back.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the transaction cannot be started or
+    /// committed, a segment cannot be inserted, or the session cannot be
+    /// updated.
+    pub fn finalise_session(
+        &self,
+        session_id: SessionId,
+        segments: &[NewSegment],
+        ended_at: DateTime<Utc>,
+    ) -> Result<()> {
+        if let Some(segment) = segments
+            .iter()
+            .find(|segment| segment.session_id != session_id)
+        {
+            return Err(StorageError::SessionMismatch {
+                expected: session_id,
+                actual: segment.session_id,
+            });
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let exists = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+            [session_id.as_i64()],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            return Err(StorageError::SessionNotFound(session_id));
+        }
+        // The in-memory transcript is the complete authoritative snapshot.
+        // Replacing the session's rows makes retries idempotent and repairs
+        // partial data left by older non-transactional versions.
+        tx.execute(
+            "DELETE FROM segments WHERE session_id = ?1",
+            params![session_id.as_i64()],
+        )?;
+        let segment_store = Segments::new(&tx);
+        for segment in segments {
+            segment_store.append(segment)?;
+        }
+        Sessions::new(&tx).mark_ended(session_id, ended_at)?;
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
+    use wisp_core::{NewSegment, NewSession, SourceLabel};
+
     use super::Storage;
+
+    fn new_session() -> NewSession {
+        NewSession {
+            started_at: Utc.with_ymd_and_hms(2026, 7, 15, 10, 0, 0).unwrap(),
+            title: "transaction test".into(),
+            mic_wav_path: "transaction-test/mic.wav".into(),
+            system_wav_path: "transaction-test/system.wav".into(),
+        }
+    }
+
+    fn new_segment(
+        session_id: wisp_core::SessionId,
+        segment_index: u32,
+        text: &str,
+    ) -> NewSegment {
+        NewSegment {
+            session_id,
+            source: SourceLabel::Mic,
+            segment_index,
+            start_seconds: f64::from(segment_index),
+            end_seconds: f64::from(segment_index) + 1.0,
+            text: text.into(),
+            speaker_label: None,
+        }
+    }
 
     #[test]
     fn open_in_memory_runs_migrations() {
@@ -116,5 +196,187 @@ mod tests {
             root.join("sessions.db").exists(),
             "sessions.db should be created"
         );
+    }
+
+    #[test]
+    fn finalise_session_persists_segments_and_end_time_atomically() {
+        let storage = Storage::open_in_memory().expect("open");
+        let session_id = storage.sessions().create(&new_session()).expect("create");
+        let ended_at = Utc.with_ymd_and_hms(2026, 7, 15, 11, 0, 0).unwrap();
+        let segments = [
+            new_segment(session_id, 0, "first"),
+            new_segment(session_id, 1, "second"),
+        ];
+
+        storage
+            .finalise_session(session_id, &segments, ended_at)
+            .expect("finalise");
+
+        let stored = storage
+            .segments()
+            .list_by_session(session_id)
+            .expect("list segments");
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].text, "first");
+        assert_eq!(stored[1].text, "second");
+        assert_eq!(
+            storage
+                .sessions()
+                .get(session_id)
+                .unwrap()
+                .unwrap()
+                .ended_at,
+            Some(ended_at)
+        );
+    }
+
+    #[test]
+    fn finalise_session_rolls_back_all_writes_when_a_segment_fails() {
+        let storage = Storage::open_in_memory().expect("open");
+        let session_id = storage.sessions().create(&new_session()).expect("create");
+        storage
+            .segments()
+            .append(&new_segment(session_id, 1, "pre-existing"))
+            .expect("seed conflicting segment");
+        let ended_at = Utc.with_ymd_and_hms(2026, 7, 15, 11, 0, 0).unwrap();
+        let segments = [
+            new_segment(session_id, 0, "must roll back"),
+            new_segment(session_id, 0, "duplicate index"),
+        ];
+
+        let err = storage
+            .finalise_session(session_id, &segments, ended_at)
+            .expect_err("duplicate segment should abort finalisation");
+        assert!(matches!(err, super::StorageError::Sqlite(_)), "got {err:?}");
+
+        let stored = storage
+            .segments()
+            .list_by_session(session_id)
+            .expect("list segments");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].text, "pre-existing");
+        assert!(
+            storage
+                .segments()
+                .search("must", 10)
+                .expect("search FTS mirror")
+                .is_empty(),
+            "the FTS trigger write should roll back with the segment"
+        );
+        assert!(
+            storage
+                .sessions()
+                .get(session_id)
+                .unwrap()
+                .unwrap()
+                .ended_at
+                .is_none(),
+            "ended_at should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn finalise_session_rejects_segments_from_another_session() {
+        let storage = Storage::open_in_memory().expect("open");
+        let session_id = storage.sessions().create(&new_session()).expect("create");
+        let other_id = storage
+            .sessions()
+            .create(&new_session())
+            .expect("create other");
+        let ended_at = Utc.with_ymd_and_hms(2026, 7, 15, 11, 0, 0).unwrap();
+
+        let error = storage
+            .finalise_session(session_id, &[new_segment(other_id, 0, "wrong")], ended_at)
+            .expect_err("mismatched session must be rejected");
+
+        assert!(matches!(
+            error,
+            super::StorageError::SessionMismatch {
+                expected,
+                actual
+            } if expected == session_id && actual == other_id
+        ));
+        assert!(
+            storage
+                .segments()
+                .list_by_session(other_id)
+                .expect("list other segments")
+                .is_empty()
+        );
+        assert!(
+            storage
+                .sessions()
+                .get(session_id)
+                .expect("get session")
+                .expect("session exists")
+                .ended_at
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn finalise_session_can_retry_with_a_complete_snapshot() {
+        let storage = Storage::open_in_memory().expect("open");
+        let session_id = storage.sessions().create(&new_session()).expect("create");
+        let first_end = Utc.with_ymd_and_hms(2026, 7, 15, 11, 0, 0).unwrap();
+        storage
+            .finalise_session(
+                session_id,
+                &[new_segment(session_id, 0, "old snapshot")],
+                first_end,
+            )
+            .expect("first finalise");
+        let retry_end = Utc.with_ymd_and_hms(2026, 7, 15, 11, 1, 0).unwrap();
+
+        storage
+            .finalise_session(
+                session_id,
+                &[
+                    new_segment(session_id, 0, "replacement"),
+                    new_segment(session_id, 1, "new tail"),
+                ],
+                retry_end,
+            )
+            .expect("retry finalise");
+
+        let stored = storage
+            .segments()
+            .list_by_session(session_id)
+            .expect("list segments");
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].text, "replacement");
+        assert_eq!(stored[1].text, "new tail");
+        assert!(
+            storage
+                .segments()
+                .search("old", 10)
+                .expect("search replaced snapshot")
+                .is_empty()
+        );
+        assert_eq!(
+            storage
+                .sessions()
+                .get(session_id)
+                .expect("get session")
+                .expect("session exists")
+                .ended_at,
+            Some(retry_end)
+        );
+    }
+
+    #[test]
+    fn finalise_session_rejects_a_missing_session_even_when_empty() {
+        let storage = Storage::open_in_memory().expect("open");
+        let missing_id = wisp_core::SessionId::from(404);
+        let ended_at = Utc.with_ymd_and_hms(2026, 7, 15, 11, 0, 0).unwrap();
+
+        let error = storage
+            .finalise_session(missing_id, &[], ended_at)
+            .expect_err("missing session must fail");
+
+        assert!(matches!(
+            error,
+            super::StorageError::SessionNotFound(id) if id == missing_id
+        ));
     }
 }

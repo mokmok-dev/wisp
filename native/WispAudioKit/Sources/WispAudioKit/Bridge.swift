@@ -220,6 +220,14 @@ public func wisp_session_start(session: OpaquePointer?) -> Int32 {
     return 0
 }
 
+/// Return 1 when microphone capture reached the running state, otherwise 0.
+/// This remains queryable after `wisp_session_start` fails and before stop.
+@_cdecl("wisp_session_has_started_capture")
+public func wisp_session_has_started_capture(session: OpaquePointer?) -> Int32 {
+    guard let handle = unbox(session) else { return 0 }
+    return handle.session.hasStartedCapture ? 1 : 0
+}
+
 /// Stop capture and wait for results to drain. Blocks until done.
 @_cdecl("wisp_session_stop")
 public func wisp_session_stop(session: OpaquePointer?) {

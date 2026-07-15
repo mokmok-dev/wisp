@@ -12,11 +12,38 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
 use wisp_audiokit::{
     Event, LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SessionConfig,
     SessionError, SessionResult, SourceLabel, local_model_spec, local_model_status,
 };
 use wisp_core::{Session as StoredSession, SessionId};
+
+#[derive(Debug, Clone)]
+pub enum AppError {
+    Audio(SessionError),
+    Persistence(String),
+}
+
+impl From<SessionError> for AppError {
+    fn from(error: SessionError) -> Self {
+        Self::Audio(error)
+    }
+}
+
+impl std::fmt::Display for AppError {
+    fn fmt(
+        &self,
+        formatter: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Self::Audio(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Persistence(error) => {
+                write!(formatter, "session history persistence failed: {error}")
+            },
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -25,6 +52,25 @@ pub enum SessionState {
     Recording { started_at: Instant },
     Stopping,
     Failed,
+}
+
+impl SessionState {
+    /// Whether an audio session is running or changing lifecycle state.
+    /// While this is true the live transcript is the persistence source and
+    /// must not be replaced by another view's segments.
+    #[must_use]
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Starting | Self::Recording { .. } | Self::Stopping
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingSessionWrite {
+    Finalise { ended_at: DateTime<Utc> },
+    Delete,
 }
 
 /// Which top-level screen the desktop UI is currently showing.
@@ -218,14 +264,17 @@ pub struct AppModel {
     /// library.
     pub library: Vec<StoredSession>,
     /// `Some` while a session row exists in the database for the current
-    /// recording — set when the Swift session reports `Started`, cleared
-    /// when the user navigates away from the live view.
+    /// live transcript. Allocated before audio starts and retained after a
+    /// successful stop until the user navigates away or starts a new session.
     pub current_session_id: Option<SessionId>,
+    /// A failed storage operation that must be retried before the live
+    /// transcript can be discarded or another session can start.
+    pub pending_session_write: Option<PendingSessionWrite>,
     /// The session being viewed in `View::History`, kept around so the
     /// header can render its title without re-querying.
     pub viewed_session: Option<StoredSession>,
     pub recent_log: VecDeque<String>,
-    pub last_error: Option<SessionError>,
+    pub last_error: Option<AppError>,
     pub permissions: Permissions,
     pub setup: Setup,
     pub local_mcp: LocalMcpBridge,
@@ -239,6 +288,7 @@ impl AppModel {
             segments: Vec::new(),
             library: Vec::new(),
             current_session_id: None,
+            pending_session_write: None,
             viewed_session: None,
             recent_log: VecDeque::new(),
             last_error: None,
@@ -275,20 +325,29 @@ impl AppModel {
     /// Move to the library screen and drop any live/historical segments so
     /// the next view enter starts from a clean slate.
     pub fn show_library(&mut self) {
+        if self.live_session_is_protected() {
+            return;
+        }
         self.view = View::Library;
         self.segments.clear();
         self.viewed_session = None;
+        self.current_session_id = None;
+        self.pending_session_write = None;
         self.last_error = None;
     }
 
     /// Move to the live recording screen in idle state. Used by the
     /// library's "New Session" button.
     pub fn show_new_session(&mut self) {
+        if self.live_session_is_protected() {
+            return;
+        }
         self.view = View::LiveSession;
         self.state = SessionState::Idle;
         self.segments.clear();
         self.viewed_session = None;
         self.current_session_id = None;
+        self.pending_session_write = None;
         self.last_error = None;
     }
 
@@ -299,16 +358,46 @@ impl AppModel {
         session: StoredSession,
         segments: Vec<Segment>,
     ) {
+        if self.live_session_is_protected() {
+            return;
+        }
         self.view = View::History {
             session_id: session.id,
         };
         self.segments = segments;
         self.viewed_session = Some(session);
+        self.current_session_id = None;
+        self.pending_session_write = None;
         // Historical segments are already finalized.
         self.finalize_all_segments();
         for seg in &mut self.segments {
             seg.refresh_display();
         }
+    }
+
+    /// Prepare a fresh recording while preserving the invariant that the
+    /// visible segments and `current_session_id` always describe the same
+    /// live session. This also makes menu/shortcut starts from Library or
+    /// History enter the live view before runner updates arrive.
+    pub fn begin_session(&mut self) {
+        if self.live_session_is_protected() {
+            return;
+        }
+        self.view = View::LiveSession;
+        self.state = SessionState::Starting;
+        self.segments.clear();
+        self.viewed_session = None;
+        self.current_session_id = None;
+        self.pending_session_write = None;
+        self.last_error = None;
+    }
+
+    /// Whether leaving the live view could discard an in-flight or not-yet
+    /// persisted transcript. A failed finalisation keeps its session id so it
+    /// can be retried without mixing it into a subsequent recording.
+    #[must_use]
+    pub fn live_session_is_protected(&self) -> bool {
+        self.state.is_active() || self.pending_session_write.is_some()
     }
 
     pub fn set_state(
@@ -318,11 +407,13 @@ impl AppModel {
         self.state = state;
     }
 
-    pub fn fail(
+    pub fn fail<E>(
         &mut self,
-        error: SessionError,
-    ) {
-        self.last_error = Some(error);
+        error: E,
+    ) where
+        E: Into<AppError>,
+    {
+        self.last_error = Some(error.into());
         self.state = SessionState::Failed;
         self.finalize_all_segments();
     }
@@ -511,6 +602,31 @@ mod tests {
         }
     }
 
+    fn stored_session(id: i64) -> StoredSession {
+        let started_at = chrono::Utc::now();
+        StoredSession {
+            id: SessionId::from(id),
+            started_at,
+            ended_at: Some(started_at),
+            title: format!("session {id}"),
+            mic_wav_path: format!("session-{id}/mic.wav"),
+            system_wav_path: format!("session-{id}/system.wav"),
+            notes: String::new(),
+        }
+    }
+
+    fn historical_segment(text: &str) -> Segment {
+        Segment {
+            source: SourceLabel::Mic,
+            id: 0,
+            text: text.into(),
+            display_text: text.into(),
+            start_seconds: 0.0,
+            end_seconds: 1.0,
+            is_final: true,
+        }
+    }
+
     #[test]
     fn partial_revisions_replace_text_in_place() {
         let mut m = AppModel::new();
@@ -613,6 +729,91 @@ mod tests {
         assert!(!m.segments[0].is_final);
         m.finalize_all_segments();
         assert!(m.segments[0].is_final);
+    }
+
+    #[test]
+    fn active_recording_cannot_replace_live_transcript_with_history() {
+        let mut m = AppModel::new();
+        m.show_new_session();
+        m.state = SessionState::Recording {
+            started_at: Instant::now(),
+        };
+        m.current_session_id = Some(SessionId::from(10));
+        m.ingest(Event::Result(r(SourceLabel::Mic, 1, "live transcript")));
+
+        m.show_library();
+        assert_eq!(m.view, View::LiveSession);
+        assert_eq!(m.current_session_id, Some(SessionId::from(10)));
+        assert_eq!(m.segments.len(), 1);
+        assert_eq!(m.segments[0].text, "live transcript");
+
+        m.show_history(
+            stored_session(20),
+            vec![historical_segment("old transcript")],
+        );
+        assert_eq!(m.view, View::LiveSession);
+        assert_eq!(m.current_session_id, Some(SessionId::from(10)));
+        assert_eq!(m.segments.len(), 1);
+        assert_eq!(m.segments[0].text, "live transcript");
+
+        m.show_new_session();
+        assert!(matches!(m.state, SessionState::Recording { .. }));
+        assert_eq!(m.current_session_id, Some(SessionId::from(10)));
+        assert_eq!(m.segments[0].text, "live transcript");
+    }
+
+    #[test]
+    fn stopping_session_keeps_live_transcript_until_persistence() {
+        let mut m = AppModel::new();
+        m.show_new_session();
+        m.state = SessionState::Stopping;
+        m.current_session_id = Some(SessionId::from(10));
+        m.ingest(Event::Result(r(SourceLabel::Mic, 1, "flushed transcript")));
+
+        m.show_library();
+
+        assert_eq!(m.view, View::LiveSession);
+        assert_eq!(m.current_session_id, Some(SessionId::from(10)));
+        assert_eq!(m.segments[0].text, "flushed transcript");
+    }
+
+    #[test]
+    fn failed_persistence_keeps_live_transcript_protected_for_retry() {
+        let mut m = AppModel::new();
+        m.show_new_session();
+        m.state = SessionState::Failed;
+        m.current_session_id = Some(SessionId::from(10));
+        m.pending_session_write = Some(PendingSessionWrite::Finalise {
+            ended_at: chrono::Utc::now(),
+        });
+        m.segments.push(historical_segment("not persisted yet"));
+
+        m.show_library();
+        m.show_history(stored_session(20), vec![historical_segment("old")]);
+        m.show_new_session();
+        m.begin_session();
+
+        assert_eq!(m.view, View::LiveSession);
+        assert_eq!(m.state, SessionState::Failed);
+        assert_eq!(m.current_session_id, Some(SessionId::from(10)));
+        assert_eq!(m.segments[0].text, "not persisted yet");
+    }
+
+    #[test]
+    fn begin_session_normalizes_history_to_fresh_live_view() {
+        let mut m = AppModel::new();
+        m.show_history(
+            stored_session(20),
+            vec![historical_segment("old transcript")],
+        );
+
+        m.begin_session();
+
+        assert_eq!(m.view, View::LiveSession);
+        assert_eq!(m.state, SessionState::Starting);
+        assert!(m.segments.is_empty());
+        assert!(m.viewed_session.is_none());
+        assert!(m.current_session_id.is_none());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import CoreMedia
+import Darwin
 import Foundation
 import os.lock
 import Speech
@@ -57,6 +58,13 @@ public final class WispSession: @unchecked Sendable {
         case failed
     }
 
+    /// Whether microphone capture reached the running state. Used by the FFI
+    /// bridge to decide whether a failed start may still contain recoverable
+    /// audio/transcription that must be finalised rather than discarded.
+    public var hasStartedCapture: Bool {
+        micEngineLock.withLock { engine != nil }
+    }
+
     public init(
         outputDir: URL,
         locale: Locale = Locale(identifier: "ja-JP"),
@@ -67,10 +75,33 @@ public final class WispSession: @unchecked Sendable {
             at: outputDir,
             withIntermediateDirectories: true
         )
-        let ts = ISO8601DateFormatter().string(from: Date())
-            .replacingOccurrences(of: ":", with: "-")
-        micWavURL = outputDir.appendingPathComponent("mic-\(ts).wav")
-        systemWavURL = outputDir.appendingPathComponent("system-\(ts).wav")
+        // Keep these names stable so callers can persist the exact paths.
+        // Refuse to reuse a completed/partial recording directory instead of
+        // silently overwriting its audio.
+        let micWavURL = outputDir.appendingPathComponent("mic.wav")
+        let systemWavURL = outputDir.appendingPathComponent("system.wav")
+        if FileManager.default.fileExists(atPath: micWavURL.path)
+            || FileManager.default.fileExists(atPath: systemWavURL.path)
+        {
+            throw PoCError.outputFilesAlreadyExist(outputDir.path)
+        }
+        let reservationURL = outputDir.appendingPathComponent(".wisp-recording-reserved")
+        let reserved = reservationURL.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return false }
+            let descriptor = Darwin.open(
+                path,
+                O_CREAT | O_EXCL | O_WRONLY,
+                mode_t(S_IRUSR | S_IWUSR)
+            )
+            guard descriptor >= 0 else { return false }
+            Darwin.close(descriptor)
+            return true
+        }
+        guard reserved else {
+            throw PoCError.outputFilesAlreadyExist(outputDir.path)
+        }
+        self.micWavURL = micWavURL
+        self.systemWavURL = systemWavURL
         self.locale = locale
         self.onResult = onResult
         self.onLog = onLog

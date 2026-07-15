@@ -10,8 +10,8 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use wisp_audiokit::{Event, Session, SessionConfig, SessionError};
+use wisp_core::SessionId;
 
 /// How often the running session checks for UI commands (Stop / Shutdown)
 /// while waiting for the next audio event. Sets the worst-case latency for
@@ -19,13 +19,19 @@ use wisp_audiokit::{Event, Session, SessionConfig, SessionError};
 /// immediately — this only bounds the *idle* wake-up cadence.
 const CMD_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+/// Stable identity allocated before audio starts. Every worker update carries
+/// this id so a delayed update can never mutate a newer session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionStart {
+    pub session_id: SessionId,
+}
+
 /// Commands the UI sends to the worker.
 pub enum Command {
     Start {
-        started_at: DateTime<Utc>,
-        dir_name: String,
         output_dir: PathBuf,
         config: SessionConfig,
+        session: SessionStart,
     },
     Stop,
     Shutdown,
@@ -34,16 +40,22 @@ pub enum Command {
 /// Updates the worker sends back to the UI.
 pub enum Update {
     /// `Session::start()` returned successfully and audio is flowing.
-    Started {
-        started_at: DateTime<Utc>,
-        dir_name: String,
-    },
+    Started(SessionStart),
     /// One transcription / log event from the session.
-    Event(Event),
+    Event { session_id: SessionId, event: Event },
     /// `Session::stop()` returned; the session has been torn down.
-    Stopped,
-    /// Lifecycle error (start/construct failed).
-    Error(SessionError),
+    Stopped { session_id: SessionId },
+    /// Audio startup failed after constructing a session. Any partial capture
+    /// has been stopped and its flushed events precede this update.
+    StartFailed {
+        session_id: SessionId,
+        error: SessionError,
+    },
+    /// Session construction failed before capture could start.
+    Error {
+        session_id: SessionId,
+        error: SessionError,
+    },
 }
 
 pub struct SessionRunner {
@@ -67,19 +79,20 @@ impl SessionRunner {
         }
     }
 
+    #[must_use]
     pub fn start(
         &self,
-        started_at: DateTime<Utc>,
-        dir_name: String,
         output_dir: PathBuf,
         config: SessionConfig,
-    ) {
-        let _ = self.cmd_tx.send(Command::Start {
-            started_at,
-            dir_name,
-            output_dir,
-            config,
-        });
+        session: SessionStart,
+    ) -> bool {
+        self.cmd_tx
+            .send(Command::Start {
+                output_dir,
+                config,
+                session,
+            })
+            .is_ok()
     }
 
     pub fn stop(&self) {
@@ -96,28 +109,40 @@ impl SessionRunner {
         out
     }
 
-    /// Block until the worker reports `Stopped`/`Error`, or `timeout` elapses.
-    /// Used when quitting so in-flight recordings can be finalised.
-    pub fn wait_for_idle(
+    /// Block until the worker reports a terminal update for `session_id`.
+    /// Used while quitting; `SessionRunner::drop` also waits for the worker,
+    /// so collecting the final updates here does not introduce a new hang.
+    pub fn wait_until_finished(
         &self,
-        timeout: Duration,
+        session_id: SessionId,
     ) -> Vec<Update> {
-        let deadline = std::time::Instant::now() + timeout;
         let mut collected = Vec::new();
         loop {
             collected.extend(self.drain_updates());
             if collected
                 .iter()
-                .any(|u| matches!(u, Update::Stopped | Update::Error(_)))
+                .any(|update| is_terminal_for(update, session_id))
             {
                 break;
             }
-            if std::time::Instant::now() >= deadline {
-                break;
+            match self.update_rx.recv() {
+                Ok(update) => collected.push(update),
+                Err(_) => break,
             }
-            std::thread::sleep(CMD_POLL_INTERVAL);
         }
         collected
+    }
+}
+
+fn is_terminal_for(
+    update: &Update,
+    expected_session_id: SessionId,
+) -> bool {
+    match update {
+        Update::Stopped { session_id }
+        | Update::StartFailed { session_id, .. }
+        | Update::Error { session_id, .. } => *session_id == expected_session_id,
+        Update::Started(_) | Update::Event { .. } => false,
     }
 }
 
@@ -137,12 +162,11 @@ fn worker_loop(
     loop {
         match cmd_rx.recv() {
             Ok(Command::Start {
-                started_at,
-                dir_name,
                 output_dir,
                 config,
+                session,
             }) => {
-                run_session(started_at, dir_name, &output_dir, config, cmd_rx, update_tx);
+                run_session(&output_dir, config, session, cmd_rx, update_tx);
             },
             Ok(Command::Stop) => {}, // no-op, nothing running
             Ok(Command::Shutdown) | Err(_) => return,
@@ -151,28 +175,45 @@ fn worker_loop(
 }
 
 fn run_session(
-    started_at: DateTime<Utc>,
-    dir_name: String,
     output_dir: &std::path::Path,
     config: SessionConfig,
+    session_start: SessionStart,
     cmd_rx: &Receiver<Command>,
     update_tx: &Sender<Update>,
 ) {
+    let session_id = session_start.session_id;
     let mut session = match Session::new_with_config(output_dir, config) {
         Ok(s) => s,
         Err(e) => {
-            let _ = update_tx.send(Update::Error(e));
+            let _ = update_tx.send(Update::Error {
+                session_id,
+                error: e,
+            });
             return;
         },
     };
     if let Err(e) = session.start() {
-        let _ = update_tx.send(Update::Error(e));
+        let mut preserve_partial = session.has_started_capture();
+        session.stop();
+        while let Some(event) = session.try_recv() {
+            preserve_partial |= is_transcript_result(&event);
+            let _ = update_tx.send(Update::Event { session_id, event });
+        }
+        let update = if preserve_partial {
+            Update::StartFailed {
+                session_id,
+                error: e,
+            }
+        } else {
+            Update::Error {
+                session_id,
+                error: e,
+            }
+        };
+        let _ = update_tx.send(update);
         return;
     }
-    let _ = update_tx.send(Update::Started {
-        started_at,
-        dir_name,
-    });
+    let _ = update_tx.send(Update::Started(session_start));
 
     // Pump events until the UI asks to stop. Between events we wake at
     // most every `CMD_POLL_INTERVAL` to check the command channel so a
@@ -183,20 +224,43 @@ fn run_session(
             Ok(Command::Stop) => break,
             Ok(Command::Shutdown) | Err(TryRecvError::Disconnected) => {
                 session.stop();
-                let _ = update_tx.send(Update::Stopped);
+                let _ = update_tx.send(Update::Stopped { session_id });
                 return;
             },
             Ok(Command::Start { .. }) | Err(TryRecvError::Empty) => {},
         }
         if let Some(event) = session.recv_timeout(CMD_POLL_INTERVAL) {
-            let _ = update_tx.send(Update::Event(event));
+            let _ = update_tx.send(Update::Event { session_id, event });
         }
     }
 
     session.stop();
     // Drain whatever the analyzer flushed during stop().
     while let Some(event) = session.try_recv() {
-        let _ = update_tx.send(Update::Event(event));
+        let _ = update_tx.send(Update::Event { session_id, event });
     }
-    let _ = update_tx.send(Update::Stopped);
+    let _ = update_tx.send(Update::Stopped { session_id });
+}
+
+fn is_transcript_result(event: &Event) -> bool {
+    matches!(event, Event::Result(_))
+}
+
+#[cfg(test)]
+mod tests {
+    use wisp_audiokit::{Event, SessionResult, SourceLabel};
+
+    use super::is_transcript_result;
+
+    #[test]
+    fn only_transcript_results_require_preserving_a_failed_start() {
+        assert!(!is_transcript_result(&Event::Log("stopping".into())));
+        assert!(is_transcript_result(&Event::Result(SessionResult {
+            source: SourceLabel::Mic,
+            segment_id: 1,
+            text: "partial transcript".into(),
+            start_seconds: 0.0,
+            end_seconds: 1.0,
+        })));
+    }
 }

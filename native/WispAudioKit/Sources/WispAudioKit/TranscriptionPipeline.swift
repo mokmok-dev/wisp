@@ -1,6 +1,7 @@
 @preconcurrency import AVFoundation
 import CoreMedia
 import Foundation
+import os.lock
 import Speech
 
 /// One transcription pipeline = one audio source (mic OR system) feeding a
@@ -27,12 +28,19 @@ public final class TranscriptionPipeline: @unchecked Sendable {
 
     public let label: String
     public let wavURL: URL
-    public let sourceFormat: AVAudioFormat
+
+    public var sourceFormat: AVAudioFormat { converterLock.withLock { $0.sourceFormat } }
 
     private let analyzer: SpeechAnalyzer
     private let transcriber: SpeechTranscriber
     private let analyzerFormat: AVAudioFormat
-    private let converter: AVAudioConverter
+
+    private struct ConverterState {
+        var sourceFormat: AVAudioFormat
+        var converter: AVAudioConverter
+    }
+
+    private let converterLock: OSAllocatedUnfairLock<ConverterState>
     private let wavFile: AVAudioFile
     private let inputContinuation: AsyncStream<AnalyzerInput>.Continuation
     private let onResult: OnResult
@@ -47,7 +55,6 @@ public final class TranscriptionPipeline: @unchecked Sendable {
     ) async throws {
         self.label = label
         self.wavURL = wavURL
-        self.sourceFormat = sourceFormat
         self.onResult = onResult
 
         // SpeechTranscriber with progressive (streaming) preset
@@ -66,7 +73,9 @@ public final class TranscriptionPipeline: @unchecked Sendable {
         guard let converter = AVAudioConverter(from: sourceFormat, to: analyzerFormat) else {
             throw PoCError.converterCreationFailed
         }
-        self.converter = converter
+        converterLock = OSAllocatedUnfairLock(
+            initialState: ConverterState(sourceFormat: sourceFormat, converter: converter)
+        )
 
         // WAV files require interleaved PCM. AVAudioFile.write() auto-converts
         // from the buffer's format to the file's format, so non-interleaved
@@ -117,13 +126,29 @@ public final class TranscriptionPipeline: @unchecked Sendable {
     /// Safe to call from audio callback threads.
     public func push(_ buffer: AVAudioPCMBuffer) {
         // 1. WAV (native format)
-        do {
-            try wavFile.write(from: buffer)
-        } catch {
-            wispLog("[\(label)] WAV write error: \(error)")
+        if buffer.format.sampleRate == wavFile.processingFormat.sampleRate,
+           buffer.format.channelCount == wavFile.processingFormat.channelCount
+        {
+            do {
+                try wavFile.write(from: buffer)
+            } catch {
+                wispLog("[\(label)] WAV write error: \(error)")
+            }
         }
 
         // 2. Resample to analyzer format
+        let (sourceFormat, converter): (AVAudioFormat, AVAudioConverter) =
+            converterLock.withLock { ($0.sourceFormat, $0.converter) }
+
+        guard buffer.format.sampleRate == sourceFormat.sampleRate,
+              buffer.format.channelCount == sourceFormat.channelCount
+        else {
+            wispLog(
+                "[\(label)] dropping buffer with stale format sr=\(buffer.format.sampleRate) ch=\(buffer.format.channelCount) (expected sr=\(sourceFormat.sampleRate) ch=\(sourceFormat.channelCount))"
+            )
+            return
+        }
+
         let ratio = analyzerFormat.sampleRate / sourceFormat.sampleRate
         let outCapacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up))
         guard outCapacity > 0,
@@ -155,6 +180,29 @@ public final class TranscriptionPipeline: @unchecked Sendable {
         guard status != .error, converted.frameLength > 0 else { return }
 
         inputContinuation.yield(AnalyzerInput(buffer: converted))
+    }
+
+    @discardableResult
+    public func reconfigure(sourceFormat newFormat: AVAudioFormat) -> Bool {
+        converterLock.withLock { state -> Bool in
+            if state.sourceFormat.sampleRate == newFormat.sampleRate,
+               state.sourceFormat.channelCount == newFormat.channelCount
+            {
+                return true
+            }
+            guard let converter = AVAudioConverter(from: newFormat, to: analyzerFormat) else {
+                wispLog(
+                    "[\(label)] reconfigure failed: no converter for sr=\(newFormat.sampleRate) ch=\(newFormat.channelCount)"
+                )
+                return false
+            }
+            wispLog(
+                "[\(label)] reconfigured source format sr=\(state.sourceFormat.sampleRate)→\(newFormat.sampleRate) ch=\(state.sourceFormat.channelCount)→\(newFormat.channelCount)"
+            )
+            state.sourceFormat = newFormat
+            state.converter = converter
+            return true
+        }
     }
 
     /// Stop feeding the analyzer and wait for final results to drain.

@@ -6821,6 +6821,7 @@ dependencies = [
  "gpui",
  "serde",
  "serde_json",
+ "uuid",
  "wisp-audiokit",
  "wisp-core",
  "wisp-storage",

@@ -9,7 +9,7 @@
 //!     marked `final` (the speech engine has locked it in).
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
@@ -59,7 +59,7 @@ impl SessionState {
     /// While this is true the live transcript is the persistence source and
     /// must not be replaced by another view's segments.
     #[must_use]
-    pub fn is_active(self) -> bool {
+    pub const fn is_active(self) -> bool {
         matches!(
             self,
             Self::Starting | Self::Recording { .. } | Self::Stopping
@@ -263,13 +263,24 @@ pub struct AppModel {
     /// refreshed whenever a recording finishes or the user returns to the
     /// library.
     pub library: Vec<StoredSession>,
-    /// `Some` while a session row exists in the database for the current
-    /// live transcript. Allocated before audio starts and retained after a
-    /// successful stop until the user navigates away or starts a new session.
+    /// Open database row owned by an active or not-yet-persisted recording.
+    /// Cleared only when finalisation commits or an unstarted row is deleted.
     pub current_session_id: Option<SessionId>,
+    /// Persisted row associated with the transcript currently shown in the
+    /// live view. Unlike the open handle, this remains after a successful
+    /// finalisation so IPC/export metadata cannot drift to another session.
+    pub linked_session_id: Option<SessionId>,
     /// A failed storage operation that must be retried before the live
     /// transcript can be discarded or another session can start.
     pub pending_session_write: Option<PendingSessionWrite>,
+    /// Launch metadata retained until the transcript transaction commits.
+    /// It lets a stop/retry create the database row if the initial `Started`
+    /// update could not acquire or write storage.
+    pub current_session_started_at: Option<DateTime<Utc>>,
+    pub current_session_dir_name: Option<String>,
+    /// Per-run audio directory. Retained with the transcript after a storage
+    /// failure so a durable recovery snapshot can be written beside the WAVs.
+    pub current_output_dir: Option<PathBuf>,
     /// The session being viewed in `View::History`, kept around so the
     /// header can render its title without re-querying.
     pub viewed_session: Option<StoredSession>,
@@ -288,7 +299,11 @@ impl AppModel {
             segments: Vec::new(),
             library: Vec::new(),
             current_session_id: None,
+            linked_session_id: None,
             pending_session_write: None,
+            current_session_started_at: None,
+            current_session_dir_name: None,
+            current_output_dir: None,
             viewed_session: None,
             recent_log: VecDeque::new(),
             last_error: None,
@@ -313,6 +328,20 @@ impl AppModel {
         model
     }
 
+    /// Whether the live transcript still owns worker or persistence state.
+    /// A retained database handle after a failed finalization is deliberately
+    /// treated as unsettled so navigation cannot silently discard it.
+    pub fn has_unsettled_session(&self) -> bool {
+        self.state.is_active()
+            || self.pending_session_write.is_some()
+            || self.current_output_dir.is_some()
+    }
+
+    /// A stopped worker whose transcript transaction needs to be retried.
+    pub fn has_pending_persistence(&self) -> bool {
+        matches!(self.state, SessionState::Failed) && self.pending_session_write.is_some()
+    }
+
     /// Replace the cached library list. Called after storage reads (launch,
     /// recording end, post-delete).
     pub fn set_library(
@@ -323,23 +352,30 @@ impl AppModel {
     }
 
     /// Move to the library screen and drop any live/historical segments so
-    /// the next view enter starts from a clean slate.
+    /// the next view enter starts from a clean slate. Navigation is ignored
+    /// while a worker session is active; otherwise its future events could be
+    /// attached to the library or to a historical transcript.
     pub fn show_library(&mut self) {
-        if self.live_session_is_protected() {
+        if self.has_unsettled_session() {
             return;
         }
         self.view = View::Library;
         self.segments.clear();
         self.viewed_session = None;
         self.current_session_id = None;
+        self.linked_session_id = None;
         self.pending_session_write = None;
+        self.current_session_started_at = None;
+        self.current_session_dir_name = None;
+        self.current_output_dir = None;
         self.last_error = None;
     }
 
     /// Move to the live recording screen in idle state. Used by the
-    /// library's "New Session" button.
+    /// library's "New Session" button. An active session owns this view and
+    /// cannot be replaced with a new one until it settles.
     pub fn show_new_session(&mut self) {
-        if self.live_session_is_protected() {
+        if self.has_unsettled_session() {
             return;
         }
         self.view = View::LiveSession;
@@ -347,7 +383,11 @@ impl AppModel {
         self.segments.clear();
         self.viewed_session = None;
         self.current_session_id = None;
+        self.linked_session_id = None;
         self.pending_session_write = None;
+        self.current_session_started_at = None;
+        self.current_session_dir_name = None;
+        self.current_output_dir = None;
         self.last_error = None;
     }
 
@@ -358,7 +398,7 @@ impl AppModel {
         session: StoredSession,
         segments: Vec<Segment>,
     ) {
-        if self.live_session_is_protected() {
+        if self.has_unsettled_session() {
             return;
         }
         self.view = View::History {
@@ -367,7 +407,11 @@ impl AppModel {
         self.segments = segments;
         self.viewed_session = Some(session);
         self.current_session_id = None;
+        self.linked_session_id = None;
         self.pending_session_write = None;
+        self.current_session_started_at = None;
+        self.current_session_dir_name = None;
+        self.current_output_dir = None;
         // Historical segments are already finalized.
         self.finalize_all_segments();
         for seg in &mut self.segments {
@@ -375,29 +419,23 @@ impl AppModel {
         }
     }
 
-    /// Prepare a fresh recording while preserving the invariant that the
-    /// visible segments and `current_session_id` always describe the same
-    /// live session. This also makes menu/shortcut starts from Library or
-    /// History enter the live view before runner updates arrive.
-    pub fn begin_session(&mut self) {
-        if self.live_session_is_protected() {
-            return;
+    /// Normalize any terminal screen to a fresh live transcript, then enter
+    /// the Starting phase. Global shortcuts call this before enqueueing Start
+    /// so Library/History can never remain the owner of live worker events.
+    #[must_use]
+    pub fn begin_session_start(&mut self) -> bool {
+        if self.has_unsettled_session() {
+            return false;
         }
-        self.view = View::LiveSession;
+        self.show_new_session();
         self.state = SessionState::Starting;
-        self.segments.clear();
-        self.viewed_session = None;
-        self.current_session_id = None;
-        self.pending_session_write = None;
-        self.last_error = None;
+        true
     }
 
-    /// Whether leaving the live view could discard an in-flight or not-yet
-    /// persisted transcript. A failed finalisation keeps its session id so it
-    /// can be retried without mixing it into a subsequent recording.
-    #[must_use]
-    pub fn live_session_is_protected(&self) -> bool {
-        self.state.is_active() || self.pending_session_write.is_some()
+    /// Compatibility wrapper for callers that do not need the acceptance
+    /// result. Prefer `begin_session_start` before enqueueing worker commands.
+    pub fn begin_session(&mut self) {
+        let _ = self.begin_session_start();
     }
 
     pub fn set_state(
@@ -839,6 +877,50 @@ mod tests {
             started_at: std::time::Instant::now(),
         };
         assert!(m.needs_live_ui_tick());
+    }
+
+    #[test]
+    fn active_session_rejects_top_level_navigation() {
+        let active_states = [
+            SessionState::Starting,
+            SessionState::Recording {
+                started_at: std::time::Instant::now(),
+            },
+            SessionState::Stopping,
+        ];
+
+        for state in active_states {
+            let mut m = AppModel::new();
+            m.show_new_session();
+            m.ingest(Event::Result(r(SourceLabel::Mic, 1, "live")));
+            m.current_session_id = Some(SessionId::from(42));
+            m.state = state;
+
+            m.show_library();
+            m.show_new_session();
+            m.show_history(stored_session(7), Vec::new());
+
+            assert_eq!(m.view, View::LiveSession);
+            assert_eq!(m.state, state);
+            assert_eq!(m.current_session_id, Some(SessionId::from(42)));
+            assert_eq!(m.segments.len(), 1);
+            assert_eq!(m.segments[0].text, "live");
+        }
+    }
+
+    #[test]
+    fn global_start_normalizes_history_to_a_fresh_live_view() {
+        let mut m = AppModel::new();
+        m.show_history(stored_session(7), Vec::new());
+        assert!(matches!(m.view, View::History { .. }));
+
+        assert!(m.begin_session_start());
+
+        assert_eq!(m.view, View::LiveSession);
+        assert_eq!(m.state, SessionState::Starting);
+        assert!(m.segments.is_empty());
+        assert!(m.viewed_session.is_none());
+        assert!(m.current_session_id.is_none());
     }
 
     #[test]

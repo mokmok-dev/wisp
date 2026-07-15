@@ -4,6 +4,7 @@ import Foundation
 
 public enum PoCError: Error, CustomStringConvertible {
     case permissionDenied(String)
+    case invalidLifecycle(String)
     case noCompatibleFormat
     case converterCreationFailed
     case noDisplay
@@ -13,6 +14,7 @@ public enum PoCError: Error, CustomStringConvertible {
     public var description: String {
         switch self {
         case .permissionDenied(let name): "Permission denied: \(name)"
+        case .invalidLifecycle(let message): "Invalid session lifecycle: \(message)"
         case .noCompatibleFormat: "No compatible audio format for transcriber"
         case .converterCreationFailed: "Failed to create AVAudioConverter"
         case .noDisplay: "No display available for system audio capture"

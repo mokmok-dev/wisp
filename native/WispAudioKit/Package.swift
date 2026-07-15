@@ -20,5 +20,10 @@ let package = Package(
             dependencies: ["WispAudioKit"],
             path: "Sources/wispctl"
         ),
+        .testTarget(
+            name: "WispAudioKitTests",
+            dependencies: ["WispAudioKit"],
+            path: "Tests/WispAudioKitTests"
+        ),
     ]
 )

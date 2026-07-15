@@ -53,7 +53,7 @@ use app::{AppError, AppModel, LocalMcpBridge, PendingSessionWrite, SessionState}
 use app_menu::configure as configure_app_menu;
 use library::SharedStorage;
 use session_runner::{SessionRunner, SessionStart};
-use session_updates::{apply_update, retry_pending_session_write};
+use session_updates::apply_update;
 use transcript_view::{
     TranscriptView, cursor_blink_period, new_transcript_list_state, ui_tick_period,
 };
@@ -85,7 +85,11 @@ fn main() {
             app_settings.local_mcp.addr.clone(),
             bundled_mcp_command_path(),
         );
-        let model = cx.new(|_| AppModel::new_with_data_dir_and_local_mcp(&data_dir, local_mcp));
+        let model = cx.new(|_| {
+            let mut model = AppModel::new_with_data_dir_and_local_mcp(&data_dir, local_mcp);
+            session_updates::recover_pending_sessions(&mut model, &storage, &recordings_dir);
+            model
+        });
         let ipc_snapshot = ipc_server::new_shared_snapshot();
         let ipc_handle = Arc::new(Mutex::new(None));
 
@@ -476,35 +480,27 @@ pub(crate) fn toggle_recording(
     cx: &mut gpui::App,
 ) {
     setup::refresh(model, data_dir, cx);
-    let (state, setup_complete, config) = {
+    let (state, pending_persistence, setup_complete, config) = {
         let app = model.read(cx);
         (
             app.state,
+            app.has_pending_persistence(),
             app.setup_complete(),
             app.setup.session_config("ja-JP"),
         )
     };
+    if pending_persistence {
+        model.update(cx, |m, cx| {
+            if session_updates::retry_pending_persistence(m, storage) {
+                session_updates::recover_pending_sessions(m, storage, recordings_dir);
+            }
+            cx.notify();
+        });
+        return;
+    }
     match state {
         SessionState::Idle | SessionState::Failed => {
             if !setup_complete {
-                return;
-            }
-            if state == SessionState::Failed
-                && model.read(cx).pending_session_write.is_some()
-                && !model.update(cx, |m, cx| match retry_pending_session_write(m, storage) {
-                    Ok(()) => {
-                        m.set_state(SessionState::Idle);
-                        m.last_error = None;
-                        cx.notify();
-                        true
-                    },
-                    Err(error) => {
-                        m.fail(AppError::Persistence(error));
-                        cx.notify();
-                        false
-                    },
-                })
-            {
                 return;
             }
             // Per-session subdirectory so each recording's WAVs stay
@@ -532,22 +528,37 @@ pub(crate) fn toggle_recording(
                         return;
                     },
                 };
-            model.update(cx, |m, cx| {
-                m.begin_session();
-                m.current_session_id = Some(session_id);
-                cx.notify();
+            let did_begin = model.update(cx, |m, cx| {
+                let did_begin = m.begin_session_start();
+                if did_begin {
+                    m.current_session_id = Some(session_id);
+                    m.linked_session_id = Some(session_id);
+                    m.current_session_started_at = Some(started_at);
+                    m.current_session_dir_name = Some(dir_name.clone());
+                    m.current_output_dir = Some(session_dir.clone());
+                    cx.notify();
+                }
+                did_begin
             });
-            if !runner.start(session_dir, config, SessionStart { session_id }) {
+            if !did_begin {
+                if let Ok(store) = storage.lock() {
+                    let _ = store.sessions().delete(session_id);
+                }
+                return;
+            }
+            let session = SessionStart {
+                session_id,
+                started_at,
+                dir_name,
+            };
+            if !runner.start(session_dir, config, session) {
                 model.update(cx, |m, cx| {
                     if m.current_session_id == Some(session_id) {
                         m.pending_session_write = Some(PendingSessionWrite::Delete);
-                        match retry_pending_session_write(m, storage) {
-                            Ok(()) => m.fail(SessionError::Start(
+                        if session_updates::retry_pending_persistence(m, storage) {
+                            m.fail(SessionError::Start(
                                 "session runner is no longer available".into(),
-                            )),
-                            Err(error) => m.fail(AppError::Persistence(format!(
-                                "could not remove unstarted session {session_id}: {error}; session runner is no longer available"
-                            ))),
+                            ));
                         }
                         cx.notify();
                     }
@@ -606,19 +617,19 @@ fn refresh_library(
 }
 
 fn open_storage(data_dir: &std::path::Path) -> SharedStorage {
-    // If the on-disk DB can't be opened (disk full, perms), fall back to
-    // an in-memory store so the app still starts. We log the path to
-    // stderr so it shows up in the system log; the user will see an
-    // empty library and no persistence, which is the right failure mode
-    // for this kind of catastrophic disk error.
-    let storage = Storage::open(data_dir).or_else(|err| {
-        eprintln!(
-            "wisp: failed to open storage at {}: {err}; falling back to in-memory",
-            data_dir.display()
-        );
-        Storage::open_in_memory()
-    });
-    let storage = storage.expect("open in-memory storage as last-resort fallback");
+    // Recording against an in-memory fallback would look successful and then
+    // discard the transcript at process exit. Fail closed before the user can
+    // start a session when durable storage is unavailable.
+    let storage = match Storage::open(data_dir) {
+        Ok(storage) => storage,
+        Err(error) => {
+            eprintln!(
+                "wisp: cannot open durable storage at {}: {error}",
+                data_dir.display()
+            );
+            std::process::exit(1);
+        },
+    };
     Arc::new(Mutex::new(storage))
 }
 
@@ -626,11 +637,14 @@ fn default_data_directory() -> PathBuf {
     if let Ok(dir) = std::env::var("WISP_DATA_DIR") {
         return PathBuf::from(dir);
     }
-    // ~/Library/Application Support/dev.mokmok.wisp/ on macOS, or
-    // a temp dir if we can't resolve $HOME. The sessions DB lives at
-    // <this>/sessions.db and per-session WAV directories under
-    // <this>/recordings/<dir-name>/.
-    let mut p = std::env::var_os("HOME").map_or_else(std::env::temp_dir, PathBuf::from);
+    // ~/Library/Application Support/dev.mokmok.wisp/ on macOS. An ephemeral
+    // temp directory is not a safe persistence fallback, so require HOME (or
+    // an explicit WISP_DATA_DIR) before recording can be enabled.
+    let Some(home) = std::env::var_os("HOME") else {
+        eprintln!("wisp: HOME is unavailable; set WISP_DATA_DIR to durable storage");
+        std::process::exit(1);
+    };
+    let mut p = PathBuf::from(home);
     p.push("Library");
     p.push("Application Support");
     p.push("dev.mokmok.wisp");

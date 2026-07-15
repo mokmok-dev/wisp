@@ -124,7 +124,7 @@ impl ConversationSnapshot {
             View::Library => ("library", None, None),
             View::LiveSession => (
                 "live_session",
-                model.current_session_id.map(wisp_core::SessionId::as_i64),
+                model.linked_session_id.map(wisp_core::SessionId::as_i64),
                 None,
             ),
             View::History { session_id } => (
@@ -404,6 +404,8 @@ fn reason_phrase(status: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{ConversationSnapshot, HttpRequest, IpcConfig, SnapshotSegment, authorized};
+    use crate::app::{AppModel, View};
+    use wisp_core::SessionId;
 
     #[test]
     fn conversation_snapshot_serializes_segments() {
@@ -426,6 +428,18 @@ mod tests {
             value["segments"][0]["text"],
             "今日はロードマップの話をしています。"
         );
+    }
+
+    #[test]
+    fn settled_live_snapshot_uses_the_retained_transcript_link() {
+        let mut model = AppModel::new();
+        model.view = View::LiveSession;
+        model.current_session_id = None;
+        model.linked_session_id = Some(SessionId::from(7));
+
+        let snapshot = ConversationSnapshot::from_model(&model);
+
+        assert_eq!(snapshot.session_id, Some(7));
     }
 
     #[test]

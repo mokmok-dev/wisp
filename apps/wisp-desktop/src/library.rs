@@ -14,6 +14,7 @@
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 use wisp_audiokit::SourceLabel;
 use wisp_core::{NewSegment, NewSession, SessionId};
 use wisp_storage::{Storage, StorageError};
@@ -32,15 +33,14 @@ pub fn default_title(started_at: DateTime<Utc>) -> String {
 
 /// Format the directory name we hand to the Swift audio session so each
 /// recording lands in its own subfolder of the recordings root. Uses a
-/// filesystem-safe ISO-ish form: `2026-05-29T143000123456789Z` (always UTC,
-/// no punctuation that needs escaping on any platform). Nanosecond precision
-/// keeps separate recordings started within the same second in distinct
-/// directories.
+/// filesystem-safe ISO-ish form followed by a random launch ID (always UTC,
+/// no punctuation that needs escaping on any platform). The random suffix
+/// keeps files isolated across same-second and concurrent starts.
 pub fn session_dir_name(started_at: DateTime<Utc>) -> String {
     format!(
-        "{}{:09}Z",
-        started_at.format("%Y-%m-%dT%H%M%S"),
-        started_at.timestamp_subsec_nanos()
+        "{}-{}",
+        started_at.format("%Y-%m-%dT%H%M%SZ"),
+        Uuid::new_v4()
     )
 }
 
@@ -143,18 +143,48 @@ pub type SharedStorage = Arc<Mutex<Storage>>;
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeDelta, TimeZone, Utc};
+    use std::path::Path;
 
-    use super::session_dir_name;
+    use chrono::{TimeZone, Utc};
+
+    use super::*;
 
     #[test]
-    fn session_dir_name_distinguishes_starts_within_the_same_second() {
-        let base = Utc.with_ymd_and_hms(2026, 5, 29, 14, 30, 0).unwrap();
-        let first = base + TimeDelta::nanoseconds(1);
-        let second = base + TimeDelta::nanoseconds(2);
+    fn created_session_paths_match_the_recording_output_directory() {
+        let storage = Storage::open_in_memory().expect("in-memory storage");
+        let started_at = Utc
+            .with_ymd_and_hms(2026, 7, 15, 4, 30, 0)
+            .single()
+            .expect("valid timestamp");
+        let dir_name = session_dir_name(started_at);
 
-        assert_eq!(session_dir_name(first), "2026-05-29T143000000000001Z");
-        assert_eq!(session_dir_name(second), "2026-05-29T143000000000002Z");
-        assert_ne!(session_dir_name(first), session_dir_name(second));
+        let id = create_session(&storage, started_at, &dir_name).expect("create session");
+        let session = storage
+            .sessions()
+            .get(id)
+            .expect("read session")
+            .expect("session exists");
+
+        let storage_root = Path::new("/app-data");
+        let output_dir = storage_root.join("recordings").join(&dir_name);
+        assert_eq!(
+            storage_root.join(&session.mic_wav_path),
+            output_dir.join("mic.wav")
+        );
+        assert_eq!(
+            storage_root.join(&session.system_wav_path),
+            output_dir.join("system.wav")
+        );
+        assert_eq!(session.started_at, started_at);
+    }
+
+    #[test]
+    fn same_timestamp_gets_unique_session_directories() {
+        let started_at = Utc
+            .with_ymd_and_hms(2026, 7, 15, 4, 30, 0)
+            .single()
+            .expect("valid timestamp");
+
+        assert_ne!(session_dir_name(started_at), session_dir_name(started_at));
     }
 }

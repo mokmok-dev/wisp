@@ -134,7 +134,7 @@ impl Render for TranscriptView {
         let log_count = app.recent_log.len();
         let last_error = app.last_error.clone();
         let viewed_session = app.viewed_session.clone();
-        let current_session_id = app.current_session_id;
+        let linked_session_id = app.linked_session_id;
         let library = app.library.clone();
         let local_mcp = app.local_mcp.clone();
         let model = self.app.clone();
@@ -144,7 +144,7 @@ impl Render for TranscriptView {
             View::LiveSession => {
                 self.sync_transcript_list(&view, segment_count, active_idx, active_text_len);
                 self.update_scroll_signature(segment_count, text_len_sum);
-                let live_export_title = current_session_id
+                let live_export_title = linked_session_id
                     .and_then(|id| library.iter().find(|s| s.id == id).map(|s| s.title.clone()));
                 self.render_live_session(
                     state,
@@ -336,12 +336,15 @@ impl TranscriptView {
     ) -> impl IntoElement {
         let toggle = self.on_toggle_record.clone();
         let on_back = self.on_back_to_library.clone();
-        let can_leave_live_session = !model.read(cx).live_session_is_protected();
-        let mut navigation = div().flex().items_center().gap(px(12.0));
-        if can_leave_live_session {
-            navigation = navigation.child(render_back_button("library-back-live", on_back));
+        let (has_unsettled_session, pending_persistence) = {
+            let app = model.read(cx);
+            (app.has_unsettled_session(), app.has_pending_persistence())
+        };
+        let mut leading = div().flex().items_center().gap(px(12.0));
+        if !has_unsettled_session {
+            leading = leading.child(render_back_button("library-back-live", on_back));
         }
-        navigation = navigation.child(render_brand());
+        leading = leading.child(render_brand());
         div()
             .h(px(56.0))
             .flex()
@@ -350,14 +353,14 @@ impl TranscriptView {
             .px(px(20.0))
             .border_b_1()
             .border_color(theme::border())
-            .child(navigation)
+            .child(leading)
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.0))
                     .child(render_transcript_actions(model, export_name, cx))
-                    .child(render_record_button(state, toggle)),
+                    .child(render_record_button(state, pending_persistence, toggle)),
             )
     }
 
@@ -826,15 +829,20 @@ fn render_brand() -> impl IntoElement {
 
 fn render_record_button(
     state: SessionState,
+    pending_persistence: bool,
     on_click: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
 ) -> impl IntoElement {
-    let (label, fill, dot_color) = match state {
-        SessionState::Idle | SessionState::Failed => {
-            ("Record", theme::record_idle(), theme::record_red())
-        },
-        SessionState::Recording { .. } => ("Stop", theme::record_red(), rgb(0xff_ffff)),
-        SessionState::Starting => ("Starting…", theme::record_idle(), theme::text_tertiary()),
-        SessionState::Stopping => ("Stopping…", theme::record_idle(), theme::text_tertiary()),
+    let (label, fill, dot_color) = if pending_persistence {
+        ("Retry Save", theme::record_idle(), theme::system_accent())
+    } else {
+        match state {
+            SessionState::Idle | SessionState::Failed => {
+                ("Record", theme::record_idle(), theme::record_red())
+            },
+            SessionState::Recording { .. } => ("Stop", theme::record_red(), rgb(0xff_ffff)),
+            SessionState::Starting => ("Starting…", theme::record_idle(), theme::text_tertiary()),
+            SessionState::Stopping => ("Stopping…", theme::record_idle(), theme::text_tertiary()),
+        }
     };
     let interactive = matches!(
         state,

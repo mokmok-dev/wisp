@@ -30,6 +30,12 @@
           else
             pkgs.swiftformat;
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        formalTools = with pkgs; [
+          bash
+          coreutils
+          tlaplus
+          z3
+        ];
 
         # Shared by both devShells on macOS. Nix injects its own apple-sdk +
         # xcrun wrapper, both of which are too old for what WispAudioKit and
@@ -77,7 +83,23 @@
             ''
             + darwinToolchainHook;
           };
+
+          formal = pkgs.mkShell {
+            packages = formalTools;
+          };
         };
+
+        checks.formal =
+          pkgs.runCommand "wisp-formal-check"
+            {
+              nativeBuildInputs = formalTools;
+            }
+            ''
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME" "$out"
+              bash ${self}/formal/check.sh
+              touch "$out/passed"
+            '';
 
         formatter = pkgs.nixfmt;
       }

@@ -73,12 +73,71 @@ private struct ErrorBufferSlot: @unchecked Sendable {
     var pointer: UnsafeMutablePointer<CChar>?
 }
 
+/// Serializes the callback-lifetime side of the C ABI. The thread marker is
+/// intentionally per coordinator: it lets lifecycle exports recognize a
+/// synchronous call made from this session's own result/log callback.
+final class CallbackCoordinator: @unchecked Sendable {
+    private let condition = NSCondition()
+    private let threadMarkerKey = "dev.mokmok.wisp.callback.\(UUID().uuidString)"
+    private var acceptsCallbacks = true
+    private var inFlightCallbacks = 0
+
+    func invoke(_ body: () -> Void) {
+        condition.lock()
+        guard acceptsCallbacks else {
+            condition.unlock()
+            return
+        }
+        inFlightCallbacks += 1
+        condition.unlock()
+
+        let dictionary = Thread.current.threadDictionary
+        let oldDepth = dictionary[threadMarkerKey] as? Int ?? 0
+        dictionary[threadMarkerKey] = oldDepth + 1
+        defer {
+            if oldDepth == 0 {
+                dictionary.removeObject(forKey: threadMarkerKey)
+            } else {
+                dictionary[threadMarkerKey] = oldDepth
+            }
+
+            condition.lock()
+            inFlightCallbacks -= 1
+            if inFlightCallbacks == 0 {
+                condition.broadcast()
+            }
+            condition.unlock()
+        }
+        body()
+    }
+
+    var isExecutingOnCurrentThread: Bool {
+        (Thread.current.threadDictionary[threadMarkerKey] as? Int ?? 0) > 0
+    }
+
+    func suppressFutureCallbacks() {
+        condition.lock()
+        acceptsCallbacks = false
+        condition.unlock()
+    }
+
+    func waitForCallbacksToDrain() {
+        condition.lock()
+        while inFlightCallbacks > 0 {
+            condition.wait()
+        }
+        condition.unlock()
+    }
+}
+
 final class SessionHandle: @unchecked Sendable {
     let session: WispSession
+    let callbacks: CallbackCoordinator
     private let lastError: OSAllocatedUnfairLock<ErrorBufferSlot>
 
-    init(session: WispSession) {
+    init(session: WispSession, callbacks: CallbackCoordinator) {
         self.session = session
+        self.callbacks = callbacks
         lastError = OSAllocatedUnfairLock(initialState: ErrorBufferSlot(pointer: nil))
     }
 
@@ -137,8 +196,8 @@ private func unbox(_ p: OpaquePointer?) -> SessionHandle? {
 /// Construct a new session. Does no I/O — call `wisp_session_start` next.
 ///
 /// On failure returns `nil`; the error is not stored because there is no
-/// handle to hold it. Errors are limited to "couldn't create the output
-/// directory" and "input pointer was NULL".
+/// handle to hold it. Errors are limited to output-directory setup (including
+/// refusing to overwrite an existing WAV file) and "input pointer was NULL".
 @_cdecl("wisp_session_new")
 public func wisp_session_new(
     output_dir: UnsafePointer<CChar>?,
@@ -158,27 +217,32 @@ public func wisp_session_new(
     // `user_data` is a `void*` we hand straight back to the C callbacks.
     // Crossing it through `@Sendable` Swift closures requires unchecked.
     let ud = UncheckedUserData(value: user_data)
+    let callbacks = CallbackCoordinator()
     let onResultClosure: @Sendable (WispSession.Result) -> Void = { result in
-        let text = result.text
-        text.utf8CString.withUnsafeBufferPointer { buf in
-            // utf8CString includes trailing NUL; drop it for explicit length.
-            let len = buf.count > 0 ? buf.count - 1 : 0
-            on_result(
-                result.source.rawValue,
-                result.segmentID,
-                buf.baseAddress,
-                len,
-                result.startSeconds,
-                result.endSeconds,
-                ud.value
-            )
+        callbacks.invoke {
+            let text = result.text
+            text.utf8CString.withUnsafeBufferPointer { buf in
+                // utf8CString includes trailing NUL; drop it for explicit length.
+                let len = buf.count > 0 ? buf.count - 1 : 0
+                on_result(
+                    result.source.rawValue,
+                    result.segmentID,
+                    buf.baseAddress,
+                    len,
+                    result.startSeconds,
+                    result.endSeconds,
+                    ud.value
+                )
+            }
         }
     }
     let onLogClosure: @Sendable (String) -> Void = { msg in
         guard let on_log else { return }
-        msg.utf8CString.withUnsafeBufferPointer { buf in
-            let len = buf.count > 0 ? buf.count - 1 : 0
-            on_log(buf.baseAddress, len, ud.value)
+        callbacks.invoke {
+            msg.utf8CString.withUnsafeBufferPointer { buf in
+                let len = buf.count > 0 ? buf.count - 1 : 0
+                on_log(buf.baseAddress, len, ud.value)
+            }
         }
     }
     do {
@@ -188,7 +252,7 @@ public func wisp_session_new(
             onResult: onResultClosure,
             onLog: onLogClosure
         )
-        return box(SessionHandle(session: session))
+        return box(SessionHandle(session: session, callbacks: callbacks))
     } catch {
         return nil
     }
@@ -228,24 +292,64 @@ public func wisp_session_has_started_capture(session: OpaquePointer?) -> Int32 {
     return handle.session.hasStartedCapture ? 1 : 0
 }
 
-/// Stop capture and wait for results to drain. Blocks until done.
+/// Stop capture and wait for results to drain. Blocks until done, except for
+/// a reentrant call from this session's callback: that call suppresses future
+/// callbacks, initiates stop, and returns so the current callback can unwind.
 @_cdecl("wisp_session_stop")
 public func wisp_session_stop(session: OpaquePointer?) {
     guard let handle = unbox(session) else { return }
+    if handle.callbacks.isExecutingOnCurrentThread {
+        // Blocking here would deadlock: pipeline.finish() waits for the
+        // results callback that is synchronously waiting in this function.
+        // Suppression makes it safe for the current callback to unwind while
+        // the shared, idempotent session stop completes in the background.
+        handle.callbacks.suppressFutureCallbacks()
+        Task.detached {
+            await handle.session.stop()
+        }
+        return
+    }
+    stopSynchronously(handle.session)
+}
+
+private func stopSynchronously(_ session: WispSession) {
     let sem = DispatchSemaphore(value: 0)
     Task.detached {
-        await handle.session.stop()
+        await session.stop()
         sem.signal()
     }
     sem.wait()
 }
 
-/// Free the session. The caller must have already called
-/// `wisp_session_stop`; otherwise resources may leak.
+/// Stop if necessary and free the session. A free made from inside a callback
+/// consumes the opaque handle immediately, then defers destruction until the
+/// current callback unwinds and the asynchronous stop barrier completes.
 @_cdecl("wisp_session_free")
 public func wisp_session_free(session: OpaquePointer?) {
     guard let p = session else { return }
-    Unmanaged<SessionHandle>.fromOpaque(UnsafeRawPointer(p)).release()
+    let unmanaged = Unmanaged<SessionHandle>.fromOpaque(UnsafeRawPointer(p))
+    let handle = unmanaged.takeUnretainedValue()
+
+    if handle.callbacks.isExecutingOnCurrentThread {
+        handle.callbacks.suppressFutureCallbacks()
+        // Consume the caller-owned retain now, invalidating the opaque handle
+        // immediately. The detached task keeps the object alive until both
+        // lifecycle and callback barriers are satisfied.
+        let retainedHandle = unmanaged.takeRetainedValue()
+        Task.detached {
+            await retainedHandle.session.stop()
+            retainedHandle.callbacks.waitForCallbacksToDrain()
+        }
+        return
+    }
+
+    // Harden the API against a caller that forgot the documented stop call.
+    // This also joins a stop that was initiated reentrantly and returned
+    // early, preserving free as the final no-callback/no-resource barrier.
+    stopSynchronously(handle.session)
+    handle.callbacks.suppressFutureCallbacks()
+    handle.callbacks.waitForCallbacksToDrain()
+    unmanaged.release()
 }
 
 /// Returns the last error message recorded against this session, or NULL

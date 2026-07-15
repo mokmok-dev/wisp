@@ -80,10 +80,13 @@ unsafe extern "C" {
     /// Returns non-zero if microphone capture reached the running state.
     pub fn wisp_session_has_started_capture(session: *mut WispSession) -> c_int;
 
-    /// Stop capture and wait for results to drain. Blocks.
+    /// Stop capture and wait for results to drain. Blocks except when called
+    /// reentrantly from this session's result/log callback; that case starts
+    /// the shared stop and returns so the callback can unwind.
     pub fn wisp_session_stop(session: *mut WispSession);
 
-    /// Free the session handle. Caller must have called `wisp_session_stop`.
+    /// Stop if necessary and free the session handle. This is the final
+    /// resource/callback barrier for ordinary non-reentrant callers.
     pub fn wisp_session_free(session: *mut WispSession);
 
     /// Returns the last error message recorded against this session, or

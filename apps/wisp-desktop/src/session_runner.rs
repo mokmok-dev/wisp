@@ -6,10 +6,11 @@
 //! thread and surface everything as a stream of `Update`s the UI polls.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use wisp_audiokit::{Event, Session, SessionConfig, SessionError};
 use wisp_core::SessionId;
 
@@ -24,6 +25,10 @@ const CMD_POLL_INTERVAL: Duration = Duration::from_millis(20);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStart {
     pub session_id: SessionId,
+    /// Timestamp and directory selected once by the UI before the database
+    /// row and worker command are created. Every retry must reuse them.
+    pub started_at: DateTime<Utc>,
+    pub dir_name: String,
 }
 
 /// Commands the UI sends to the worker.
@@ -109,13 +114,14 @@ impl SessionRunner {
         out
     }
 
-    /// Block until the worker reports a terminal update for `session_id`.
-    /// Used while quitting; `SessionRunner::drop` also waits for the worker,
-    /// so collecting the final updates here does not introduce a new hang.
-    pub fn wait_until_finished(
+    /// Block until the worker reports a terminal update for `session_id`, or
+    /// until the bounded quit grace period expires.
+    pub fn wait_for_idle(
         &self,
         session_id: SessionId,
+        timeout: Duration,
     ) -> Vec<Update> {
+        let deadline = Instant::now() + timeout;
         let mut collected = Vec::new();
         loop {
             collected.extend(self.drain_updates());
@@ -125,9 +131,12 @@ impl SessionRunner {
             {
                 break;
             }
-            match self.update_rx.recv() {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            match self.update_rx.recv_timeout(remaining) {
                 Ok(update) => collected.push(update),
-                Err(_) => break,
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
             }
         }
         collected

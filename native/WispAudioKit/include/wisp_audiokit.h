@@ -74,11 +74,15 @@ int32_t wisp_session_start(WispSession* session);
  * output must be preserved. */
 int32_t wisp_session_has_started_capture(WispSession* session);
 
-/* Stop capture and wait for results to drain. Blocks. */
+/* Stop capture and wait for results to drain. Blocks when called outside a
+ * Wisp callback. A reentrant call from this session's result/log callback
+ * requests stop and returns immediately so that callback can unwind; a
+ * subsequent wisp_session_free remains a full stop-and-callback barrier. */
 void wisp_session_stop(WispSession* session);
 
-/* Free the session handle. The caller MUST have already called
- * wisp_session_stop. */
+/* Stop if necessary and free the session handle. When called reentrantly from
+ * a Wisp callback, ownership is consumed immediately and destruction is
+ * deferred until that callback unwinds and stop completes. */
 void wisp_session_free(WispSession* session);
 
 /* Returns the last error message recorded against this session, or NULL

@@ -2,3 +2,6 @@
 native/**/.build/
 native/**/build/
 native/**/.swiftpm/
+/formal/tla/states/
+/formal/tla/MC*.out
+/formal/tla/SpecTE*

@@ -72,11 +72,31 @@ If you'd rather use Rust + Xcode directly:
 cargo build -p wisp-desktop --release
 ```
 
+### Formal verification
+
+The session worker protocol and the whole-app navigation/session workflow have
+executable TLA+ models plus symbolic one-step invariant proofs in Z3:
+
+```bash
+nix develop .#formal --command bash formal/check.sh
+```
+
+See [`formal/README.md`](formal/README.md) for the verified properties,
+implementation mapping, assumptions, and extension workflow.
+
 See `.github/workflows/release.yaml` for how the release `.app` bundle is produced — pushing a `v*` tag builds `Wisp.app` on a macOS 26 runner.
 
-### Custom output directory
+### Custom data directory
 
-Set `WISP_OUTPUT_DIR` to override where recordings are written. When unset, Wisp uses `~/Library/Application Support/dev.mokmok.wisp/recordings`.
+Set `WISP_DATA_DIR` to override where `sessions.db` and the `recordings/`
+directory are stored. When unset, Wisp uses
+`~/Library/Application Support/dev.mokmok.wisp`.
+
+If a completed transcript cannot be committed to SQLite, Wisp writes an
+atomic `transcript-recovery.json` beside that session's WAV files, blocks a
+new recording, and retries reconciliation immediately or on the next launch.
+Wisp exits before recording if the durable database cannot be opened; it never
+treats an in-memory fallback as successful persistence.
 
 ### Local MCP bridge
 
@@ -96,7 +116,7 @@ MCP hosts should run the bundled `wisp-mcp` binary over stdio, for example `/App
 
 ## Contributing
 
-Issues and pull requests are welcome. Before sending a PR, please make sure `cargo fmt`, `cargo clippy --workspace --all-targets`, and `cargo test --workspace` pass under the same conditions as CI. For the Swift side, `make -C native/WispAudioKit` runs the equivalent checks.
+Issues and pull requests are welcome. Before sending a PR, please make sure `cargo fmt`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`, and `nix develop .#formal --command bash formal/check.sh` pass under the same conditions as CI. For the Swift side, `make -C native/WispAudioKit` runs the equivalent checks.
 
 ## License
 

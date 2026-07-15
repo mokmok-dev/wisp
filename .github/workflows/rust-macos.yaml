@@ -33,6 +33,10 @@ jobs:
           xcrun --find metal
       - uses: ./.github/actions/setup-nix
       - uses: ./.github/actions/setup-rust-cache
+      - run: swift test --package-path native/WispAudioKit
       # Builds the WispAudioKit Swift static library through build.rs and
       # exercises the FFI round-trip via the smoke test in wisp-audiokit.
       - run: nix develop .#ci --quiet --command cargo test -p wisp-audiokit
+      # Exercises AppModel/session reducer regressions where GPUI and the
+      # WispAudioKit bridge can link against the Metal toolchain.
+      - run: nix develop .#ci --quiet --command cargo test -p wisp-desktop --all-targets

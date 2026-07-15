@@ -5,7 +5,9 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
+use chrono::Utc;
 use gpui::{App, Entity, KeyBinding, Menu, MenuItem, actions};
 
 use crate::about_view;
@@ -13,7 +15,7 @@ use crate::app::{AppError, AppModel, SessionState, View};
 use crate::library::SharedStorage;
 use crate::mcp_setup_view;
 use crate::session_runner::SessionRunner;
-use crate::session_updates::{apply_update, retry_pending_session_write};
+use crate::session_updates::{apply_update, retry_pending_persistence, write_recovery_snapshot};
 use crate::transcript_export::{self, suggested_export_name};
 
 actions!(
@@ -126,10 +128,14 @@ pub fn configure(
     // The recording item's label flips between "Start" and "Stop" with the
     // session state. `set_menus` rebuilds the whole native menu, so we only
     // call it when the label actually changes (not on every transcript tick).
-    let mut last_label = recording_menu_label(model.read(cx).state);
+    let mut last_label = {
+        let app = model.read(cx);
+        recording_menu_label(app.state, app.has_pending_persistence())
+    };
     cx.set_menus(build_menus(last_label));
     cx.observe(&model, move |model, cx| {
-        let label = recording_menu_label(model.read(cx).state);
+        let app = model.read(cx);
+        let label = recording_menu_label(app.state, app.has_pending_persistence());
         if label != last_label {
             last_label = label;
             cx.set_menus(build_menus(label));
@@ -153,7 +159,13 @@ pub fn configure(
 
 /// The recording menu item's label for the given session state: "Stop" while
 /// a session is live (or transitioning), "Start" otherwise.
-fn recording_menu_label(state: SessionState) -> &'static str {
+fn recording_menu_label(
+    state: SessionState,
+    pending_persistence: bool,
+) -> &'static str {
+    if pending_persistence {
+        return "Retry Saving Session";
+    }
     match state {
         SessionState::Recording { .. } | SessionState::Starting | SessionState::Stopping => {
             "Stop Recording"
@@ -182,38 +194,26 @@ fn build_menus(record_label: &'static str) -> Vec<Menu> {
 }
 
 /// If a recording is active (or stopping), request stop and wait for the
-/// worker to finish so segments can be persisted before exit.
+/// worker to finish so segments can be persisted before exit. Returns false
+/// when an explicit quit must be cancelled because neither final persistence
+/// nor a durable recovery snapshot could be completed.
 fn graceful_stop_session(
     runner: &SessionRunner,
     model: &Entity<AppModel>,
     storage: &SharedStorage,
     cx: &mut App,
 ) -> bool {
-    let should_retry_persistence = {
-        let app = model.read(cx);
-        app.pending_session_write.is_some()
-    };
-    if should_retry_persistence {
+    if model.read(cx).has_pending_persistence() {
         return model.update(cx, |model, cx| {
-            let succeeded = match retry_pending_session_write(model, storage) {
-                Ok(()) => {
-                    model.set_state(SessionState::Idle);
-                    model.last_error = None;
-                    true
-                },
-                Err(error) => {
-                    model.fail(AppError::Persistence(error));
-                    false
-                },
-            };
+            let succeeded = retry_pending_persistence(model, storage);
             cx.notify();
             succeeded
         });
     }
 
-    let needs_stop = model.read(cx).state;
+    let state = model.read(cx).state;
     let needs_stop = matches!(
-        needs_stop,
+        state,
         SessionState::Recording { .. } | SessionState::Starting
     );
     if needs_stop {
@@ -235,25 +235,59 @@ fn graceful_stop_session(
             None
         }
     };
-    let Some(session_id) = session_id else {
-        return !model.read(cx).live_session_is_protected();
-    };
+    if let Some(session_id) = session_id {
+        let updates = runner.wait_for_idle(session_id, Duration::from_secs(5));
+        model.update(cx, |m, cx| {
+            for update in updates {
+                apply_update(update, m, storage);
+            }
+            cx.notify();
+        });
+    }
 
-    let updates = runner.wait_until_finished(session_id);
     model.update(cx, |m, cx| {
-        for update in updates {
-            apply_update(update, m, storage);
+        // A stopped transcript whose transaction rolled back gets one
+        // immediate retry. The record/menu button exposes the same retry if
+        // the user elects to remain in the app.
+        if m.has_pending_persistence() {
+            retry_pending_persistence(m, storage);
+        }
+
+        if !m.has_unsettled_session() {
+            cx.notify();
+            return true;
+        }
+
+        let worker_is_still_active = m.state.is_active();
+        if worker_is_still_active && m.pending_session_write.is_none() {
+            m.pending_session_write = Some(crate::app::PendingSessionWrite::Finalise {
+                ended_at: Utc::now(),
+            });
+        }
+        let recovery_result = write_recovery_snapshot(m);
+        let recovery_is_durable = recovery_result.is_ok();
+        if let Err(error) = recovery_result {
+            m.last_error = Some(AppError::Persistence(format!(
+                "cannot quit safely because the recovery transcript could not be saved: {error}"
+            )));
         }
         cx.notify();
-    });
-    !model.read(cx).live_session_is_protected()
+
+        // A snapshot is sufficient only after the worker has stopped. If the
+        // five-second stop barrier timed out, keep an explicit quit pending so
+        // later native callbacks cannot be lost. The OS-level quit callback
+        // still performs this same best-effort snapshot when exit is not
+        // cancellable by GPUI.
+        !worker_is_still_active && recovery_is_durable
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use gpui::MenuItem;
 
-    use super::{OpenMcpSetup, build_menus};
+    use super::{OpenMcpSetup, build_menus, recording_menu_label};
+    use crate::app::SessionState;
 
     #[test]
     fn menu_exposes_mcp_setup_action() {
@@ -273,5 +307,17 @@ mod tests {
 
         assert_eq!(actions.len(), 1);
         assert!(actions[0].as_any().is::<OpenMcpSetup>());
+    }
+
+    #[test]
+    fn menu_exposes_persistence_retry_instead_of_a_new_recording() {
+        assert_eq!(
+            recording_menu_label(SessionState::Failed, true),
+            "Retry Saving Session"
+        );
+        assert_eq!(
+            recording_menu_label(SessionState::Failed, false),
+            "Start Recording"
+        );
     }
 }

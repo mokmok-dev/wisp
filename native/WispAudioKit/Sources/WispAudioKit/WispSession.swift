@@ -47,6 +47,9 @@ public final class WispSession: @unchecked Sendable {
     private var systemCapture: ProcessTapCapture?
     private let sysState = OSAllocatedUnfairLock<SysState>(initialState: .idle)
 
+    private var configChangeObserver: NSObjectProtocol?
+    private let micEngineLock = OSAllocatedUnfairLock<Void>(initialState: ())
+
     private enum SysState {
         case idle
         case building
@@ -118,16 +121,18 @@ public final class WispSession: @unchecked Sendable {
         )
         self.micPipeline = micPipeline
 
-        engine.inputNode.installTap(
-            onBus: 0,
-            bufferSize: 4096,
-            format: micFormat
-        ) { buffer, _ in
-            micPipeline.push(buffer)
-        }
+        installMicTap(on: engine, pipeline: micPipeline)
         try engine.start()
         self.engine = engine
         onLog("[MIC] engine started")
+
+        configChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.handleConfigurationChange()
+        }
 
         // 4. System audio capture (Process Tap). Pipeline is built lazily
         //    when the first buffer arrives — we don't know the tap's format
@@ -191,15 +196,65 @@ public final class WispSession: @unchecked Sendable {
         self.systemCapture = systemCapture
     }
 
+    private func installMicTap(on engine: AVAudioEngine, pipeline: TranscriptionPipeline) {
+        let format = engine.inputNode.outputFormat(forBus: 0)
+        engine.inputNode.installTap(
+            onBus: 0,
+            bufferSize: 4096,
+            format: format
+        ) { buffer, _ in
+            pipeline.push(buffer)
+        }
+    }
+
+    private func handleConfigurationChange() {
+        micEngineLock.withLock {
+            guard let engine, let micPipeline else { return }
+
+            let newFormat = engine.inputNode.outputFormat(forBus: 0)
+            onLog(
+                "[MIC] configuration changed — new input format sr=\(newFormat.sampleRate) ch=\(newFormat.channelCount)"
+            )
+
+            guard newFormat.sampleRate > 0, newFormat.channelCount > 0 else {
+                onLog("[MIC] input format not ready yet — waiting for next change")
+                return
+            }
+
+            guard micPipeline.reconfigure(sourceFormat: newFormat) else {
+                onLog("[MIC] skipped restart because converter rebuild failed")
+                return
+            }
+
+            engine.inputNode.removeTap(onBus: 0)
+            installMicTap(on: engine, pipeline: micPipeline)
+            do {
+                if !engine.isRunning {
+                    try engine.start()
+                }
+                onLog("[MIC] engine restarted after device switch")
+            } catch {
+                onLog("[MIC] failed to restart engine after device switch: \(error)")
+            }
+        }
+    }
+
     /// Stop both captures and wait for pending transcription results to
     /// drain. Idempotent — safe to call from a deinit or a signal handler.
     public func stop() async {
         onLog("Stopping...")
-        if let engine {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+
+        if let observer = configChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            configChangeObserver = nil
         }
-        engine = nil
+        micEngineLock.withLock {
+            if let engine {
+                engine.inputNode.removeTap(onBus: 0)
+                engine.stop()
+            }
+            engine = nil
+        }
 
         if let systemCapture {
             systemCapture.stop()

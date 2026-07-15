@@ -29,7 +29,9 @@ public final class TranscriptionPipeline: @unchecked Sendable {
     public let label: String
     public let wavURL: URL
 
-    public var sourceFormat: AVAudioFormat { converterLock.withLock { $0.sourceFormat } }
+    public var sourceFormat: AVAudioFormat {
+        converterLock.withLock { $0.sourceFormat }
+    }
 
     private let analyzer: SpeechAnalyzer
     private let transcriber: SpeechTranscriber

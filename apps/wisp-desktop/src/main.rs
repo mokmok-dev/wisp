@@ -488,14 +488,16 @@ pub(crate) fn toggle_recording(
             }
             // Per-session subdirectory so each recording's WAVs stay
             // grouped and we can show them as a single library row.
-            let session_dir = recordings_dir.join(library::session_dir_name(Utc::now()));
+            let started_at = Utc::now();
+            let dir_name = library::session_dir_name(started_at);
+            let session_dir = recordings_dir.join(&dir_name);
             model.update(cx, |m, cx| {
                 m.segments.clear();
                 m.last_error = None;
                 m.set_state(SessionState::Starting);
                 cx.notify();
             });
-            runner.start(session_dir, config);
+            runner.start(started_at, dir_name, session_dir, config);
         },
         SessionState::Recording { .. } => {
             model.update(cx, |m, cx| {

@@ -10,6 +10,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use wisp_audiokit::{Event, Session, SessionConfig, SessionError};
 
 /// How often the running session checks for UI commands (Stop / Shutdown)
@@ -21,6 +22,8 @@ const CMD_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// Commands the UI sends to the worker.
 pub enum Command {
     Start {
+        started_at: DateTime<Utc>,
+        dir_name: String,
         output_dir: PathBuf,
         config: SessionConfig,
     },
@@ -31,7 +34,10 @@ pub enum Command {
 /// Updates the worker sends back to the UI.
 pub enum Update {
     /// `Session::start()` returned successfully and audio is flowing.
-    Started,
+    Started {
+        started_at: DateTime<Utc>,
+        dir_name: String,
+    },
     /// One transcription / log event from the session.
     Event(Event),
     /// `Session::stop()` returned; the session has been torn down.
@@ -63,10 +69,17 @@ impl SessionRunner {
 
     pub fn start(
         &self,
+        started_at: DateTime<Utc>,
+        dir_name: String,
         output_dir: PathBuf,
         config: SessionConfig,
     ) {
-        let _ = self.cmd_tx.send(Command::Start { output_dir, config });
+        let _ = self.cmd_tx.send(Command::Start {
+            started_at,
+            dir_name,
+            output_dir,
+            config,
+        });
     }
 
     pub fn stop(&self) {
@@ -123,8 +136,13 @@ fn worker_loop(
 ) {
     loop {
         match cmd_rx.recv() {
-            Ok(Command::Start { output_dir, config }) => {
-                run_session(&output_dir, config, cmd_rx, update_tx);
+            Ok(Command::Start {
+                started_at,
+                dir_name,
+                output_dir,
+                config,
+            }) => {
+                run_session(started_at, dir_name, &output_dir, config, cmd_rx, update_tx);
             },
             Ok(Command::Stop) => {}, // no-op, nothing running
             Ok(Command::Shutdown) | Err(_) => return,
@@ -133,6 +151,8 @@ fn worker_loop(
 }
 
 fn run_session(
+    started_at: DateTime<Utc>,
+    dir_name: String,
     output_dir: &std::path::Path,
     config: SessionConfig,
     cmd_rx: &Receiver<Command>,
@@ -149,7 +169,10 @@ fn run_session(
         let _ = update_tx.send(Update::Error(e));
         return;
     }
-    let _ = update_tx.send(Update::Started);
+    let _ = update_tx.send(Update::Started {
+        started_at,
+        dir_name,
+    });
 
     // Pump events until the UI asks to stop. Between events we wake at
     // most every `CMD_POLL_INTERVAL` to check the command channel so a

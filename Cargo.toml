@@ -24,16 +24,33 @@ thiserror = "2.0.18"
 uuid = { version = "1.23.1", features = ["v4"] }
 
 [workspace.lints.clippy]
-all = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-expect_used = "warn"
-panic = "warn"
-todo = "warn"
-unwrap_used = "warn"
+# The toolchain is pinned (see rust-toolchain.toml), so the exact set of
+# lints is deterministic. That lets us treat the well-behaved groups as a
+# hard gate (`deny`) rather than advisory warnings: violations fail every
+# `cargo clippy`, locally and in CI, not just when `-D warnings` is passed.
+all = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# The `cargo` group catches manifest mistakes (wildcard deps, bad feature
+# names). Kept at `warn` because two of its lints are environmental rather
+# than code issues and are opted out below.
+cargo = { level = "warn", priority = -1 }
+cargo_common_metadata = "allow"   # every crate is `publish = false`
+multiple_crate_versions = "allow" # decided by the lockfile, not our code
+
+# Restriction lints promoted to hard errors. Test code is exempted from the
+# panicking ones via .clippy.toml (allow-{unwrap,expect,panic}-in-tests).
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+future_incompatible = { level = "deny", priority = -1 }
+unused = { level = "deny", priority = -1 }
 
 [workspace.package]
 edition = "2024"

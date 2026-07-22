@@ -1,3 +1,9 @@
+# Pin clippy's MSRV to the toolchain channel so version-gated lints (e.g.
+# `missing_const_for_fn`) behave deterministically across machines.
+msrv = "1.97.1"
+
+# Allow the panicking shortcuts inside tests only; production code is held to
+# the stricter `deny` levels configured in the workspace lints table.
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-unwrap-in-tests = true

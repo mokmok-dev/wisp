@@ -85,13 +85,13 @@ impl Storage {
 
     /// Sessions repository.
     #[must_use]
-    pub fn sessions(&self) -> Sessions<'_> {
+    pub const fn sessions(&self) -> Sessions<'_> {
         Sessions::new(&self.conn)
     }
 
     /// Segments repository.
     #[must_use]
-    pub fn segments(&self) -> Segments<'_> {
+    pub const fn segments(&self) -> Segments<'_> {
         Segments::new(&self.conn)
     }
 

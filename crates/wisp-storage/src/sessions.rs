@@ -10,7 +10,7 @@ pub struct Sessions<'a> {
 }
 
 impl<'a> Sessions<'a> {
-    pub(crate) fn new(conn: &'a Connection) -> Self {
+    pub(crate) const fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
 

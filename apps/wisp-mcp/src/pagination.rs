@@ -2,12 +2,12 @@
 
 use serde_json::Value;
 
-pub(super) const DEFAULT_LOOPBACK_SECONDS: f64 = 600.0;
-pub(super) const MAX_CURSOR_LENGTH: usize = 256;
-pub(super) const MAX_PAGE_LIMIT: usize = 500;
+pub const DEFAULT_LOOPBACK_SECONDS: f64 = 600.0;
+pub const MAX_CURSOR_LENGTH: usize = 256;
+pub const MAX_PAGE_LIMIT: usize = 500;
 
 #[derive(Debug, Clone)]
-pub(super) struct ToolArguments {
+pub struct ToolArguments {
     pub(super) question: String,
     loopback_seconds: Option<f64>,
     cursor: Option<String>,
@@ -299,7 +299,7 @@ impl PaginationWindow {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct TranscriptPage {
+pub struct TranscriptPage {
     pub(super) segments: Vec<Value>,
     pub(super) loopback_seconds: f64,
     pub(super) anchor_end_seconds: f64,
@@ -310,12 +310,12 @@ pub(super) struct TranscriptPage {
 }
 
 impl TranscriptPage {
-    pub(super) fn has_more(&self) -> bool {
+    pub(super) const fn has_more(&self) -> bool {
         self.next_cursor.is_some()
     }
 }
 
-pub(super) fn paginate_transcript(
+pub fn paginate_transcript(
     snapshot: &Value,
     arguments: &ToolArguments,
 ) -> Result<TranscriptPage, String> {
@@ -472,7 +472,7 @@ mod tests {
         .expect("first page");
         assert_eq!(page_texts(&first), vec!["D", "E"]);
         assert_eq!(first.remaining_segments, 3);
-        let first_cursor = first.next_cursor.clone().expect("first cursor");
+        let first_cursor = first.next_cursor.expect("first cursor");
 
         snapshot["segments"]
             .as_array_mut()
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(page_texts(&second), vec!["B", "C"]);
         assert!((second.loopback_seconds - 1_000.0).abs() < f64::EPSILON);
         assert_eq!(second.total_segments, 5);
-        let second_cursor = second.next_cursor.clone().expect("second cursor");
+        let second_cursor = second.next_cursor.expect("second cursor");
 
         let third = paginate_transcript(
             &snapshot,
@@ -580,14 +580,14 @@ mod tests {
         )
         .expect("first page");
         let cursor = first.next_cursor.expect("cursor");
-        let mut different_view = current_snapshot.clone();
+        let mut different_view = current_snapshot;
         different_view["view"] = json!("history");
         assert!(
             paginate_transcript(
                 &different_view,
                 &arguments(&json!({
                     "question": "q",
-                    "cursor": cursor.clone(),
+                    "cursor": cursor,
                     "limit": 1
                 }))
             )

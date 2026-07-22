@@ -406,8 +406,6 @@ mod tests {
     #[test]
     fn markdown_export_is_empty_when_no_body() {
         let segments = vec![seg(SourceLabel::Mic, 0.0, "   ")];
-        assert!(
-            format_transcript_markdown(Some(&stored_session("x")), &segments).is_empty()
-        );
+        assert!(format_transcript_markdown(Some(&stored_session("x")), &segments).is_empty());
     }
 }

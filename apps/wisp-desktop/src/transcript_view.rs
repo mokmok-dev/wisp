@@ -1048,7 +1048,6 @@ fn render_transcript_actions(
     }
 
     let segments_copy = model.read(cx).segments.clone();
-    let segments_export = segments_copy.clone();
     let export_name = export_name.to_string();
 
     div()
@@ -1064,8 +1063,14 @@ fn render_transcript_actions(
         ))
         .child(render_toolbar_button("transcript-export", "Export", {
             let export_name = export_name.clone();
+            let model = model.clone();
             move |_window, cx| {
-                transcript_export::export_transcript(segments_export.clone(), &export_name, cx);
+                let app = model.read(cx);
+                let text = transcript_export::format_transcript_markdown(
+                    app.viewed_session.as_ref(),
+                    &app.segments,
+                );
+                transcript_export::export_transcript(text, &export_name, cx);
             }
         }))
         .into_any_element()

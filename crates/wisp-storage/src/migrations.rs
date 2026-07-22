@@ -68,7 +68,7 @@ const _: () = assert!(
 /// # Errors
 /// Returns [`StorageError::Migration`] if any step fails. The transaction
 /// is rolled back so the database stays at its previous version.
-pub(crate) fn run(conn: &Connection) -> Result<()> {
+pub fn run(conn: &Connection) -> Result<()> {
     let current: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {

@@ -186,18 +186,19 @@ pub fn copy_transcript_to_clipboard(
     true
 }
 
-/// Open the platform save dialog and write the transcript to the chosen path.
+/// Open the platform save dialog and write the pre-rendered transcript to
+/// the chosen path.
 ///
-/// Writes a Markdown file: a YAML frontmatter envelope (built from
-/// `session` when available) followed by the transcript body. The
-/// clipboard path stays plain text — the envelope is file-only.
+/// `text` is expected to be the Markdown produced by
+/// [`format_transcript_markdown`] (frontmatter envelope + body). Building it
+/// in the caller keeps this function free of the app model, so no `Segment`
+/// or `Session` needs to be cloned across the async boundary — only the
+/// finished string is moved. An empty `text` is a no-op.
 pub fn export_transcript(
-    segments: Vec<Segment>,
-    session: Option<StoredSession>,
+    text: String,
     suggested_name: &str,
     cx: &mut App,
 ) {
-    let text = format_transcript_markdown(session.as_ref(), &segments);
     if text.is_empty() {
         return;
     }

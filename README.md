@@ -110,8 +110,8 @@ MCP hosts should run the bundled `wisp-mcp` binary over stdio, for example `/App
 
 - [ ] **Windows support** — preview setup and `Windows.Media.SpeechRecognition` route are in place; WASAPI loopback + local-model transcription is the remaining hardening path.
 - [ ] **Linux support** — exploring PipeWire monitor sources paired with a local Whisper-family model.
-- [x] Copy transcript to clipboard and export as plain text (.txt).
-- [ ] Export to Markdown / SRT / JSON.
+- [x] Copy transcript to clipboard (plain text) and export as Markdown (`.md`) with a lightweight, CloudEvents-inspired YAML frontmatter envelope (`id`, `type`, `source`, `time`, `subject`, …).
+- [ ] Export to SRT / JSON.
 - [ ] Speaker diarization within a single channel.
 
 ## Contributing

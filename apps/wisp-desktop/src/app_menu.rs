@@ -112,9 +112,11 @@ pub fn configure(
         if !matches!(app.view, View::LiveSession | View::History { .. }) {
             return;
         }
-        let title = app.viewed_session.as_ref().map(|s| s.title.as_str());
-        let name = suggested_export_name(title, "transcript");
-        transcript_export::export_transcript(app.segments.clone(), &name, cx);
+        let session = app.viewed_session.clone();
+        let name =
+            suggested_export_name(session.as_ref().map(|s| s.title.as_str()), "transcript");
+        let segments = app.segments.clone();
+        transcript_export::export_transcript(segments, session, &name, cx);
     });
 
     cx.bind_keys([

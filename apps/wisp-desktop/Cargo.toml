@@ -33,6 +33,7 @@ wisp-audiokit = { path = "../../crates/wisp-audiokit" }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_norway = { workspace = true }
 uuid = { workspace = true }
 
 # GPU-accelerated UI framework by the Zed team. macOS-only in practice;

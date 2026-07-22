@@ -112,9 +112,13 @@ pub fn configure(
         if !matches!(app.view, View::LiveSession | View::History { .. }) {
             return;
         }
-        let title = app.viewed_session.as_ref().map(|s| s.title.as_str());
-        let name = suggested_export_name(title, "transcript");
-        transcript_export::export_transcript(app.segments.clone(), &name, cx);
+        let session = app.viewed_session.as_ref();
+        let text = transcript_export::format_transcript_markdown(session, &app.segments);
+        let name = suggested_export_name(session.map(|s| s.title.as_str()), "transcript");
+        // `app` (and thus its immutable borrow of `cx`) is no longer used
+        // after this point, so `export_transcript` can borrow `cx` mutably
+        // without cloning any segments or the session.
+        transcript_export::export_transcript(text, &name, cx);
     });
 
     cx.bind_keys([

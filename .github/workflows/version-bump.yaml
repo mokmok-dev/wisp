@@ -1,0 +1,162 @@
+name: version-bump
+# Bumps the single source of truth for the workspace version
+# (`[workspace.package] version` in the root Cargo.toml — every member crate
+# inherits it via `version.workspace = true`), syncs Cargo.lock, commits the
+# change, and creates the `vX.Y.Z` tag.
+#
+# Creating the tag is what produces a shippable build: the release workflow
+# (.github/workflows/release.yaml) builds the macOS binaries, assembles
+# Wisp.app, and publishes the GitHub Release. Because a tag pushed with the
+# default GITHUB_TOKEN does NOT trigger `on: push: tags` (GitHub deliberately
+# suppresses recursive workflow runs), we instead dispatch the release
+# workflow explicitly — `workflow_dispatch` via GITHUB_TOKEN *is* allowed.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver level to bump (ignored when 'version' is set)."
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      version:
+        description: "Explicit version X.Y.Z (overrides 'bump'). Leave empty to compute from 'bump'."
+        required: false
+      release:
+        description: "After tagging, dispatch the release workflow to build and publish."
+        type: boolean
+        default: true
+concurrency:
+  # Serialize version bumps so two runs can't race on Cargo.toml / the tag.
+  group: version-bump
+  cancel-in-progress: false
+permissions:
+  contents: write # push the bump commit and the tag
+  actions: write # dispatch the release workflow
+  id-token: write
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-nix
+      - uses: ./.github/actions/setup-rust-cache
+
+      - name: Compute new version
+        id: ver
+        run: |
+          set -euo pipefail
+
+          # Read the current version from the [workspace.package] table only,
+          # so unrelated `version = "..."` lines (dependencies, comments) can't
+          # be mistaken for it.
+          CURRENT="$(awk '
+            /^\[workspace\.package\]/ { in_wp = 1; next }
+            /^\[/                     { in_wp = 0 }
+            in_wp && /^version[[:space:]]*=/ {
+              match($0, /"[^"]+"/)
+              print substr($0, RSTART + 1, RLENGTH - 2)
+              exit
+            }
+          ' Cargo.toml)"
+          if [ -z "$CURRENT" ]; then
+            echo "could not find [workspace.package] version in Cargo.toml" >&2
+            exit 1
+          fi
+          echo "current version: $CURRENT"
+
+          EXPLICIT="${{ inputs.version }}"
+          if [ -n "$EXPLICIT" ]; then
+            NEW="$EXPLICIT"
+          else
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+            case "${{ inputs.bump }}" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+            esac
+            NEW="${MAJOR}.${MINOR}.${PATCH}"
+          fi
+
+          # Validate strictly so a fat-fingered explicit version can't create a
+          # bad tag downstream.
+          if ! echo "$NEW" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "computed version '$NEW' is not a valid X.Y.Z semver" >&2
+            exit 1
+          fi
+          echo "new version: $NEW"
+
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEW" >> "$GITHUB_OUTPUT"
+
+      - name: Fail if tag already exists
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "tag $TAG already exists" >&2
+            exit 1
+          fi
+
+      - name: Update Cargo.toml and Cargo.lock
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.ver.outputs.new }}"
+
+          # Rewrite only the first `version = "..."` inside [workspace.package].
+          awk -v ver="$NEW" '
+            /^\[workspace\.package\]/ { in_wp = 1 }
+            /^\[/ && !/^\[workspace\.package\]/ { in_wp = 0 }
+            in_wp && !done && /^version[[:space:]]*=/ {
+              sub(/version[[:space:]]*=[[:space:]]*"[^"]*"/, "version = \"" ver "\"")
+              done = 1
+            }
+            { print }
+          ' Cargo.toml > Cargo.toml.tmp
+          mv Cargo.toml.tmp Cargo.toml
+
+          # Sync the local crate versions in Cargo.lock without touching any
+          # third-party pins. `--workspace` limits the update to the workspace
+          # members, whose versions are inherited from the value we just set.
+          nix develop .#ci --quiet --command cargo update --workspace
+
+          echo "--- Cargo.toml [workspace.package] ---"
+          grep -n 'version' Cargo.toml | tail -1
+
+      - name: Commit, tag, and push
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): ${TAG}"
+          git tag -a "$TAG" -m "$TAG"
+
+          # Push the bump commit to the branch the workflow was dispatched from,
+          # then the tag. If the branch is protected against direct pushes this
+          # step will fail — run the workflow from an unprotected branch or add
+          # a bypass for github-actions.
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "$TAG"
+
+      - name: Dispatch release workflow
+        if: ${{ inputs.release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+          gh workflow run release.yaml \
+            --ref "$TAG" \
+            -f tag="$TAG" \
+            -f artifact_only=false
+          echo "Dispatched release.yaml for $TAG"

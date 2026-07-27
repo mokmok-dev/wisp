@@ -25,6 +25,7 @@ unsafe_code = "deny"
 
 [dependencies]
 wisp-core = { path = "../../crates/wisp-core" }
+wisp-lifecycle = { path = "../../crates/wisp-lifecycle" }
 wisp-storage = { path = "../../crates/wisp-storage" }
 wisp-audiokit = { path = "../../crates/wisp-audiokit" }
 

@@ -567,7 +567,7 @@ pub(crate) fn toggle_recording(
         },
         SessionState::Recording { .. } => {
             model.update(cx, |m, cx| {
-                m.set_state(SessionState::Stopping);
+                m.set_state(m.state.request_stop());
                 cx.notify();
             });
             runner.stop();

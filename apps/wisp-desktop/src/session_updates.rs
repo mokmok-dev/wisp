@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use wisp_audiokit::SourceLabel;
 use wisp_core::SessionId;
+use wisp_lifecycle::WorkerUpdate;
 use wisp_storage::Storage;
 
 use crate::app::{
@@ -66,26 +67,26 @@ pub fn apply_update(
 ) {
     match update {
         Started(session) => {
-            if model.current_session_id != Some(session.session_id) || !model.state.is_active() {
+            let Some(next_phase) =
+                model.worker_update_phase(session.session_id, WorkerUpdate::Started)
+            else {
                 return;
-            }
+            };
             model.linked_session_id = Some(session.session_id);
             model.current_session_started_at = Some(session.started_at);
             model.current_session_dir_name = Some(session.dir_name);
             // A quit request can move Starting -> Stopping before the worker
             // reports Started. Do not regress the UI back to Recording; the
             // queued Stop still owns the transition.
-            if !matches!(model.state, SessionState::Stopping) {
-                model.set_state(SessionState::Recording { started_at: now() });
-            }
+            model.set_state(model.state.with_phase(next_phase, now()));
         },
         Event { session_id, event } => {
-            if model.current_session_id == Some(session_id) && model.state.is_active() {
+            if model.accepts_worker_update(session_id) {
                 model.ingest(event);
             }
         },
         Stopped { session_id } => {
-            if model.current_session_id != Some(session_id) || !model.state.is_active() {
+            if !model.accepts_worker_update(session_id) {
                 return;
             }
             model.finalize_all_segments();
@@ -95,7 +96,7 @@ pub fn apply_update(
             let _ = retry_pending_persistence(model, storage);
         },
         StartFailed { session_id, error } => {
-            if model.current_session_id != Some(session_id) || !model.state.is_active() {
+            if !model.accepts_worker_update(session_id) {
                 return;
             }
             model.finalize_all_segments();
@@ -110,7 +111,7 @@ pub fn apply_update(
             }
         },
         Error { session_id, error } => {
-            if model.current_session_id != Some(session_id) || !model.state.is_active() {
+            if !model.accepts_worker_update(session_id) {
                 return;
             }
             model.pending_session_write = Some(PendingSessionWrite::Delete);

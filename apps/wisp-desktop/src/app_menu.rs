@@ -223,7 +223,7 @@ fn graceful_stop_session(
     if needs_stop {
         runner.stop();
         model.update(cx, |m, cx| {
-            m.set_state(SessionState::Stopping);
+            m.set_state(m.state.request_stop());
             cx.notify();
         });
     }

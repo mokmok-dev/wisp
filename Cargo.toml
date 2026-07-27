@@ -5,6 +5,7 @@ members = [
   "crates/wisp-audiokit",
   "crates/wisp-audiokit-sys",
   "crates/wisp-core",
+  "crates/wisp-lifecycle",
   "crates/wisp-storage",
 ]
 resolver = "3"
@@ -22,6 +23,10 @@ serde_norway = "0.9.42"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 uuid = { version = "1.23.1", features = ["v4"] }
+
+[workspace.lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(kani)"]
 
 [workspace.lints.clippy]
 # The toolchain is pinned (see rust-toolchain.toml), so the exact set of

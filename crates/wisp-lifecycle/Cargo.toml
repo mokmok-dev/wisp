@@ -1,0 +1,11 @@
+[package]
+name = "wisp-lifecycle"
+edition.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+shuttle = "0.9.1"

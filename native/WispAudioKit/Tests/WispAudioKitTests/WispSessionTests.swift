@@ -1,5 +1,5 @@
-import Foundation
 import AVFoundation
+import Foundation
 @testable import WispAudioKit
 import XCTest
 
@@ -54,16 +54,16 @@ final class WispSessionTests: XCTestCase {
         let outputDir = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: outputDir) }
         let output = outputDir.appendingPathComponent("test.ogg")
-        let format = AVAudioFormat(
+        let format = try XCTUnwrap(AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: 48_000,
+            sampleRate: 48000,
             channels: 1,
             interleaved: false
-        )!
+        ))
         let recorder = try OpusOggRecorder(url: output, sourceFormat: format)
         for _ in 0 ..< 4 {
-            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4_800)!
-            buffer.frameLength = 4_800
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800))
+            buffer.frameLength = 4800
             recorder.push(buffer)
         }
         await recorder.finish()
@@ -185,7 +185,7 @@ private extension Data {
             crc ^= UInt32(byte) << 24
             for _ in 0 ..< 8 {
                 crc = (crc & 0x8000_0000) != 0
-                    ? (crc << 1) ^ 0x04c1_1db7
+                    ? (crc << 1) ^ 0x04C1_1DB7
                     : crc << 1
             }
         }

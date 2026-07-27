@@ -1,5 +1,5 @@
-@preconcurrency import AVFoundation
 import AudioToolbox
+@preconcurrency import AVFoundation
 import Foundation
 import os.lock
 
@@ -69,8 +69,8 @@ final class OpusOggRecorder: @unchecked Sendable {
 }
 
 private final class OpusEncoder: @unchecked Sendable {
-    private static let outputSampleRate = 48_000.0
-    private static let bitRatePerChannel = 32_000
+    private static let outputSampleRate = 48000.0
+    private static let bitRatePerChannel = 32000
 
     private let channelCount: AVAudioChannelCount
     private let outputFormat: AVAudioFormat
@@ -239,28 +239,26 @@ private enum OpusPacket {
     static func sampleCount(_ packet: Data) -> UInt64 {
         guard let toc = packet.first else { return 0 }
         let config = toc >> 3
-        let samplesPerFrame: UInt64
-        if config >= 16 {
-            samplesPerFrame = 120 << UInt64(config & 0x03)
+        let samplesPerFrame: UInt64 = if config >= 16 {
+            120 << UInt64(config & 0x03)
         } else if config >= 12 {
-            samplesPerFrame = 480 << UInt64(config & 0x01)
+            480 << UInt64(config & 0x01)
         } else if config & 0x03 == 0x03 {
-            samplesPerFrame = 2_880
+            2880
         } else {
-            samplesPerFrame = 480 << UInt64(config & 0x03)
+            480 << UInt64(config & 0x03)
         }
 
         let frameCode = toc & 0x03
-        let frameCount: UInt64
-        switch frameCode {
+        let frameCount: UInt64 = switch frameCode {
         case 0:
-            frameCount = 1
+            1
         case 1, 2:
-            frameCount = 2
+            2
         default:
-            frameCount = packet.count > 1 ? UInt64(packet[packet.startIndex + 1] & 0x3f) : 0
+            packet.count > 1 ? UInt64(packet[packet.startIndex + 1] & 0x3F) : 0
         }
-        return min(samplesPerFrame * frameCount, 5_760)
+        return min(samplesPerFrame * frameCount, 5760)
     }
 }
 
@@ -296,7 +294,7 @@ private final class OggOpusWriter {
         head.append(1) // version
         head.append(channelCount)
         head.appendLittleEndian(preSkip)
-        head.appendLittleEndian(UInt32(48_000))
+        head.appendLittleEndian(UInt32(48000))
         head.appendLittleEndian(Int16(0)) // output gain
         head.append(0) // channel mapping family 0 (mono/stereo)
         try writePage(packet: head, granule: 0, flags: 0x02) // BOS
@@ -449,7 +447,7 @@ private extension AVAudioPCMBuffer {
 }
 
 private extension Data {
-    mutating func appendLittleEndian<T: FixedWidthInteger>(_ value: T) {
+    mutating func appendLittleEndian(_ value: some FixedWidthInteger) {
         append(contentsOf: value.littleEndianBytes)
     }
 
@@ -459,7 +457,7 @@ private extension Data {
             crc ^= UInt32(byte) << 24
             for _ in 0 ..< 8 {
                 crc = (crc & 0x8000_0000) != 0
-                    ? (crc << 1) ^ 0x04c1_1db7
+                    ? (crc << 1) ^ 0x04C1_1DB7
                     : crc << 1
             }
         }

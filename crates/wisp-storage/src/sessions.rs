@@ -154,8 +154,8 @@ mod tests {
         NewSession {
             started_at: Utc.with_ymd_and_hms(2026, 5, 28, 10, 30, 0).unwrap(),
             title: title.into(),
-            mic_wav_path: "session-1/mic.wav".into(),
-            system_wav_path: "session-1/system.wav".into(),
+            mic_wav_path: "session-1/mic.ogg".into(),
+            system_wav_path: "session-1/system.ogg".into(),
         }
     }
 

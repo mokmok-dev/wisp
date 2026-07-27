@@ -16,7 +16,7 @@ Wisp captures your microphone and system audio (the other side of a call) at the
 - **On-device transcription** — Uses [`SpeechAnalyzer`](https://developer.apple.com/documentation/speech), the new API in Apple's Speech framework on macOS. Windows preview builds can use `Windows.Media.SpeechRecognition` or prepare a local model from setup.
 - **System audio + microphone capture** — Uses macOS 14.4+ [Core Audio Process Taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps) to tap meeting-app output without prompts, mixes it with your mic input, and merges both sides into a single transcript. Windows local-model work is structured around WASAPI mic + loopback capture.
 - **Built in Rust with a GPU-rendered UI** — The UI is built on [GPUI](https://www.gpui.rs/), the framework that powers the [Zed](https://zed.dev/) editor. Native-feeling responsiveness and smooth scrolling.
-- **Simple local storage** — Recordings are stored as WAV and metadata as SQLite under `~/Library/Application Support/dev.mokmok.wisp/`. Easy to export and analyze later.
+- **Simple local storage** — Recordings are stored as Ogg/Opus and metadata as SQLite under `~/Library/Application Support/dev.mokmok.wisp/`. Easy to export and analyze later.
 
 ## Screenshots
 
@@ -43,7 +43,7 @@ Core Audio Process Tap ─┐
 Microphone input ───────┘        │                              ▲
                                  └─► SpeechAnalyzer ────────────┘
                                           │
-                                          └─► wisp-storage (SQLite + WAV)
+                                          └─► wisp-storage (SQLite + Ogg/Opus)
 ```
 
 ## Requirements
@@ -93,7 +93,7 @@ directory are stored. When unset, Wisp uses
 `~/Library/Application Support/dev.mokmok.wisp`.
 
 If a completed transcript cannot be committed to SQLite, Wisp writes an
-atomic `transcript-recovery.json` beside that session's WAV files, blocks a
+atomic `transcript-recovery.json` beside that session's Ogg files, blocks a
 new recording, and retries reconciliation immediately or on the next launch.
 Wisp exits before recording if the durable database cannot be opened; it never
 treats an in-memory fallback as successful persistence.

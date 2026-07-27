@@ -43,8 +43,8 @@ do {
     exit(1)
 }
 
-wispLog("  MIC WAV: \(session.micWavURL.path)")
-wispLog("  SYS WAV: \(session.systemWavURL.path)")
+wispLog("  MIC Ogg/Opus: \(session.micOggURL.path)")
+wispLog("  SYS Ogg/Opus: \(session.systemOggURL.path)")
 
 do {
     try await session.start()
@@ -59,13 +59,13 @@ await waitForInterrupt()
 await session.stop()
 
 wispLog("Done.")
-wispLog("  MIC WAV: \(session.micWavURL.path)")
-wispLog("  SYS WAV: \(session.systemWavURL.path)")
+wispLog("  MIC Ogg/Opus: \(session.micOggURL.path)")
+wispLog("  SYS Ogg/Opus: \(session.systemOggURL.path)")
 
 // MARK: - CLI helpers
 
 /// Create an isolated directory for one recording beneath the user-selected
-/// root. `WispSession` uses stable WAV filenames inside this directory, so the
+/// root. `WispSession` uses stable Ogg filenames inside this directory, so the
 /// UUID suffix prevents rapid or concurrent CLI runs from overwriting files.
 func createRecordingDirectory(
     in root: URL,

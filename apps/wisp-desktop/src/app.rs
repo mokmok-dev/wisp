@@ -279,7 +279,7 @@ pub struct AppModel {
     pub current_session_started_at: Option<DateTime<Utc>>,
     pub current_session_dir_name: Option<String>,
     /// Per-run audio directory. Retained with the transcript after a storage
-    /// failure so a durable recovery snapshot can be written beside the WAVs.
+    /// failure so a durable recovery snapshot can be written beside the Ogg files.
     pub current_output_dir: Option<PathBuf>,
     /// The session being viewed in `View::History`, kept around so the
     /// header can render its title without re-querying.
@@ -647,8 +647,8 @@ mod tests {
             started_at,
             ended_at: Some(started_at),
             title: format!("session {id}"),
-            mic_wav_path: format!("session-{id}/mic.wav"),
-            system_wav_path: format!("session-{id}/system.wav"),
+            mic_wav_path: format!("session-{id}/mic.ogg"),
+            system_wav_path: format!("session-{id}/system.ogg"),
             notes: String::new(),
         }
     }

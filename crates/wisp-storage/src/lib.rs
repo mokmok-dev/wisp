@@ -1,7 +1,7 @@
 //! Persistence layer for Wisp sessions.
 //!
 //! Owns the `SQLite` schema for sessions, transcript segments, and the
-//! filesystem layout that pairs each session with its source WAV files.
+//! filesystem layout that pairs each session with its source Ogg/Opus files.
 //!
 //! Connection model: a single, owned `rusqlite::Connection` lives inside
 //! [`Storage`]. `SQLite` serializes writers internally; the desktop app is
@@ -24,7 +24,7 @@ pub use crate::segments::Segments;
 pub use crate::sessions::Sessions;
 
 /// Owns the database connection and the on-disk root that holds the `SQLite`
-/// file plus session WAV directories.
+/// file plus session Ogg/Opus directories.
 pub struct Storage {
     conn: Connection,
     root: PathBuf,
@@ -157,8 +157,8 @@ mod tests {
         NewSession {
             started_at: Utc.with_ymd_and_hms(2026, 7, 15, 10, 0, 0).unwrap(),
             title: "transaction test".into(),
-            mic_wav_path: "transaction-test/mic.wav".into(),
-            system_wav_path: "transaction-test/system.wav".into(),
+            mic_wav_path: "transaction-test/mic.ogg".into(),
+            system_wav_path: "transaction-test/system.ogg".into(),
         }
     }
 

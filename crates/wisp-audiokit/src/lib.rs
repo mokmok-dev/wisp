@@ -391,7 +391,7 @@ mod imp {
     impl Session {
         /// Construct a new session. Does no I/O — call [`Self::start`] next.
         ///
-        /// `output_dir` is the directory in which the per-session WAV files
+        /// `output_dir` is the directory in which the per-session Ogg files
         /// will be written (created if needed). `locale` is a BCP-47
         /// language tag passed to the Swift speech recognizer
         /// (e.g. `"ja-JP"`).

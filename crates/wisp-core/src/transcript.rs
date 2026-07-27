@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::{SegmentId, SessionId, SourceLabel};
 
 /// One recording session = one meeting. Tracks lifecycle timestamps, the
-/// user-editable title, and the on-disk paths to the captured WAV files.
+/// user-editable title, and the on-disk paths to the captured Ogg/Opus files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub id: SessionId,
@@ -14,7 +14,9 @@ pub struct Session {
     pub title: String,
     /// Path relative to the storage root, never absolute. Lets the user
     /// move their library between machines without DB rewrites.
+    /// Ogg/Opus path. The field name is retained for database compatibility.
     pub mic_wav_path: String,
+    /// Ogg/Opus path. The field name is retained for database compatibility.
     pub system_wav_path: String,
     pub notes: String,
 }
@@ -25,7 +27,9 @@ pub struct Session {
 pub struct NewSession {
     pub started_at: DateTime<Utc>,
     pub title: String,
+    /// Ogg/Opus path. The field name is retained for database compatibility.
     pub mic_wav_path: String,
+    /// Ogg/Opus path. The field name is retained for database compatibility.
     pub system_wav_path: String,
 }
 

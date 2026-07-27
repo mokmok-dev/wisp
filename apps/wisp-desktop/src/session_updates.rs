@@ -183,8 +183,8 @@ fn resolve_session_id(
             .get(session_id)
             .map_err(|error| format!("could not validate the session row: {error}"))?
     {
-        let expected_mic = format!("recordings/{dir_name}/mic.wav");
-        let expected_system = format!("recordings/{dir_name}/system.wav");
+        let expected_mic = format!("recordings/{dir_name}/mic.ogg");
+        let expected_system = format!("recordings/{dir_name}/system.ogg");
         if session.mic_wav_path != expected_mic || session.system_wav_path != expected_system {
             return Err("the retained session id belongs to a different recording".into());
         }
@@ -242,7 +242,7 @@ fn delete_unstarted_session(
     true
 }
 
-/// Write the in-memory transcript beside its WAV files using an atomic
+/// Write the in-memory transcript beside its Ogg files using an atomic
 /// replace. This is the durable fallback used before quit and whenever the
 /// database transaction rolls back.
 pub(crate) fn write_recovery_snapshot(model: &AppModel) -> io::Result<PathBuf> {
@@ -310,7 +310,7 @@ pub(crate) fn write_recovery_snapshot(model: &AppModel) -> io::Result<PathBuf> {
 /// new recording can start. Valid snapshots are retried automatically against
 /// `SQLite`. If storage is still unavailable, the first pending transcript is
 /// restored into `AppModel`'s guarded Failed state so the existing Retry Save
-/// action remains available; its sidecar stays beside the WAV files.
+/// action remains available; its sidecar stays beside the Ogg files.
 pub(crate) fn recover_pending_sessions(
     model: &mut AppModel,
     storage: &SharedStorage,
@@ -469,8 +469,8 @@ fn load_recovery_model(
                     .current_session_dir_name
                     .as_deref()
                     .expect("validated directory metadata");
-                let expected_mic = format!("recordings/{dir_name}/mic.wav");
-                let expected_system = format!("recordings/{dir_name}/system.wav");
+                let expected_mic = format!("recordings/{dir_name}/mic.ogg");
+                let expected_system = format!("recordings/{dir_name}/system.ogg");
                 if session.mic_wav_path != expected_mic
                     || session.system_wav_path != expected_system
                 {
@@ -602,8 +602,8 @@ mod tests {
             .create(&wisp_core::NewSession {
                 started_at,
                 title: library::default_title(started_at),
-                mic_wav_path: format!("recordings/{dir_name}/mic.wav"),
-                system_wav_path: format!("recordings/{dir_name}/system.wav"),
+                mic_wav_path: format!("recordings/{dir_name}/mic.ogg"),
+                system_wav_path: format!("recordings/{dir_name}/system.ogg"),
             })
             .expect("preallocate session")
     }
@@ -652,7 +652,7 @@ mod tests {
         assert_eq!(session.started_at, started_at);
         assert_eq!(
             session.mic_wav_path,
-            format!("recordings/{dir_name}/mic.wav")
+            format!("recordings/{dir_name}/mic.ogg")
         );
     }
 

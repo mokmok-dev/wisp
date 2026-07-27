@@ -18,6 +18,7 @@ use wisp_audiokit::{
     SessionError, SessionResult, SourceLabel, local_model_spec, local_model_status,
 };
 use wisp_core::{Session as StoredSession, SessionId};
+use wisp_lifecycle::{Phase, UpdateContext, ViewOwner, WorkerUpdate, can_replace_transcript};
 
 #[derive(Debug, Clone)]
 pub enum AppError {
@@ -55,15 +56,51 @@ pub enum SessionState {
 }
 
 impl SessionState {
+    #[must_use]
+    pub const fn phase(self) -> Phase {
+        match self {
+            Self::Idle => Phase::Idle,
+            Self::Starting => Phase::Starting,
+            Self::Recording { .. } => Phase::Recording,
+            Self::Stopping => Phase::Stopping,
+            Self::Failed => Phase::Failed,
+        }
+    }
+
     /// Whether an audio session is running or changing lifecycle state.
     /// While this is true the live transcript is the persistence source and
     /// must not be replaced by another view's segments.
     #[must_use]
     pub const fn is_active(self) -> bool {
-        matches!(
-            self,
-            Self::Starting | Self::Recording { .. } | Self::Stopping
-        )
+        self.phase().is_active()
+    }
+
+    #[must_use]
+    pub fn with_phase(
+        self,
+        phase: Phase,
+        recording_started_at: Instant,
+    ) -> Self {
+        match phase {
+            Phase::Idle => Self::Idle,
+            Phase::Starting => Self::Starting,
+            Phase::Recording => Self::Recording {
+                started_at: recording_started_at,
+            },
+            Phase::Stopping => Self::Stopping,
+            Phase::Failed => Self::Failed,
+        }
+    }
+
+    #[must_use]
+    pub const fn request_stop(self) -> Self {
+        match self.phase().request_stop() {
+            Phase::Stopping => Self::Stopping,
+            Phase::Idle => Self::Idle,
+            Phase::Starting => Self::Starting,
+            Phase::Recording => self,
+            Phase::Failed => Self::Failed,
+        }
     }
 }
 
@@ -292,6 +329,41 @@ pub struct AppModel {
 }
 
 impl AppModel {
+    fn view_owner(&self) -> ViewOwner {
+        match self.view {
+            View::Library => ViewOwner::Library,
+            View::LiveSession => ViewOwner::Live,
+            View::History { .. } => ViewOwner::History,
+        }
+    }
+
+    #[must_use]
+    pub fn accepts_worker_update(
+        &self,
+        session_id: SessionId,
+    ) -> bool {
+        UpdateContext {
+            phase: self.state.phase(),
+            view: self.view_owner(),
+            current_session_id: self.current_session_id.map(SessionId::as_i64),
+        }
+        .accepts(session_id.as_i64())
+    }
+
+    #[must_use]
+    pub fn worker_update_phase(
+        &self,
+        session_id: SessionId,
+        update: WorkerUpdate,
+    ) -> Option<Phase> {
+        UpdateContext {
+            phase: self.state.phase(),
+            view: self.view_owner(),
+            current_session_id: self.current_session_id.map(SessionId::as_i64),
+        }
+        .next_phase(session_id.as_i64(), update)
+    }
+
     pub fn new() -> Self {
         Self {
             state: SessionState::Idle,
@@ -332,9 +404,11 @@ impl AppModel {
     /// A retained database handle after a failed finalization is deliberately
     /// treated as unsettled so navigation cannot silently discard it.
     pub fn has_unsettled_session(&self) -> bool {
-        self.state.is_active()
-            || self.pending_session_write.is_some()
-            || self.current_output_dir.is_some()
+        !can_replace_transcript(
+            self.state.phase(),
+            self.pending_session_write.is_some(),
+            self.current_output_dir.is_some(),
+        )
     }
 
     /// A stopped worker whose transcript transaction needs to be retried.

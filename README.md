@@ -74,15 +74,15 @@ cargo build -p wisp-desktop --release
 
 ### Formal verification
 
-The session worker protocol and the whole-app navigation/session workflow have
-executable TLA+ models plus symbolic one-step invariant proofs in Z3:
+The session worker protocol and navigation/session guards are checked against
+the production Rust implementation with Kani and Shuttle:
 
 ```bash
-nix develop .#formal --command bash formal/check.sh
+bash formal/check.sh
 ```
 
-See [`formal/README.md`](formal/README.md) for the verified properties,
-implementation mapping, assumptions, and extension workflow.
+See [`formal/README.md`](formal/README.md) for setup, verified properties, and
+the extension workflow.
 
 See `.github/workflows/release.yaml` for how the release `.app` bundle is produced — pushing a `v*` tag builds `Wisp.app` on a macOS 26 runner.
 
@@ -116,7 +116,7 @@ MCP hosts should run the bundled `wisp-mcp` binary over stdio, for example `/App
 
 ## Contributing
 
-Issues and pull requests are welcome. Before sending a PR, please make sure `cargo fmt`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`, and `nix develop .#formal --command bash formal/check.sh` pass under the same conditions as CI. For the Swift side, `make -C native/WispAudioKit` runs the equivalent checks.
+Issues and pull requests are welcome. Before sending a PR, please make sure `cargo fmt`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`, and `bash formal/check.sh` pass under the same conditions as CI. For the Swift side, `make -C native/WispAudioKit` runs the equivalent checks.
 
 ## License
 

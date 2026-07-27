@@ -77,7 +77,7 @@ struct TranscriptEnvelope<'a> {
     #[serde(rename = "type")]
     event_type: &'static str,
     /// CloudEvents `source`: a stable, machine-independent producer id.
-    /// Deliberately no hostname, absolute paths, or WAV locations, to honour
+    /// Deliberately no hostname, absolute paths, or audio locations, to honour
     /// Wisp's offline / privacy-first promise.
     source: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -335,8 +335,8 @@ mod tests {
                     .expect("valid end timestamp"),
             ),
             title: title.to_string(),
-            mic_wav_path: "mic.wav".to_string(),
-            system_wav_path: "system.wav".to_string(),
+            mic_wav_path: "mic.ogg".to_string(),
+            system_wav_path: "system.ogg".to_string(),
             notes: String::new(),
         }
     }

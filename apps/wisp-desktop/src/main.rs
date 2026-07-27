@@ -503,7 +503,7 @@ pub(crate) fn toggle_recording(
             if !setup_complete {
                 return;
             }
-            // Per-session subdirectory so each recording's WAVs stay
+            // Per-session subdirectory so each recording's Ogg files stay
             // grouped and we can show them as a single library row.
             let started_at = Utc::now();
             let dir_name = library::session_dir_name(started_at);

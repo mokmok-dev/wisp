@@ -35,8 +35,8 @@ public final class WispSession: @unchecked Sendable {
     public typealias OnResult = @Sendable (Result) -> Void
     public typealias OnLog = @Sendable (String) -> Void
 
-    public let micWavURL: URL
-    public let systemWavURL: URL
+    public let micOggURL: URL
+    public let systemOggURL: URL
 
     private let locale: Locale
     private let onResult: OnResult
@@ -101,10 +101,10 @@ public final class WispSession: @unchecked Sendable {
         // Keep these names stable so callers can persist the exact paths.
         // Refuse to reuse a completed/partial recording directory instead of
         // silently overwriting its audio.
-        let micWavURL = outputDir.appendingPathComponent("mic.wav")
-        let systemWavURL = outputDir.appendingPathComponent("system.wav")
-        if FileManager.default.fileExists(atPath: micWavURL.path)
-            || FileManager.default.fileExists(atPath: systemWavURL.path)
+        let micOggURL = outputDir.appendingPathComponent("mic.ogg")
+        let systemOggURL = outputDir.appendingPathComponent("system.ogg")
+        if FileManager.default.fileExists(atPath: micOggURL.path)
+            || FileManager.default.fileExists(atPath: systemOggURL.path)
         {
             throw PoCError.outputFilesAlreadyExist(outputDir.path)
         }
@@ -123,8 +123,8 @@ public final class WispSession: @unchecked Sendable {
         guard reserved else {
             throw PoCError.outputFilesAlreadyExist(outputDir.path)
         }
-        self.micWavURL = micWavURL
-        self.systemWavURL = systemWavURL
+        self.micOggURL = micOggURL
+        self.systemOggURL = systemOggURL
         self.locale = locale
         self.onResult = onResult
         self.onLog = onLog
@@ -216,7 +216,7 @@ public final class WispSession: @unchecked Sendable {
         let micPipeline = try await TranscriptionPipeline(
             label: "MIC",
             sourceFormat: micFormat,
-            wavURL: micWavURL,
+            oggURL: micOggURL,
             locale: locale,
             onResult: { pipelineResult in
                 onResultLocal(Result(
@@ -248,7 +248,7 @@ public final class WispSession: @unchecked Sendable {
         // 4. System audio capture (Process Tap). Pipeline is built lazily
         //    when the first buffer arrives — we don't know the tap's format
         //    until then.
-        let sysWavURL = systemWavURL
+        let sysOggURL = systemOggURL
         let localeLocal = locale
         let onLogLocal = onLog
         let sysStateRef = sysState
@@ -273,7 +273,7 @@ public final class WispSession: @unchecked Sendable {
                             let pipeline = try await TranscriptionPipeline(
                                 label: "SYS",
                                 sourceFormat: format,
-                                wavURL: sysWavURL,
+                                oggURL: sysOggURL,
                                 locale: localeLocal,
                                 onResult: { pipelineResult in
                                     onResultLocal(Result(

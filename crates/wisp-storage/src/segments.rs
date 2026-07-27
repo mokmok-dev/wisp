@@ -128,8 +128,8 @@ mod tests {
             .create(&NewSession {
                 started_at: Utc.with_ymd_and_hms(2026, 5, 28, 10, 0, 0).unwrap(),
                 title: "test".into(),
-                mic_wav_path: "s/mic.wav".into(),
-                system_wav_path: "s/system.wav".into(),
+                mic_wav_path: "s/mic.ogg".into(),
+                system_wav_path: "s/system.ogg".into(),
             })
             .expect("create session")
     }

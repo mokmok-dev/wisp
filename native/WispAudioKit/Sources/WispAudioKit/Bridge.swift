@@ -197,7 +197,7 @@ private func unbox(_ p: OpaquePointer?) -> SessionHandle? {
 ///
 /// On failure returns `nil`; the error is not stored because there is no
 /// handle to hold it. Errors are limited to output-directory setup (including
-/// refusing to overwrite an existing WAV file) and "input pointer was NULL".
+/// refusing to overwrite an existing Ogg file) and "input pointer was NULL".
 @_cdecl("wisp_session_new")
 public func wisp_session_new(
     output_dir: UnsafePointer<CChar>?,

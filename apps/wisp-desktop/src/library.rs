@@ -45,7 +45,7 @@ pub fn session_dir_name(started_at: DateTime<Utc>) -> String {
 }
 
 /// Create a new session row. `dir_name` is the per-session subdirectory
-/// passed to the Swift audio kit beneath the `recordings` directory. WAV
+/// passed to the Swift audio kit beneath the `recordings` directory. Ogg/Opus
 /// paths are stored relative to the storage root, as required by
 /// `wisp_core::Session`.
 pub fn create_session(
@@ -53,8 +53,8 @@ pub fn create_session(
     started_at: DateTime<Utc>,
     dir_name: &str,
 ) -> Result<SessionId, StorageError> {
-    let mic_rel = format!("recordings/{dir_name}/mic.wav");
-    let sys_rel = format!("recordings/{dir_name}/system.wav");
+    let mic_rel = format!("recordings/{dir_name}/mic.ogg");
+    let sys_rel = format!("recordings/{dir_name}/system.ogg");
     storage.sessions().create(&NewSession {
         started_at,
         title: default_title(started_at),
@@ -169,11 +169,11 @@ mod tests {
         let output_dir = storage_root.join("recordings").join(&dir_name);
         assert_eq!(
             storage_root.join(&session.mic_wav_path),
-            output_dir.join("mic.wav")
+            output_dir.join("mic.ogg")
         );
         assert_eq!(
             storage_root.join(&session.system_wav_path),
-            output_dir.join("system.wav")
+            output_dir.join("system.ogg")
         );
         assert_eq!(session.started_at, started_at);
     }

@@ -59,4 +59,4 @@ unused = { level = "deny", priority = -1 }
 
 [workspace.package]
 edition = "2024"
-version = "0.0.13"
+version = "0.0.14"

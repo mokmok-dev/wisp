@@ -488,6 +488,19 @@ mod imp {
             unsafe { sys::wisp_session_has_started_capture(self.handle.as_ptr()) != 0 }
         }
 
+        /// Replace microphone samples with silence while system capture keeps
+        /// running. The audio timelines remain continuous and aligned.
+        pub fn set_microphone_muted(
+            &self,
+            muted: bool,
+        ) {
+            // SAFETY: handle is non-null and the Swift side stores this flag
+            // behind a lock shared with the microphone callback.
+            unsafe {
+                sys::wisp_session_set_microphone_muted(self.handle.as_ptr(), i32::from(muted));
+            }
+        }
+
         /// Stop the session and wait for buffered results to drain. Blocks.
         /// Idempotent — safe to call multiple times.
         pub fn stop(&self) {
@@ -720,6 +733,22 @@ mod imp {
             }
         }
 
+        /// Whether microphone capture reached the running state.
+        #[must_use]
+        pub fn has_started_capture(&self) -> bool {
+            self.is_running.load(Ordering::SeqCst)
+        }
+
+        /// Suppress microphone recognition results while muted.
+        pub fn set_microphone_muted(
+            &self,
+            muted: bool,
+        ) {
+            if let Some(speech) = &self.speech {
+                speech.microphone_muted.store(muted, Ordering::SeqCst);
+            }
+        }
+
         /// Stop the session. Idempotent.
         pub fn stop(&self) {
             if !self.is_running.swap(false, Ordering::SeqCst) {
@@ -805,6 +834,7 @@ mod imp {
         recognizer: SpeechRecognizer,
         session: SpeechContinuousRecognitionSession,
         result_token: i64,
+        microphone_muted: Arc<AtomicBool>,
     }
 
     impl WindowsSpeechSession {
@@ -813,6 +843,7 @@ mod imp {
             sender: channel::Sender<Event>,
             is_running: Arc<AtomicBool>,
         ) -> Result<Self> {
+            let microphone_muted = Arc::new(AtomicBool::new(false));
             let language = Language::CreateLanguage(&HSTRING::from(locale))
                 .map_err(|err| SessionError::Start(err.to_string()))?;
             let recognizer = SpeechRecognizer::Create(&language)
@@ -845,11 +876,15 @@ mod imp {
             let handler_sender = sender;
             let handler_running = is_running.clone();
             let handler_segment_id = segment_id;
+            let handler_muted = microphone_muted.clone();
             let handler = TypedEventHandler::<
                 SpeechContinuousRecognitionSession,
                 SpeechContinuousRecognitionResultGeneratedEventArgs,
             >::new(move |_session, args| {
                 if !handler_running.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                if handler_muted.load(Ordering::SeqCst) {
                     return Ok(());
                 }
                 let Some(args) = args.as_ref() else {
@@ -893,6 +928,7 @@ mod imp {
                 recognizer,
                 session,
                 result_token,
+                microphone_muted,
             })
         }
 
@@ -983,6 +1019,13 @@ mod imp {
         #[must_use]
         pub fn has_started_capture(&self) -> bool {
             false
+        }
+
+        /// No-op on unsupported targets.
+        pub fn set_microphone_muted(
+            &self,
+            _muted: bool,
+        ) {
         }
 
         /// No-op on non-macOS targets.

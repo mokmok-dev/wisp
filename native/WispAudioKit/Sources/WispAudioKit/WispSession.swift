@@ -51,6 +51,7 @@ public final class WispSession: @unchecked Sendable {
 
     private var configChangeObserver: NSObjectProtocol?
     private let micEngineLock = OSAllocatedUnfairLock<Void>(initialState: ())
+    private let microphoneMuted = OSAllocatedUnfairLock<Bool>(initialState: false)
 
     private enum SysState {
         case idle
@@ -85,6 +86,23 @@ public final class WispSession: @unchecked Sendable {
     /// audio/transcription that must be finalised rather than discarded.
     public var hasStartedCapture: Bool {
         micEngineLock.withLock { engine != nil }
+    }
+
+    /// Replace microphone samples with silence while keeping the microphone
+    /// and system-audio timelines aligned.
+    public func setMicrophoneMuted(_ muted: Bool) {
+        let changed = microphoneMuted.withLock { current in
+            guard current != muted else { return false }
+            current = muted
+            return true
+        }
+        if changed {
+            onLog(muted ? "[MIC] muted" : "[MIC] unmuted")
+        }
+    }
+
+    public var isMicrophoneMuted: Bool {
+        microphoneMuted.withLock { $0 }
     }
 
     public init(
@@ -318,12 +336,13 @@ public final class WispSession: @unchecked Sendable {
 
     private func installMicTap(on engine: AVAudioEngine, pipeline: TranscriptionPipeline) {
         let format = engine.inputNode.outputFormat(forBus: 0)
+        let mutedState = microphoneMuted
         engine.inputNode.installTap(
             onBus: 0,
             bufferSize: 4096,
             format: format
         ) { buffer, _ in
-            pipeline.push(buffer)
+            pipeline.push(buffer, muted: mutedState.withLock { $0 })
         }
     }
 

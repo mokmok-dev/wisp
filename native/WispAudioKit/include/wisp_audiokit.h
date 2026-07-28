@@ -74,6 +74,10 @@ int32_t wisp_session_start(WispSession* session);
  * output must be preserved. */
 int32_t wisp_session_has_started_capture(WispSession* session);
 
+/* Replace microphone samples with silence while leaving system capture and
+ * both recording timelines running. Pass non-zero to mute, zero to unmute. */
+void wisp_session_set_microphone_muted(WispSession* session, int32_t muted);
+
 /* Stop capture and wait for results to drain. Blocks when called outside a
  * Wisp callback. A reentrant call from this session's result/log callback
  * requests stop and returns immediately so that callback can unwind; a

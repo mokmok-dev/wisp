@@ -110,26 +110,48 @@ public final class TranscriptionPipeline: @unchecked Sendable {
     /// Push one audio buffer from the source. Queues it for Ogg/Opus encoding
     /// and feeds the analyzer (resampling/format-converting on the fly).
     /// Safe to call from audio callback threads.
-    public func push(_ buffer: AVAudioPCMBuffer) {
+    public func push(_ buffer: AVAudioPCMBuffer, muted: Bool = false) {
+        let input: AVAudioPCMBuffer
+        if muted {
+            guard let silence = AVAudioPCMBuffer(
+                pcmFormat: buffer.format,
+                frameCapacity: buffer.frameLength
+            ) else { return }
+            silence.frameLength = buffer.frameLength
+            let buffers = UnsafeMutableAudioBufferListPointer(silence.mutableAudioBufferList)
+            for audioBuffer in buffers where audioBuffer.mDataByteSize > 0 {
+                if let data = audioBuffer.mData {
+                    data.initializeMemory(
+                        as: UInt8.self,
+                        repeating: 0,
+                        count: Int(audioBuffer.mDataByteSize)
+                    )
+                }
+            }
+            input = silence
+        } else {
+            input = buffer
+        }
+
         // 1. Ogg/Opus. The recorder copies into a bounded queue; codec and
         // file I/O stay off the real-time callback thread.
-        recorder.push(buffer)
+        recorder.push(input)
 
         // 2. Resample to analyzer format
         let (sourceFormat, converter): (AVAudioFormat, AVAudioConverter) =
             converterLock.withLock { ($0.sourceFormat, $0.converter) }
 
-        guard buffer.format.sampleRate == sourceFormat.sampleRate,
-              buffer.format.channelCount == sourceFormat.channelCount
+        guard input.format.sampleRate == sourceFormat.sampleRate,
+              input.format.channelCount == sourceFormat.channelCount
         else {
             wispLog(
-                "[\(label)] dropping buffer with stale format sr=\(buffer.format.sampleRate) ch=\(buffer.format.channelCount) (expected sr=\(sourceFormat.sampleRate) ch=\(sourceFormat.channelCount))"
+                "[\(label)] dropping buffer with stale format sr=\(input.format.sampleRate) ch=\(input.format.channelCount) (expected sr=\(sourceFormat.sampleRate) ch=\(sourceFormat.channelCount))"
             )
             return
         }
 
         let ratio = analyzerFormat.sampleRate / sourceFormat.sampleRate
-        let outCapacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up))
+        let outCapacity = AVAudioFrameCount((Double(input.frameLength) * ratio).rounded(.up))
         guard outCapacity > 0,
               let converted = AVAudioPCMBuffer(
                   pcmFormat: analyzerFormat,
@@ -149,7 +171,7 @@ public final class TranscriptionPipeline: @unchecked Sendable {
                 }
                 consumed.value = true
                 outStatus.pointee = .haveData
-                return buffer
+                return input
             }
         )
         if let convertError {

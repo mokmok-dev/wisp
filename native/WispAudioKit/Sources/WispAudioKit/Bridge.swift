@@ -292,6 +292,16 @@ public func wisp_session_has_started_capture(session: OpaquePointer?) -> Int32 {
     return handle.session.hasStartedCapture ? 1 : 0
 }
 
+/// Enable or disable microphone samples without affecting system capture.
+@_cdecl("wisp_session_set_microphone_muted")
+public func wisp_session_set_microphone_muted(
+    session: OpaquePointer?,
+    muted: Int32
+) {
+    guard let handle = unbox(session) else { return }
+    handle.session.setMicrophoneMuted(muted != 0)
+}
+
 /// Stop capture and wait for results to drain. Blocks until done, except for
 /// a reentrant call from this session's callback: that call suppresses future
 /// callbacks, initiates stop, and returns so the current callback can unwind.

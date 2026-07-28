@@ -32,6 +32,7 @@ use crate::transcript_export::{self, suggested_export_name};
 pub struct TranscriptView {
     pub app: gpui::Entity<AppModel>,
     pub on_toggle_record: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
+    pub on_toggle_microphone_mute: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
     /// Request a permission. Fires the OS prompt asynchronously; the
     /// resulting status flows back into the model.
     pub on_request_permission:
@@ -131,6 +132,7 @@ impl Render for TranscriptView {
         let active_idx = app.active_segment_index();
         let active_text_len = active_idx.map(|i| app.segments[i].text.len());
         let state = app.state;
+        let microphone_muted = app.microphone_muted;
         let log_count = app.recent_log.len();
         let last_error = app.last_error.clone();
         let viewed_session = app.viewed_session.clone();
@@ -148,6 +150,7 @@ impl Render for TranscriptView {
                     .and_then(|id| library.iter().find(|s| s.id == id).map(|s| s.title.clone()));
                 self.render_live_session(
                     state,
+                    microphone_muted,
                     model,
                     segment_count,
                     log_count,
@@ -227,6 +230,7 @@ impl TranscriptView {
     fn render_live_session(
         &self,
         state: SessionState,
+        microphone_muted: bool,
         model: Entity<AppModel>,
         segment_count: usize,
         log_count: usize,
@@ -241,7 +245,13 @@ impl TranscriptView {
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text_primary())
-            .child(self.render_live_top_bar(state, model.clone(), &export_name, cx))
+            .child(self.render_live_top_bar(
+                state,
+                microphone_muted,
+                model.clone(),
+                &export_name,
+                cx,
+            ))
             .child(render_transcript(
                 self.transcript_list.clone(),
                 model,
@@ -250,6 +260,7 @@ impl TranscriptView {
             ))
             .child(render_status_bar(
                 state,
+                microphone_muted,
                 segment_count,
                 log_count,
                 last_error,
@@ -330,11 +341,13 @@ impl TranscriptView {
     fn render_live_top_bar(
         &self,
         state: SessionState,
+        microphone_muted: bool,
         model: Entity<AppModel>,
         export_name: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let toggle = self.on_toggle_record.clone();
+        let toggle_mute = self.on_toggle_microphone_mute.clone();
         let on_back = self.on_back_to_library.clone();
         let (has_unsettled_session, pending_persistence) = {
             let app = model.read(cx);
@@ -345,6 +358,16 @@ impl TranscriptView {
             leading = leading.child(render_back_button("library-back-live", on_back));
         }
         leading = leading.child(render_brand());
+        let mut actions = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(render_transcript_actions(model, export_name, cx));
+        if matches!(state, SessionState::Recording { .. }) {
+            actions = actions.child(render_microphone_mute_button(microphone_muted, toggle_mute));
+        }
+        actions = actions.child(render_record_button(state, pending_persistence, toggle));
+
         div()
             .h(px(56.0))
             .flex()
@@ -354,14 +377,7 @@ impl TranscriptView {
             .border_b_1()
             .border_color(theme::border())
             .child(leading)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(render_transcript_actions(model, export_name, cx))
-                    .child(render_record_button(state, pending_persistence, toggle)),
-            )
+            .child(actions)
     }
 
     fn render_history_top_bar(
@@ -871,6 +887,33 @@ fn render_record_button(
     button
 }
 
+fn render_microphone_mute_button(
+    muted: bool,
+    on_click: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
+) -> impl IntoElement {
+    let (label, dot_color) = if muted {
+        ("Unmute mic", theme::record_red())
+    } else {
+        ("Mute mic", theme::mic_accent())
+    };
+    div()
+        .id(ElementId::Name("microphone-mute-button".into()))
+        .flex()
+        .items_center()
+        .gap_2()
+        .px(px(12.0))
+        .py(px(7.0))
+        .rounded_full()
+        .bg(theme::record_idle())
+        .text_color(theme::text_primary())
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .child(div().size(px(8.0)).rounded_full().bg(dot_color))
+        .child(label)
+        .on_click(move |_event, window, cx| on_click(window, cx))
+}
+
 fn render_transcript(
     list_state: ListState,
     model: Entity<AppModel>,
@@ -1335,6 +1378,7 @@ fn render_count_status_bar(text: String) -> impl IntoElement {
 
 fn render_status_bar(
     state: SessionState,
+    microphone_muted: bool,
     segment_count: usize,
     log_count: usize,
     last_error: Option<&AppError>,
@@ -1344,9 +1388,14 @@ fn render_status_bar(
         SessionState::Starting => (theme::text_tertiary(), "Starting…".to_string()),
         SessionState::Recording { started_at } => {
             let secs = started_at.elapsed().as_secs();
+            let mic_status = if microphone_muted {
+                " · Mic muted"
+            } else {
+                ""
+            };
             (
                 theme::record_red(),
-                format!("Recording · {:02}:{:02}", secs / 60, secs % 60),
+                format!("Recording{mic_status} · {:02}:{:02}", secs / 60, secs % 60),
             )
         },
         SessionState::Stopping => (theme::text_tertiary(), "Stopping…".to_string()),

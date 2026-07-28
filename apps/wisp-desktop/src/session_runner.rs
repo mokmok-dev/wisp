@@ -38,6 +38,7 @@ pub enum Command {
         config: SessionConfig,
         session: SessionStart,
     },
+    SetMicrophoneMuted(bool),
     Stop,
     Shutdown,
 }
@@ -102,6 +103,14 @@ impl SessionRunner {
 
     pub fn stop(&self) {
         let _ = self.cmd_tx.send(Command::Stop);
+    }
+
+    #[must_use]
+    pub fn set_microphone_muted(
+        &self,
+        muted: bool,
+    ) -> bool {
+        self.cmd_tx.send(Command::SetMicrophoneMuted(muted)).is_ok()
     }
 
     /// Drain everything the worker has produced since the last poll, without
@@ -177,7 +186,8 @@ fn worker_loop(
             }) => {
                 run_session(&output_dir, config, session, cmd_rx, update_tx);
             },
-            Ok(Command::Stop) => {}, // no-op, nothing running
+            Ok(Command::SetMicrophoneMuted(_)) => {}, // no-op, nothing running
+            Ok(Command::Stop) => {},                  // no-op, nothing running
             Ok(Command::Shutdown) | Err(_) => return,
         }
     }
@@ -231,6 +241,9 @@ fn run_session(
     loop {
         match cmd_rx.try_recv() {
             Ok(Command::Stop) => break,
+            Ok(Command::SetMicrophoneMuted(muted)) => {
+                session.set_microphone_muted(muted);
+            },
             Ok(Command::Shutdown) | Err(TryRecvError::Disconnected) => {
                 session.stop();
                 let _ = update_tx.send(Update::Stopped { session_id });

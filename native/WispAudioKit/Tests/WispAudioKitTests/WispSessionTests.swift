@@ -23,6 +23,18 @@ final class WispSessionTests: XCTestCase {
         }
     }
 
+    func testMicrophoneMuteCanBeToggledBeforeStart() throws {
+        let outputDir = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: outputDir) }
+        let session = try WispSession(outputDir: outputDir, onResult: { _ in })
+
+        XCTAssertFalse(session.isMicrophoneMuted)
+        session.setMicrophoneMuted(true)
+        XCTAssertTrue(session.isMicrophoneMuted)
+        session.setMicrophoneMuted(false)
+        XCTAssertFalse(session.isMicrophoneMuted)
+    }
+
     func testStartAfterPreStartStopIsRejectedWithoutRequestingPermissions() async throws {
         let outputDir = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: outputDir) }

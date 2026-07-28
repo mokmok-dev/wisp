@@ -294,6 +294,8 @@ impl Segment {
 #[derive(Debug)]
 pub struct AppModel {
     pub state: SessionState,
+    /// Whether live microphone samples are currently replaced with silence.
+    pub microphone_muted: bool,
     pub view: View,
     pub segments: Vec<Segment>,
     /// All persisted sessions, newest first. Populated on launch and
@@ -367,6 +369,7 @@ impl AppModel {
     pub fn new() -> Self {
         Self {
             state: SessionState::Idle,
+            microphone_muted: false,
             view: View::Library,
             segments: Vec::new(),
             library: Vec::new(),
@@ -434,6 +437,7 @@ impl AppModel {
             return;
         }
         self.view = View::Library;
+        self.microphone_muted = false;
         self.segments.clear();
         self.viewed_session = None;
         self.current_session_id = None;
@@ -454,6 +458,7 @@ impl AppModel {
         }
         self.view = View::LiveSession;
         self.state = SessionState::Idle;
+        self.microphone_muted = false;
         self.segments.clear();
         self.viewed_session = None;
         self.current_session_id = None;
@@ -478,6 +483,7 @@ impl AppModel {
         self.view = View::History {
             session_id: session.id,
         };
+        self.microphone_muted = false;
         self.segments = segments;
         self.viewed_session = Some(session);
         self.current_session_id = None;
@@ -503,6 +509,7 @@ impl AppModel {
         }
         self.show_new_session();
         self.state = SessionState::Starting;
+        self.microphone_muted = false;
         true
     }
 
@@ -517,6 +524,9 @@ impl AppModel {
         state: SessionState,
     ) {
         self.state = state;
+        if matches!(state, SessionState::Idle | SessionState::Failed) {
+            self.microphone_muted = false;
+        }
     }
 
     pub fn fail<E>(
@@ -527,6 +537,7 @@ impl AppModel {
     {
         self.last_error = Some(error.into());
         self.state = SessionState::Failed;
+        self.microphone_muted = false;
         self.finalize_all_segments();
     }
 

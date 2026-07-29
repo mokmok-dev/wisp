@@ -68,6 +68,23 @@ nix develop
 cargo run -p wisp-desktop
 ```
 
+The local MCP bridge can also be built reproducibly with
+[Crane](https://github.com/ipetkov/crane):
+
+```bash
+nix build .#wisp-mcp
+./result/bin/wisp-mcp
+
+# Run the Crane-backed formatting, lint, test, and package checks
+nix flake check
+```
+
+Crane can cross-compile both Windows executables from a Linux Nix host:
+
+```bash
+nix build .#wisp-windows
+```
+
 If you'd rather use Rust + Xcode directly:
 
 ```bash

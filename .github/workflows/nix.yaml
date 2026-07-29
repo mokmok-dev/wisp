@@ -18,4 +18,5 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-nix
       - uses: DeterminateSystems/flake-checker-action@de924abd783455e8429c858962b9e43062d19da1 # v13
-      - run: nix develop .#ci --quiet --command nixfmt --check flake.nix
+      - run: nix develop .#ci --quiet --command nixfmt --check flake.nix nix
+      - run: nix flake check --print-build-logs

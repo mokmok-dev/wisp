@@ -57,6 +57,9 @@ unsafe_code = "deny"
 future_incompatible = { level = "deny", priority = -1 }
 unused = { level = "deny", priority = -1 }
 
+[workspace.metadata.crane]
+name = "wisp"
+
 [workspace.package]
 edition = "2024"
 version = "0.0.15"

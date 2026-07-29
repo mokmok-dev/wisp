@@ -1,4 +1,6 @@
 /target
+/result
+/result-*
 native/**/.build/
 native/**/build/
 native/**/.swiftpm/

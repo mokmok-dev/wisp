@@ -576,7 +576,7 @@ impl TranscriptView {
                         div()
                             .text_xs()
                             .text_color(theme::text_tertiary())
-                            .child("Use Windows speech for the OS mic path, or a local model for WASAPI mic + system audio."),
+                            .child("Windows platform dictation is online. Both options record WASAPI mic + system audio locally."),
                     )
                     .child(
                         div()

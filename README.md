@@ -1,20 +1,22 @@
 # Wisp
 
-**A fully offline recording & transcription desktop app.**
+**A privacy-first recording & transcription desktop app.**
 
-Wisp captures your microphone and system audio (the other side of a call) at the same time and transcribes both on-device. Audio and text never leave your machine.
+Wisp captures your microphone and system audio (the other side of a call) at the same time. macOS transcription runs on-device; Windows local transcription is under development.
 
 > macOS 26 (Tahoe) is the primary supported target. Windows support is in
-> preview with `Windows.Media.SpeechRecognition` and local-model setup wiring.
+> preview: WASAPI recording stays local, while the optional
+> `Windows.Media.SpeechRecognition` free-form dictation route uses Microsoft's
+> online service. Local-model transcription wiring is in progress.
 > Linux support is coming soon.
 
 ---
 
 ## Features
 
-- **Fully offline** — Audio and transcripts stay on your device. Wisp works with Wi-Fi turned off.
-- **On-device transcription** — Uses [`SpeechAnalyzer`](https://developer.apple.com/documentation/speech), the new API in Apple's Speech framework on macOS. Windows preview builds can use `Windows.Media.SpeechRecognition` or prepare a local model from setup.
-- **System audio + microphone capture** — Uses macOS 14.4+ [Core Audio Process Taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps) to tap meeting-app output without prompts, mixes it with your mic input, and merges both sides into a single transcript. Windows local-model work is structured around WASAPI mic + loopback capture.
+- **Offline-first** — macOS audio and transcripts stay on your device. Windows WASAPI recordings are local; fully local Windows transcription is the next integration step.
+- **On-device transcription on macOS** — Uses [`SpeechAnalyzer`](https://developer.apple.com/documentation/speech), the new API in Apple's Speech framework. Windows' optional platform dictation backend is online.
+- **System audio + microphone capture** — Uses macOS 14.4+ [Core Audio Process Taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps). Windows uses WASAPI shared-mode mic + system loopback capture and stores each source as Ogg/Opus.
 - **Built in Rust with a GPU-rendered UI** — The UI is built on [GPUI](https://www.gpui.rs/), the framework that powers the [Zed](https://zed.dev/) editor. Native-feeling responsiveness and smooth scrolling.
 - **Simple local storage** — Recordings are stored as Ogg/Opus and metadata as SQLite under `~/Library/Application Support/dev.mokmok.wisp/`. Easy to export and analyze later.
 
@@ -50,7 +52,7 @@ Microphone input ───────┘        │                            
 
 - **macOS 26 (Tahoe)** — Wisp relies on `SpeechAnalyzer`, Core Audio Process Taps, and the new Metal Toolchain, so macOS 26 is required for now.
 - **Xcode 26** — for the Swift 6.0 / macOS 26 SDK.
-- **Windows 10/11 preview** — uses `Windows.Media.SpeechRecognition` for the platform recognizer route and offers a setup route to download a local Whisper-family model under `%APPDATA%\dev.mokmok.wisp\models`.
+- **Windows 10/11 preview** — records WASAPI mic + loopback audio locally. The optional `Windows.Media.SpeechRecognition` dictation route requires network access and MSIX package identity; setup can download a local Whisper-family model under `%APPDATA%\dev.mokmok.wisp\models`.
 - **Rust 1.96** — pinned in `rust-toolchain.toml`.
 - Microphone and system-audio recording permissions. macOS will prompt on first launch.
 
@@ -108,7 +110,7 @@ MCP hosts should run the bundled `wisp-mcp` binary over stdio, for example `/App
 
 ## Roadmap
 
-- [ ] **Windows support** — preview setup and `Windows.Media.SpeechRecognition` route are in place; WASAPI loopback + local-model transcription is the remaining hardening path.
+- [ ] **Windows support** — WASAPI mic + loopback Ogg/Opus recording is in place; connecting the same PCM stream to local-model transcription is the remaining core path.
 - [ ] **Linux support** — exploring PipeWire monitor sources paired with a local Whisper-family model.
 - [x] Copy transcript to clipboard (plain text) and export as Markdown (`.md`) with a lightweight, CloudEvents-inspired YAML frontmatter envelope (`id`, `type`, `source`, `time`, `subject`, …).
 - [ ] Export to SRT / JSON.

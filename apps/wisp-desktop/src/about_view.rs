@@ -48,7 +48,7 @@ impl Render for AboutView {
                 div()
                     .text_sm()
                     .text_color(rgb(0x5c_606b))
-                    .child("Fully offline meeting transcription for macOS and Windows preview."),
+                    .child("On-device transcription on macOS; local Windows recording preview."),
             )
             .child(div().flex_grow())
             .child(

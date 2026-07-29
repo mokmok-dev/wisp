@@ -1,13 +1,22 @@
 //! Safe Rust wrapper over Wisp's platform audio/transcription backends.
 //!
-//! macOS is backed by the Swift `WispAudioKit` framework. Windows exposes
-//! setup/configuration for `Windows.Media.SpeechRecognition` and local-model
-//! transcription; unsupported platforms keep a stub so the workspace stays
-//! buildable.
+//! macOS is backed by the Swift `WispAudioKit` framework. Windows records
+//! WASAPI microphone and system-loopback audio as Ogg/Opus and exposes setup
+//! for platform or local-model transcription; unsupported platforms keep a
+//! stub so the workspace stays buildable.
 
 mod error;
+#[cfg(any(test, target_os = "windows"))]
+mod ogg_opus_recorder;
+#[cfg(target_os = "windows")]
+mod wasapi_capture;
 
 pub use error::{Result, SessionError, SetupError, SetupResult};
+#[cfg(target_os = "windows")]
+pub use wasapi_capture::{
+    WASAPI_CHANNELS, WASAPI_SAMPLE_RATE, WasapiCapture, WasapiCaptureEvent, WasapiPcmChunk,
+    WasapiRecording,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -49,8 +58,9 @@ impl PermissionStatus {
 pub enum RecognizerBackend {
     /// Use the OS-provided speech recognizer for the current platform.
     ///
-    /// macOS maps this to `SpeechAnalyzer`. Windows maps this to
-    /// `Windows.Media.SpeechRecognition`, which uses the OS microphone path.
+    /// macOS maps this to `SpeechAnalyzer`. Windows maps this to the online
+    /// dictation grammar in `Windows.Media.SpeechRecognition`, which uses the
+    /// OS microphone path while WASAPI records both local audio sources.
     Platform,
     /// Use a downloaded local model. On Windows this is the path intended
     /// for WASAPI mic + loopback PCM so both sides of the call can be
@@ -620,13 +630,13 @@ mod imp {
         SpeechContinuousRecognitionSession, SpeechRecognitionResultStatus,
         SpeechRecognitionScenario, SpeechRecognitionTopicConstraint, SpeechRecognizer,
     };
-    use windows::core::{HSTRING, Interface};
+    use windows::core::HSTRING;
     use wisp_core::SourceLabel;
 
     use crate::error::{Result, SessionError};
     use crate::{
         LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SessionConfig,
-        local_model_status,
+        WasapiRecording, local_model_status,
     };
 
     /// `WispAudioKit` library version.
@@ -666,17 +676,18 @@ mod imp {
         Log(String),
     }
 
-    /// Windows session backed by `Windows.Media.SpeechRecognition`.
+    /// Windows capture and transcription session.
     ///
-    /// The platform recognizer path uses the OS microphone recognition
-    /// session. The local-model path preflights model installation and is
-    /// where WASAPI mic + loopback transcription will be wired.
+    /// Both paths record WASAPI mic + loopback streams as Ogg/Opus. The
+    /// platform path additionally uses Windows' online microphone dictation;
+    /// the local-model path is ready for offline transcription to be wired.
     pub struct Session {
         output_dir: std::path::PathBuf,
         config: SessionConfig,
         receiver: channel::Receiver<Event>,
         sender: channel::Sender<Event>,
         speech: Option<WindowsSpeechSession>,
+        recording: Option<WasapiRecording>,
         started_at: Option<Instant>,
         is_running: Arc<AtomicBool>,
     }
@@ -716,6 +727,7 @@ mod imp {
                 receiver,
                 sender,
                 speech: None,
+                recording: None,
                 started_at: None,
                 is_running: Arc::new(AtomicBool::new(false)),
             })
@@ -747,6 +759,9 @@ mod imp {
             if let Some(speech) = &self.speech {
                 speech.microphone_muted.store(muted, Ordering::SeqCst);
             }
+            if let Some(recording) = &self.recording {
+                recording.set_microphone_muted(muted);
+            }
         }
 
         /// Stop the session. Idempotent.
@@ -757,18 +772,39 @@ mod imp {
             if let Some(speech) = &self.speech {
                 speech.stop();
             }
+            if let Some(recording) = &self.recording
+                && let Err(err) = recording.stop()
+            {
+                let _ = self.sender.send(Event::Log(format!("[WIN] {err}")));
+            }
         }
 
         /// Non-blocking event poll.
         #[must_use]
         pub fn try_recv(&self) -> Option<Event> {
-            self.receiver.try_recv().ok()
+            self.receiver.try_recv().ok().or_else(|| {
+                self.recording.as_ref().and_then(|recording| {
+                    recording
+                        .try_recv_error()
+                        .map(|message| Event::Log(format!("[WIN] recording failed: {message}")))
+                })
+            })
         }
 
         /// Block until the next event arrives, or return `None` if the
         /// session has been dropped / closed.
         #[must_use]
         pub fn recv(&self) -> Option<Event> {
+            if let Some(recording) = &self.recording {
+                return channel::select! {
+                    recv(self.receiver) -> event => event.ok(),
+                    recv(recording.error_receiver()) -> message => {
+                        message
+                            .ok()
+                            .map(|message| Event::Log(format!("[WIN] recording failed: {message}")))
+                    },
+                };
+            }
             self.receiver.recv().ok()
         }
 
@@ -778,23 +814,49 @@ mod imp {
             &self,
             timeout: Duration,
         ) -> Option<Event> {
+            if let Ok(event) = self.receiver.try_recv() {
+                return Some(event);
+            }
+            if let Some(recording) = &self.recording {
+                return channel::select! {
+                    recv(self.receiver) -> event => event.ok(),
+                    recv(recording.error_receiver()) -> message => {
+                        message
+                            .ok()
+                            .map(|message| Event::Log(format!("[WIN] recording failed: {message}")))
+                    },
+                    default(timeout) => None,
+                };
+            }
             self.receiver.recv_timeout(timeout).ok()
         }
 
         fn start_windows_speech(&mut self) -> Result<()> {
-            let speech = WindowsSpeechSession::start(
+            let recording = WasapiRecording::start(&self.output_dir)?;
+            self.recording = Some(recording);
+            self.started_at = Some(Instant::now());
+            self.is_running.store(true, Ordering::SeqCst);
+            let _ = self.sender.send(Event::Log(
+                "[WIN] recording WASAPI microphone and system loopback as Ogg/Opus".into(),
+            ));
+            match WindowsSpeechSession::start(
                 &self.config.locale,
                 self.sender.clone(),
-                self.is_running.clone(),
-            )?;
-            self.speech = Some(speech);
-            self.started_at = Some(Instant::now());
-            let _ = self.sender.send(Event::Log(
-                "[WIN] Windows.Media.SpeechRecognition started for microphone input".into(),
-            ));
-            let _ = self.sender.send(Event::Log(
-                "[WIN] Select Local model after downloading it to transcribe WASAPI mic + loopback PCM".into(),
-            ));
+                &self.is_running,
+            ) {
+                Ok(speech) => {
+                    self.speech = Some(speech);
+                    let _ = self.sender.send(Event::Log(
+                        "[WIN] Windows.Media.SpeechRecognition online dictation started for microphone input".into(),
+                    ));
+                },
+                Err(err) => {
+                    self.is_running.store(true, Ordering::SeqCst);
+                    let _ = self.sender.send(Event::Log(format!(
+                        "[WIN] platform dictation unavailable ({err}); continuing with local WASAPI recording"
+                    )));
+                },
+            }
             Ok(())
         }
 
@@ -814,13 +876,23 @@ mod imp {
                     path.display()
                 )));
             }
+            let recording = WasapiRecording::start(&self.output_dir)?;
+            let mic_path = recording.mic_path().display().to_string();
+            let system_path = recording.system_path().display().to_string();
+            self.recording = Some(recording);
+            self.started_at = Some(Instant::now());
+            self.is_running.store(true, Ordering::SeqCst);
             let _ = self.sender.send(Event::Log(format!(
-                "[WIN] local model ready at {}; WASAPI local transcription is not wired yet",
+                "[WIN] recording WASAPI microphone to {mic_path}"
+            )));
+            let _ = self.sender.send(Event::Log(format!(
+                "[WIN] recording WASAPI system loopback to {system_path}"
+            )));
+            let _ = self.sender.send(Event::Log(format!(
+                "[WIN] local model ready at {}; transcription is not connected yet",
                 path.display()
             )));
-            Err(SessionError::Start(
-                "local model transcription will use WASAPI mic + loopback, but the engine is not wired in this build".into(),
-            ))
+            Ok(())
         }
     }
 
@@ -841,7 +913,7 @@ mod imp {
         fn start(
             locale: &str,
             sender: channel::Sender<Event>,
-            is_running: Arc<AtomicBool>,
+            is_running: &Arc<AtomicBool>,
         ) -> Result<Self> {
             let microphone_muted = Arc::new(AtomicBool::new(false));
             let language = Language::CreateLanguage(&HSTRING::from(locale))
@@ -855,11 +927,11 @@ mod imp {
             .map_err(|err| SessionError::Start(err.to_string()))?;
             recognizer
                 .Constraints()
-                .and_then(|constraints| constraints.Append(&constraint.cast()?))
+                .and_then(|constraints| constraints.Append(&constraint))
                 .map_err(|err| SessionError::Start(err.to_string()))?;
             let compile = recognizer
                 .CompileConstraintsAsync()
-                .and_then(|op| op.get())
+                .and_then(|op| op.join())
                 .map_err(|err| SessionError::Start(err.to_string()))?;
             if compile
                 .Status()
@@ -874,7 +946,7 @@ mod imp {
             let segment_id = Arc::new(AtomicU64::new(1));
             let started_at = Instant::now();
             let handler_sender = sender;
-            let handler_running = is_running.clone();
+            let handler_running = Arc::clone(is_running);
             let handler_segment_id = segment_id;
             let handler_muted = microphone_muted.clone();
             let handler = TypedEventHandler::<
@@ -919,7 +991,7 @@ mod imp {
             is_running.store(true, Ordering::SeqCst);
             session
                 .StartWithModeAsync(SpeechContinuousRecognitionMode::Default)
-                .and_then(|op| op.get())
+                .and_then(|op| op.join())
                 .map_err(|err| {
                     is_running.store(false, Ordering::SeqCst);
                     SessionError::Start(err.to_string())
@@ -933,7 +1005,7 @@ mod imp {
         }
 
         fn stop(&self) {
-            let _ = self.session.StopAsync().and_then(|op| op.get());
+            let _ = self.session.StopAsync().and_then(|op| op.join());
             let _ = self.session.RemoveResultGenerated(self.result_token);
             let _ = self.recognizer.Close();
         }

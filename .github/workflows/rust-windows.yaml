@@ -1,0 +1,52 @@
+name: rust-windows
+on:
+  pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".clippy.toml"
+      - ".rustfmt.toml"
+      - ".github/workflows/rust-windows.yaml"
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-rust-windows
+  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: write
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          cache-workspace-crates: "true"
+          cache-on-failure: "true"
+
+      # Keep the Windows-only WASAPI and WinRT recognizer paths type-checked;
+      # the ordinary Linux job cannot see code behind cfg(target_os).
+      - run: cargo clippy -p wisp-audiokit --all-targets -- -D warnings
+      - run: cargo test -p wisp-audiokit --all-targets
+
+      - name: Build Windows binaries
+        run: cargo build -p wisp-desktop -p wisp-mcp --release --locked
+
+      - name: Stage Windows artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/wisp-windows | Out-Null
+          Copy-Item target/release/wisp-desktop.exe dist/wisp-windows/
+          Copy-Item target/release/wisp-mcp.exe dist/wisp-windows/
+          Copy-Item README.md dist/wisp-windows/
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wisp-windows-x86_64-${{ github.sha }}
+          path: dist/wisp-windows
+          if-no-files-found: error
+          retention-days: 14

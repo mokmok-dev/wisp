@@ -37,6 +37,6 @@ serde_json = { workspace = true }
 serde_norway = { workspace = true }
 uuid = { workspace = true }
 
-# GPU-accelerated UI framework by the Zed team. macOS-only in practice;
-# Ubuntu CI excludes this crate (see .github/workflows/rust.yaml).
+# GPU-accelerated UI framework by the Zed team. Linux CI excludes this crate;
+# macOS and Windows use their platform-specific workflows.
 gpui = { workspace = true }

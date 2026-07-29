@@ -354,9 +354,12 @@ mod imp {
     pub struct SessionResult {
         pub source: SourceLabel,
         pub segment_id: u64,
+        pub is_final: bool,
         pub text: String,
         pub start_seconds: f64,
         pub end_seconds: f64,
+        pub confidence_mean: Option<f64>,
+        pub confidence_min: Option<f64>,
     }
 
     /// Either a transcription result or a log line emitted by the session.
@@ -559,10 +562,13 @@ mod imp {
     unsafe extern "C" fn on_result_thunk(
         source: i32,
         segment_id: u64,
+        is_final: i32,
         text_utf8: *const std::os::raw::c_char,
         text_len: usize,
         start_seconds: f64,
         end_seconds: f64,
+        confidence_mean: f64,
+        confidence_min: f64,
         user_data: *mut std::os::raw::c_void,
     ) {
         if user_data.is_null() {
@@ -587,9 +593,12 @@ mod imp {
         let _ = ctx.sender.send(Event::Result(SessionResult {
             source: label,
             segment_id,
+            is_final: is_final != 0,
             text,
             start_seconds,
             end_seconds,
+            confidence_mean: confidence_mean.is_finite().then_some(confidence_mean),
+            confidence_min: confidence_min.is_finite().then_some(confidence_min),
         }));
     }
 
@@ -664,9 +673,12 @@ mod imp {
     pub struct SessionResult {
         pub source: SourceLabel,
         pub segment_id: u64,
+        pub is_final: bool,
         pub text: String,
         pub start_seconds: f64,
         pub end_seconds: f64,
+        pub confidence_mean: Option<f64>,
+        pub confidence_min: Option<f64>,
     }
 
     /// Either a transcription result or a log line emitted by the session.
@@ -975,9 +987,12 @@ mod imp {
                 let _ = handler_sender.send(Event::Result(SessionResult {
                     source: SourceLabel::Mic,
                     segment_id: id,
+                    is_final: true,
                     text,
                     start_seconds: now,
                     end_seconds: now,
+                    confidence_mean: None,
+                    confidence_min: None,
                 }));
                 Ok(())
             });
@@ -1047,9 +1062,12 @@ mod imp {
     pub struct SessionResult {
         pub source: SourceLabel,
         pub segment_id: u64,
+        pub is_final: bool,
         pub text: String,
         pub start_seconds: f64,
         pub end_seconds: f64,
+        pub confidence_mean: Option<f64>,
+        pub confidence_min: Option<f64>,
     }
 
     /// Either a transcription result or a log line emitted by the session.

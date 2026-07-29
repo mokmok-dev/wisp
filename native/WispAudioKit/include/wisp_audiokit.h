@@ -36,10 +36,13 @@ typedef struct WispSession WispSession;
 typedef void (*WispResultCallback)(
     int32_t     source,         /* WISP_SOURCE_MIC or WISP_SOURCE_SYSTEM */
     uint64_t    segment_id,
+    int32_t     is_final,       /* 0=volatile, non-zero=final */
     const char* text_utf8,
     size_t      text_len,
     double      start_seconds,
     double      end_seconds,
+    double      confidence_mean, /* NAN when unavailable */
+    double      confidence_min,  /* NAN when unavailable */
     void*       user_data
 );
 

@@ -62,6 +62,23 @@ final class WispSessionTests: XCTestCase {
         capture.stop()
     }
 
+    func testResultSegmentIDsKeepVolatileAndFinalTogether() {
+        var ids = ResultSegmentIDs()
+
+        XCTAssertEqual(ids.id(isFinal: false), 1)
+        XCTAssertEqual(ids.id(isFinal: false), 1)
+        XCTAssertEqual(ids.id(isFinal: true), 1)
+        XCTAssertEqual(ids.id(isFinal: false), 2)
+        XCTAssertEqual(ids.id(isFinal: true), 2)
+    }
+
+    func testResultSegmentIDsHandleFinalOnlyResults() {
+        var ids = ResultSegmentIDs()
+
+        XCTAssertEqual(ids.id(isFinal: true), 1)
+        XCTAssertEqual(ids.id(isFinal: true), 2)
+    }
+
     func testRecorderWritesContinuousOggOpusPages() async throws {
         let outputDir = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: outputDir) }

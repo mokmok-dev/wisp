@@ -223,7 +223,8 @@ public final class WispSession: @unchecked Sendable {
         guard SpeechTranscriber.isAvailable else {
             throw PoCError.speechTranscriberUnavailable
         }
-        guard let speechLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
+        guard let speechLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale)
+        else {
             throw PoCError.unsupportedSpeechLocale(locale.identifier)
         }
         if speechLocale.identifier != locale.identifier {

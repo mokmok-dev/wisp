@@ -27,9 +27,12 @@ public final class WispSession: @unchecked Sendable {
     public struct Result: Sendable {
         public let source: Source
         public let segmentID: UInt64
+        public let isFinal: Bool
         public let text: String
         public let startSeconds: Double
         public let endSeconds: Double
+        public let confidenceMean: Double?
+        public let confidenceMin: Double?
     }
 
     public typealias OnResult = @Sendable (Result) -> Void
@@ -55,7 +58,7 @@ public final class WispSession: @unchecked Sendable {
 
     private enum SysState {
         case idle
-        case building(Task<Void, Never>)
+        case building(Task<Void, Never>, [AVAudioPCMBuffer])
         case ready(TranscriptionPipeline)
         case failed
         case stopped
@@ -215,12 +218,24 @@ public final class WispSession: @unchecked Sendable {
             throw PoCError.permissionDenied("Speech recognition (\(speechAuth.rawValue))")
         }
 
-        // 2. Ensure language model is installed (shared by both pipelines).
-        let probe = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
+        // 2. Resolve a supported regional locale and ensure its model is
+        // installed. Both pipelines must use this exact configuration.
+        guard SpeechTranscriber.isAvailable else {
+            throw PoCError.speechTranscriberUnavailable
+        }
+        guard let speechLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
+            throw PoCError.unsupportedSpeechLocale(locale.identifier)
+        }
+        if speechLocale.identifier != locale.identifier {
+            onLog(
+                "Using supported speech locale \(speechLocale.identifier) for \(locale.identifier)"
+            )
+        }
+        let probe = makeLiveSpeechTranscriber(locale: speechLocale)
         if let installReq = try await AssetInventory
             .assetInstallationRequest(supporting: [probe])
         {
-            onLog("Downloading speech model for \(locale.identifier)...")
+            onLog("Downloading speech model for \(speechLocale.identifier)...")
             try await installReq.downloadAndInstall()
             onLog("Model ready")
         }
@@ -235,14 +250,17 @@ public final class WispSession: @unchecked Sendable {
             label: "MIC",
             sourceFormat: micFormat,
             oggURL: micOggURL,
-            locale: locale,
+            locale: speechLocale,
             onResult: { pipelineResult in
                 onResultLocal(Result(
                     source: .mic,
                     segmentID: pipelineResult.segmentID,
+                    isFinal: pipelineResult.isFinal,
                     text: pipelineResult.text,
                     startSeconds: pipelineResult.startSeconds,
-                    endSeconds: pipelineResult.endSeconds
+                    endSeconds: pipelineResult.endSeconds,
+                    confidenceMean: pipelineResult.confidenceMean,
+                    confidenceMin: pipelineResult.confidenceMin
                 ))
             }
         )
@@ -267,7 +285,7 @@ public final class WispSession: @unchecked Sendable {
         //    when the first buffer arrives — we don't know the tap's format
         //    until then.
         let sysOggURL = systemOggURL
-        let localeLocal = locale
+        let localeLocal = speechLocale
         let onLogLocal = onLog
         let sysStateRef = sysState
         let systemCapture = ProcessTapCapture { buffer in
@@ -297,18 +315,26 @@ public final class WispSession: @unchecked Sendable {
                                     onResultLocal(Result(
                                         source: .system,
                                         segmentID: pipelineResult.segmentID,
+                                        isFinal: pipelineResult.isFinal,
                                         text: pipelineResult.text,
                                         startSeconds: pipelineResult.startSeconds,
-                                        endSeconds: pipelineResult.endSeconds
+                                        endSeconds: pipelineResult.endSeconds,
+                                        confidenceMean: pipelineResult.confidenceMean,
+                                        confidenceMin: pipelineResult.confidenceMin
                                     ))
                                 }
                             )
                             let accepted = sysStateRef.withLock { state in
-                                guard case .building = state else { return false }
-                                // Push before publishing .ready. A stopping
-                                // caller either waits for this whole task or
-                                // observes a fully initialized pipeline.
+                                guard case .building(_, let pending) = state else {
+                                    return false
+                                }
+                                // Preserve audio received while the analyzer
+                                // preheated. Push before publishing .ready so
+                                // callbacks cannot overtake queued buffers.
                                 pipeline.push(buffer)
+                                for queuedBuffer in pending {
+                                    pipeline.push(queuedBuffer)
+                                }
                                 state = .ready(pipeline)
                                 return true
                             }
@@ -324,8 +350,17 @@ public final class WispSession: @unchecked Sendable {
                             }
                         }
                     }
-                    state = .building(buildTask)
-                case .building, .failed, .stopped:
+                    state = .building(buildTask, [])
+                case .building(let task, var pending):
+                    // ProcessTapCapture copies every buffer before invoking
+                    // us, so retaining it beyond the IOProc callback is safe.
+                    // Bound the queue to avoid unbounded growth if model
+                    // preparation stalls unexpectedly.
+                    if pending.count < 256 {
+                        pending.append(buffer)
+                        state = .building(task, pending)
+                    }
+                case .failed, .stopped:
                     break
                 }
             }
@@ -462,7 +497,7 @@ public final class WispSession: @unchecked Sendable {
         while true {
             let action = sysState.withLock { state -> SysStopAction in
                 switch state {
-                case .building(let task):
+                case .building(let task, _):
                     return .waitForBuild(task)
                 case .ready(let pipeline):
                     state = .stopped

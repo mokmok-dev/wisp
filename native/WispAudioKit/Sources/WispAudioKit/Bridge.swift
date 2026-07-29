@@ -48,10 +48,13 @@ public func wisp_audiokit_version() -> UnsafePointer<CChar> {
 public typealias WispResultCallback = @convention(c) (
     Int32, // source: 0=mic, 1=system
     UInt64, // segment_id
+    Int32, // is_final: 0=volatile, 1=final
     UnsafePointer<CChar>?, // text_utf8
     Int, // text_len
     Double, // start_seconds
     Double, // end_seconds
+    Double, // confidence_mean; NaN when unavailable
+    Double, // confidence_min; NaN when unavailable
     UnsafeMutableRawPointer? // user_data
 ) -> Void
 
@@ -227,10 +230,13 @@ public func wisp_session_new(
                 on_result(
                     result.source.rawValue,
                     result.segmentID,
+                    result.isFinal ? 1 : 0,
                     buf.baseAddress,
                     len,
                     result.startSeconds,
                     result.endSeconds,
+                    result.confidenceMean ?? .nan,
+                    result.confidenceMin ?? .nan,
                     ud.value
                 )
             }

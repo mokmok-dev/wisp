@@ -5,6 +5,8 @@ import Foundation
 public enum PoCError: Error, CustomStringConvertible {
     case permissionDenied(String)
     case invalidLifecycle(String)
+    case speechTranscriberUnavailable
+    case unsupportedSpeechLocale(String)
     case noCompatibleFormat
     case converterCreationFailed
     case noDisplay
@@ -15,6 +17,10 @@ public enum PoCError: Error, CustomStringConvertible {
         switch self {
         case .permissionDenied(let name): "Permission denied: \(name)"
         case .invalidLifecycle(let message): "Invalid session lifecycle: \(message)"
+        case .speechTranscriberUnavailable:
+            "SpeechTranscriber is unavailable on this device"
+        case .unsupportedSpeechLocale(let locale):
+            "SpeechTranscriber does not support locale: \(locale)"
         case .noCompatibleFormat: "No compatible audio format for transcriber"
         case .converterCreationFailed: "Failed to create AVAudioConverter"
         case .noDisplay: "No display available for system audio capture"

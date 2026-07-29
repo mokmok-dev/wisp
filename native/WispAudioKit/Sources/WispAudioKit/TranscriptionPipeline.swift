@@ -13,15 +13,17 @@ public final class TranscriptionPipeline: @unchecked Sendable {
     /// One transcription update emitted to the consumer.
     ///
     /// `segmentID` is monotonically increasing per pipeline. The same ID
-    /// repeats while a partial is being revised; when the analyzer's
-    /// finalized boundary advances (i.e. `range.start` moves past the
-    /// previous result), `segmentID` ticks up to start a new segment.
+    /// repeats while a volatile result is being revised and on the matching
+    /// final result. The next result then starts a new segment.
     public struct Result: Sendable {
         public let label: String
         public let segmentID: UInt64
+        public let isFinal: Bool
         public let text: String
         public let startSeconds: Double
         public let endSeconds: Double
+        public let confidenceMean: Double?
+        public let confidenceMin: Double?
     }
 
     public typealias OnResult = @Sendable (Result) -> Void
@@ -59,8 +61,8 @@ public final class TranscriptionPipeline: @unchecked Sendable {
         self.oggURL = oggURL
         self.onResult = onResult
 
-        // SpeechTranscriber with progressive (streaming) preset
-        let transcriber = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
+        // Streaming results with audio time ranges and per-run confidence.
+        let transcriber = makeLiveSpeechTranscriber(locale: locale)
         self.transcriber = transcriber
 
         // Best format the analyzer accepts
@@ -85,21 +87,21 @@ public final class TranscriptionPipeline: @unchecked Sendable {
         let (inputStream, inputContinuation) = AsyncStream<AnalyzerInput>.makeStream()
         self.inputContinuation = inputContinuation
 
-        // Analyzer with volatile range observer. We don't act on the volatile
-        // range directly — segment finalization is tracked from the results
-        // stream below (when `range.start` advances, the current segment is
-        // done and we tick the segment ID).
-        analyzer = SpeechAnalyzer(
-            inputSequence: inputStream,
-            modules: [transcriber],
-            options: nil,
-            analysisContext: .init(),
-            volatileRangeChangedHandler: nil
-        )
+        analyzer = SpeechAnalyzer(modules: [transcriber])
 
-        // Spawn the results consumer eagerly. Idempotent because we guard on
-        // `resultsTask`.
+        // Consume results before starting analysis so even an immediately
+        // produced update has a waiting receiver. Capture is installed only
+        // after this initializer returns, so preheating cannot lose speech.
         startResultsConsumer()
+        do {
+            try await analyzer.prepareToAnalyze(in: analyzerFormat)
+            try await analyzer.start(inputSequence: inputStream)
+        } catch {
+            inputContinuation.finish()
+            await analyzer.cancelAndFinishNow()
+            resultsTask?.cancel()
+            throw error
+        }
 
         wispLog(
             "[\(label)] pipeline ready — analyzer format sr=\(analyzerFormat.sampleRate) ch=\(analyzerFormat.channelCount) fmt=\(analyzerFormat.commonFormat.rawValue)"
@@ -220,23 +222,21 @@ public final class TranscriptionPipeline: @unchecked Sendable {
         let transcriber = transcriber
         let onResult = onResult
         resultsTask = Task {
-            var lastStart: CMTime?
-            var segmentID: UInt64 = 0
+            var segmentIDs = ResultSegmentIDs()
             do {
                 for try await result in transcriber.results {
-                    // Tick the segment ID whenever the finalized boundary advances.
-                    let start = result.range.start
-                    if lastStart != start {
-                        segmentID += 1
-                        lastStart = start
-                    }
+                    let segmentID = segmentIDs.id(isFinal: result.isFinal)
+                    let confidence = transcriptionConfidence(for: result.text)
 
                     onResult(Result(
                         label: label,
                         segmentID: segmentID,
+                        isFinal: result.isFinal,
                         text: String(result.text.characters),
                         startSeconds: CMTimeGetSeconds(result.range.start),
-                        endSeconds: CMTimeGetSeconds(result.range.end)
+                        endSeconds: CMTimeGetSeconds(result.range.end),
+                        confidenceMean: confidence?.mean,
+                        confidenceMin: confidence?.min
                     ))
                 }
                 wispLog("[\(label)] results stream finished")
@@ -245,4 +245,58 @@ public final class TranscriptionPipeline: @unchecked Sendable {
             }
         }
     }
+}
+
+/// Use one configuration for the installation probe and both live pipelines.
+/// The preset supplies volatile and fast results plus time indexing; confidence
+/// is added so consumers can identify transcript chunks worth reviewing.
+func makeLiveSpeechTranscriber(locale: Locale) -> SpeechTranscriber {
+    let preset = SpeechTranscriber.Preset.timeIndexedProgressiveTranscription
+    return SpeechTranscriber(
+        locale: locale,
+        transcriptionOptions: preset.transcriptionOptions,
+        reportingOptions: preset.reportingOptions,
+        attributeOptions: preset.attributeOptions.union([.transcriptionConfidence])
+    )
+}
+
+/// Assign one stable identifier to all revisions and the final result for an
+/// utterance. A final-only result also receives its own identifier.
+struct ResultSegmentIDs {
+    private var nextID: UInt64 = 1
+    private var activeID: UInt64?
+
+    mutating func id(isFinal: Bool) -> UInt64 {
+        let id: UInt64
+        if let activeID {
+            id = activeID
+        } else {
+            id = nextID
+            nextID &+= 1
+            activeID = id
+        }
+        if isFinal {
+            activeID = nil
+        }
+        return id
+    }
+}
+
+private func transcriptionConfidence(
+    for text: AttributedString
+) -> (mean: Double, min: Double)? {
+    var weightedSum = 0.0
+    var characterCount = 0
+    var minimum = Double.greatestFiniteMagnitude
+
+    for run in text.runs {
+        guard let confidence = run.transcriptionConfidence else { continue }
+        let count = text[run.range].characters.count
+        weightedSum += confidence * Double(count)
+        characterCount += count
+        minimum = Swift.min(minimum, confidence)
+    }
+
+    guard characterCount > 0 else { return nil }
+    return (weightedSum / Double(characterCount), minimum)
 }

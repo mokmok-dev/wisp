@@ -264,8 +264,8 @@ pub struct Segment {
     pub display_text: String,
     pub start_seconds: f64,
     pub end_seconds: f64,
-    /// True once a later segment from the same source has appeared, which
-    /// means the speech engine has stopped revising this one.
+    /// True once the speech engine reports that it has stopped revising this
+    /// segment.
     pub is_final: bool,
 }
 
@@ -588,6 +588,7 @@ impl AppModel {
                 seg.text = result.text;
                 seg.start_seconds = result.start_seconds;
                 seg.end_seconds = result.end_seconds;
+                seg.is_final = result.is_final;
                 seg.refresh_display();
                 return;
             }
@@ -596,11 +597,12 @@ impl AppModel {
             // overwrite in place instead of creating a visually duplicated
             // row. Otherwise the previous segment is locked in and we push
             // a fresh one.
-            if looks_like_continuation(&seg.text, &result.text) {
+            if !seg.is_final && looks_like_continuation(&seg.text, &result.text) {
                 seg.id = result.segment_id;
                 seg.text = result.text;
                 seg.start_seconds = result.start_seconds;
                 seg.end_seconds = result.end_seconds;
+                seg.is_final = result.is_final;
                 seg.refresh_display();
                 return;
             }
@@ -614,7 +616,7 @@ impl AppModel {
             display_text: String::new(),
             start_seconds: result.start_seconds,
             end_seconds: result.end_seconds,
-            is_final: false,
+            is_final: result.is_final,
         };
         segment.refresh_display();
         self.segments.push(segment);
@@ -719,9 +721,12 @@ mod tests {
         SessionResult {
             source,
             segment_id: seg,
+            is_final: false,
             text: text.into(),
             start_seconds: 0.0,
             end_seconds: 0.0,
+            confidence_mean: None,
+            confidence_min: None,
         }
     }
 
@@ -781,6 +786,19 @@ mod tests {
         assert_eq!(m.segments[1].text, "s1");
         assert!(!m.segments[0].is_final);
         assert!(!m.segments[1].is_final);
+    }
+
+    #[test]
+    fn speech_engine_final_result_locks_segment_immediately() {
+        let mut m = AppModel::new();
+        let mut result = r(SourceLabel::Mic, 1, "final transcript");
+        result.is_final = true;
+
+        m.ingest(Event::Result(result));
+
+        assert_eq!(m.segments.len(), 1);
+        assert!(m.segments[0].is_final);
+        assert_eq!(m.active_segment_index(), None);
     }
 
     #[test]

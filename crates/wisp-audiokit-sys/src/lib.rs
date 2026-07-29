@@ -45,10 +45,13 @@ pub const WISP_PERMISSION_STATUS_RESTRICTED: i32 = 3;
 pub type WispResultCallback = unsafe extern "C" fn(
     source: i32,
     segment_id: u64,
+    is_final: i32,
     text_utf8: *const c_char,
     text_len: usize,
     start_seconds: f64,
     end_seconds: f64,
+    confidence_mean: f64,
+    confidence_min: f64,
     user_data: *mut c_void,
 );
 

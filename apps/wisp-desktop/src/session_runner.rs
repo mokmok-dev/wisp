@@ -280,9 +280,12 @@ mod tests {
         assert!(is_transcript_result(&Event::Result(SessionResult {
             source: SourceLabel::Mic,
             segment_id: 1,
+            is_final: false,
             text: "partial transcript".into(),
             start_seconds: 0.0,
             end_seconds: 1.0,
+            confidence_mean: None,
+            confidence_min: None,
         })));
     }
 }

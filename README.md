@@ -48,6 +48,34 @@ Microphone input ───────┘        │                            
                                           └─► wisp-storage (SQLite + Ogg/Opus)
 ```
 
+### Cross-platform audio boundary
+
+The Rust boundary separates OS capture from transcription:
+
+- `wisp-core` owns stable `TrackId`/`SourceKind`, device-native
+  `AudioFormat`/`AudioFrame`, `CaptureEvent`, and partial/final
+  `TranscriptEvent` contracts. The existing `SourceLabel::Mic` and
+  `SourceLabel::System` map to fixed track IDs, so storage and UI behavior stay
+  compatible while future application/process tracks remain possible.
+- `wisp-audiokit` owns capability probes, `CaptureBackend` and
+  `TranscriberBackend`, privacy-aware backend selection, and
+  `SessionOrchestrator`. An offline-required policy never selects an online
+  recognizer; when allowed, an unavailable recognizer degrades explicitly to
+  record-only.
+- Real-time capture producers use a bounded, non-blocking frame queue.
+  Overflow is reported as a `CaptureEvent` with the affected track and dropped
+  PCM frame count (not packet count). The separate control queue is also
+  bounded and cannot carry sample payloads. Microphone and system audio remain
+  separate tracks.
+- The current Swift `WispAudioKit` remains the macOS compatibility adapter.
+  Its existing `SessionResult` can be viewed as a backend-neutral
+  `TranscriptEvent`, avoiding a risky capture rewrite in the first foundation
+  change.
+
+This boundary is intentionally a foundation, not a claim that every backend is
+complete. Linux PipeWire capture, connecting Windows WASAPI frames to actual
+local-model inference, and a Nemotron transcriber adapter are follow-up work.
+
 ## Requirements
 
 - **macOS 26 (Tahoe)** — Wisp relies on `SpeechAnalyzer`, Core Audio Process Taps, and the new Metal Toolchain, so macOS 26 is required for now.
@@ -128,7 +156,8 @@ MCP hosts should run the bundled `wisp-mcp` binary over stdio, for example `/App
 ## Roadmap
 
 - [ ] **Windows support** — WASAPI mic + loopback Ogg/Opus recording is in place; connecting the same PCM stream to local-model transcription is the remaining core path.
-- [ ] **Linux support** — exploring PipeWire monitor sources paired with a local Whisper-family model.
+- [ ] **Linux support** — implement a PipeWire capture adapter and pair it with a local transcription backend.
+- [ ] **Additional local models** — evaluate and implement Nemotron behind `TranscriberBackend`; no Nemotron runtime is bundled today.
 - [x] Copy transcript to clipboard (plain text) and export as Markdown (`.md`) with a lightweight, CloudEvents-inspired YAML frontmatter envelope (`id`, `type`, `source`, `time`, `subject`, …).
 - [ ] Export to SRT / JSON.
 - [ ] Speaker diarization within a single channel.

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::{SourceKind, TrackDescriptor, TrackId};
+
 /// Which audio source produced a segment.
 ///
 /// Wisp captures the microphone and the system audio as two independent
@@ -21,6 +23,33 @@ impl SourceLabel {
         match self {
             Self::Mic => "mic",
             Self::System => "system",
+        }
+    }
+
+    /// Stable track identity used by the backend-neutral capture contracts.
+    #[must_use]
+    pub const fn track_id(self) -> TrackId {
+        match self {
+            Self::Mic => TrackId::MICROPHONE,
+            Self::System => TrackId::SYSTEM,
+        }
+    }
+
+    /// Extensible source kind corresponding to this legacy storage label.
+    #[must_use]
+    pub const fn source_kind(self) -> SourceKind {
+        match self {
+            Self::Mic => SourceKind::Microphone,
+            Self::System => SourceKind::SystemAudio,
+        }
+    }
+
+    #[must_use]
+    pub fn track_descriptor(self) -> TrackDescriptor {
+        TrackDescriptor {
+            id: self.track_id(),
+            source: self.source_kind(),
+            name: self.as_str().to_owned(),
         }
     }
 
@@ -67,5 +96,19 @@ mod tests {
     fn parse_unknown_is_none() {
         assert_eq!(SourceLabel::parse("speaker"), None);
         assert_eq!(SourceLabel::parse(""), None);
+    }
+
+    #[test]
+    fn legacy_sources_have_stable_track_contracts() {
+        assert_eq!(SourceLabel::Mic.track_id(), crate::TrackId::MICROPHONE);
+        assert_eq!(SourceLabel::System.track_id(), crate::TrackId::SYSTEM);
+        assert_eq!(
+            SourceLabel::Mic.source_kind(),
+            crate::SourceKind::Microphone
+        );
+        assert_eq!(
+            SourceLabel::System.source_kind(),
+            crate::SourceKind::SystemAudio
+        );
     }
 }

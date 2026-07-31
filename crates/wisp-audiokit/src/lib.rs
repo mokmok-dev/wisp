@@ -757,6 +757,7 @@ where
         self.try_recv_result().ok()
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn recv(&self) -> Option<T> {
         self.recv_result().ok()
     }
@@ -785,6 +786,7 @@ where
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn recv_result(&self) -> std::result::Result<T, crossbeam_channel::RecvError> {
         let mut finals_open = true;
         let mut final_gap_open = true;

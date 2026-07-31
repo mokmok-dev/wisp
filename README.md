@@ -67,10 +67,17 @@ The Rust boundary separates OS capture from transcription:
   PCM frame count (not packet count). The separate control queue is also
   bounded and cannot carry sample payloads. Microphone and system audio remain
   separate tracks.
-- The current Swift `WispAudioKit` remains the macOS compatibility adapter.
-  Its existing `SessionResult` can be viewed as a backend-neutral
-  `TranscriptEvent`, avoiding a risky capture rewrite in the first foundation
-  change.
+- macOS production capture and transcription run through concrete
+  `MacosCaptureBackend` and `MacosTranscriberBackend` adapters managed by
+  `SessionOrchestrator`. Swift sends typed mic/system PCM into the same bounded,
+  nonblocking capture queue used by native backends while retaining Ogg/Opus
+  recording. Capture PCM reaches Rust first; `MacosTranscriberBackend::push`
+  then submits only frames accepted by `SessionOrchestrator` back to
+  `SpeechAnalyzer`. `MacosCaptureBackend` also
+  has an independent recording-only constructor so another transcriber can
+  consume the exposed PCM without requesting speech permission. Transcript and
+  compatibility callbacks retain their original ordering. The legacy
+  `Session` API remains available but is no longer the macOS desktop path.
 
 This boundary is intentionally a foundation, not a claim that every backend is
 complete. Linux PipeWire capture, connecting Windows WASAPI frames to actual

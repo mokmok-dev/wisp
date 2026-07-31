@@ -1,9 +1,9 @@
-//! Owns the background OS thread that drives `wisp_audiokit::Session`.
+//! Owns the background OS thread that drives the platform audio session.
 //!
-//! The Swift side calls back into Rust from arbitrary audio threads, and
-//! `Session::start()/stop()` block while async work runs underneath. To
-//! keep the GPUI main thread responsive we run the lifecycle on a worker
-//! thread and surface everything as a stream of `Update`s the UI polls.
+//! On macOS this is the backend-neutral orchestrator facade over the Swift
+//! capture/transcription callbacks. Start/stop block while async platform work
+//! runs underneath, so the lifecycle stays on a worker thread and surfaces
+//! everything as a stream of `Update`s the UI polls.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
@@ -11,7 +11,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use wisp_audiokit::{Event, Session, SessionConfig, SessionError};
+#[cfg(target_os = "macos")]
+use wisp_audiokit::MacosSession as PlatformSession;
+#[cfg(not(target_os = "macos"))]
+use wisp_audiokit::Session as PlatformSession;
+use wisp_audiokit::{Event, SessionConfig, SessionError};
 use wisp_core::SessionId;
 
 /// How often the running session checks for UI commands (Stop / Shutdown)
@@ -45,15 +49,21 @@ pub enum Command {
 
 /// Updates the worker sends back to the UI.
 pub enum Update {
-    /// `Session::start()` returned successfully and audio is flowing.
+    /// The platform session started successfully and audio is flowing.
     Started(SessionStart),
     /// One transcription / log event from the session.
     Event { session_id: SessionId, event: Event },
-    /// `Session::stop()` returned; the session has been torn down.
+    /// The platform session stopped and has been torn down.
     Stopped { session_id: SessionId },
     /// Audio startup failed after constructing a session. Any partial capture
     /// has been stopped and its flushed events precede this update.
     StartFailed {
+        session_id: SessionId,
+        error: SessionError,
+    },
+    /// Capture/transcription failed after start; platform cleanup has already
+    /// completed and partial audio/transcript must be finalized.
+    RuntimeFailed {
         session_id: SessionId,
         error: SessionError,
     },
@@ -159,6 +169,7 @@ fn is_terminal_for(
     match update {
         Update::Stopped { session_id }
         | Update::StartFailed { session_id, .. }
+        | Update::RuntimeFailed { session_id, .. }
         | Update::Error { session_id, .. } => *session_id == expected_session_id,
         Update::Started(_) | Update::Event { .. } => false,
     }
@@ -201,7 +212,7 @@ fn run_session(
     update_tx: &Sender<Update>,
 ) {
     let session_id = session_start.session_id;
-    let mut session = match Session::new_with_config(output_dir, config) {
+    let mut session = match PlatformSession::new_with_config(output_dir, config) {
         Ok(s) => s,
         Err(e) => {
             let _ = update_tx.send(Update::Error {
@@ -245,23 +256,64 @@ fn run_session(
                 session.set_microphone_muted(muted);
             },
             Ok(Command::Shutdown) | Err(TryRecvError::Disconnected) => {
-                session.stop();
-                let _ = update_tx.send(Update::Stopped { session_id });
+                stop_and_publish(&mut session, session_id, update_tx);
                 return;
             },
             Ok(Command::Start { .. }) | Err(TryRecvError::Empty) => {},
         }
         if let Some(event) = session.recv_timeout(CMD_POLL_INTERVAL) {
+            #[cfg(target_os = "macos")]
+            let terminal_error = session.take_runtime_failure();
             let _ = update_tx.send(Update::Event { session_id, event });
+            #[cfg(target_os = "macos")]
+            if let Some(error) = terminal_error {
+                publish_runtime_failure_after_drain(
+                    || session.try_recv(),
+                    session_id,
+                    error,
+                    update_tx,
+                );
+                return;
+            }
         }
     }
 
+    stop_and_publish(&mut session, session_id, update_tx);
+}
+
+fn stop_and_publish(
+    session: &mut PlatformSession,
+    session_id: SessionId,
+    update_tx: &Sender<Update>,
+) {
     session.stop();
     // Drain whatever the analyzer flushed during stop().
     while let Some(event) = session.try_recv() {
         let _ = update_tx.send(Update::Event { session_id, event });
     }
+    #[cfg(target_os = "macos")]
+    if let Some(error) = session.take_runtime_failure() {
+        let _ = update_tx.send(Update::RuntimeFailed { session_id, error });
+        return;
+    }
     let _ = update_tx.send(Update::Stopped { session_id });
+}
+
+#[cfg(target_os = "macos")]
+fn publish_runtime_failure_after_drain(
+    mut try_recv: impl FnMut() -> Option<Event>,
+    session_id: SessionId,
+    error: SessionError,
+    update_tx: &Sender<Update>,
+) {
+    // A strict transcriber failure performs graceful native cleanup before it
+    // becomes terminal. SpeechAnalyzer may emit its last final while that
+    // cleanup is running, so publish every flushed event before the terminal
+    // update tells the UI to finalize persistence.
+    while let Some(event) = try_recv() {
+        let _ = update_tx.send(Update::Event { session_id, event });
+    }
+    let _ = update_tx.send(Update::RuntimeFailed { session_id, error });
 }
 
 fn is_transcript_result(event: &Event) -> bool {
@@ -270,9 +322,20 @@ fn is_transcript_result(event: &Event) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use std::collections::VecDeque;
+    #[cfg(target_os = "macos")]
+    use std::sync::mpsc::channel;
+
+    #[cfg(target_os = "macos")]
+    use wisp_audiokit::SessionError;
     use wisp_audiokit::{Event, SessionResult, SourceLabel};
+    #[cfg(target_os = "macos")]
+    use wisp_core::SessionId;
 
     use super::is_transcript_result;
+    #[cfg(target_os = "macos")]
+    use super::{Update, publish_runtime_failure_after_drain};
 
     #[test]
     fn only_transcript_results_require_preserving_a_failed_start() {
@@ -287,5 +350,45 @@ mod tests {
             confidence_mean: None,
             confidence_min: None,
         })));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn runtime_failure_publishes_final_flushed_during_cleanup_first() {
+        let session_id = SessionId::from(42);
+        let final_result = Event::Result(SessionResult {
+            source: SourceLabel::System,
+            segment_id: 42,
+            is_final: true,
+            text: "cleanup final".into(),
+            start_seconds: 2.0,
+            end_seconds: 3.0,
+            confidence_mean: Some(0.9),
+            confidence_min: Some(0.8),
+        });
+        let mut cleanup_events = VecDeque::from([final_result.clone()]);
+        let (tx, rx) = channel();
+
+        publish_runtime_failure_after_drain(
+            || cleanup_events.pop_front(),
+            session_id,
+            SessionError::Start("strict transcriber failure".into()),
+            &tx,
+        );
+
+        assert!(matches!(
+            rx.recv().unwrap(),
+            Update::Event {
+                session_id: actual,
+                event,
+            } if actual == session_id && event == final_result
+        ));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            Update::RuntimeFailed {
+                session_id: actual,
+                ..
+            } if actual == session_id
+        ));
     }
 }

@@ -65,6 +65,42 @@ public typealias WispLogCallback = @convention(c) (
     UnsafeMutableRawPointer? // user_data
 ) -> Void
 
+/// Callback for one interleaved Float32 PCM chunk. The sample pointer is valid
+/// only for the duration of the call; consumers must copy before returning.
+public typealias WispAudioCallback = @convention(c) (
+    Int32, // source: 0=mic, 1=system
+    UInt64, // per-source sequence
+    Double, // monotonic timestamp in seconds
+    UInt32, // sample rate
+    UInt32, // channels
+    UnsafePointer<Float>?, // interleaved samples
+    Int, // sample count
+    UnsafeMutableRawPointer? // user_data
+) -> Void
+
+/// Typed recognizer failure callback. `terminal != 0` means no more results
+/// can be produced by the platform transcriber for this session.
+public typealias WispTranscriberErrorCallback = @convention(c) (
+    Int32,
+    UnsafePointer<CChar>?,
+    Int,
+    UnsafeMutableRawPointer?
+) -> Void
+
+public typealias WispAudioOverflowCallback = @convention(c) (
+    Int32,
+    UInt64,
+    UnsafeMutableRawPointer?
+) -> Void
+
+/// Reserved terminal capture/recording failure callback.
+public typealias WispTerminalErrorCallback = @convention(c) (
+    Int32,
+    UnsafePointer<CChar>?,
+    Int,
+    UnsafeMutableRawPointer?
+) -> Void
+
 /// Boxed session handle handed to C as an opaque pointer. Holds the Swift
 /// `WispSession` plus a per-session last-error slot for the
 /// `wisp_session_last_error_message` getter.
@@ -209,6 +245,68 @@ public func wisp_session_new(
     on_log: WispLogCallback?,
     user_data: UnsafeMutableRawPointer?
 ) -> OpaquePointer? {
+    makeSessionHandle(
+        output_dir: output_dir,
+        locale: locale,
+        transcription_enabled: 1,
+        allow_record_only: 0,
+        on_result: on_result,
+        on_audio: nil,
+        on_audio_overflow: nil,
+        on_transcriber_error: nil,
+        on_terminal_error: nil,
+        on_log: on_log,
+        user_data: user_data,
+        feedsCapturedAudioDirectlyToAnalyzer: true
+    )
+}
+
+/// Versioned constructor carrying backend-neutral policy and PCM/error
+/// callbacks. Keep the original five-argument symbol ABI-stable.
+@_cdecl("wisp_session_new_v2")
+public func wisp_session_new_v2(
+    output_dir: UnsafePointer<CChar>?,
+    locale: UnsafePointer<CChar>?,
+    transcription_enabled: Int32,
+    allow_record_only: Int32,
+    on_result: WispResultCallback?,
+    on_audio: WispAudioCallback?,
+    on_audio_overflow: WispAudioOverflowCallback?,
+    on_transcriber_error: WispTranscriberErrorCallback?,
+    on_terminal_error: WispTerminalErrorCallback?,
+    on_log: WispLogCallback?,
+    user_data: UnsafeMutableRawPointer?
+) -> OpaquePointer? {
+    makeSessionHandle(
+        output_dir: output_dir,
+        locale: locale,
+        transcription_enabled: transcription_enabled,
+        allow_record_only: allow_record_only,
+        on_result: on_result,
+        on_audio: on_audio,
+        on_audio_overflow: on_audio_overflow,
+        on_transcriber_error: on_transcriber_error,
+        on_terminal_error: on_terminal_error,
+        on_log: on_log,
+        user_data: user_data,
+        feedsCapturedAudioDirectlyToAnalyzer: false
+    )
+}
+
+private func makeSessionHandle(
+    output_dir: UnsafePointer<CChar>?,
+    locale: UnsafePointer<CChar>?,
+    transcription_enabled: Int32,
+    allow_record_only: Int32,
+    on_result: WispResultCallback?,
+    on_audio: WispAudioCallback?,
+    on_audio_overflow: WispAudioOverflowCallback?,
+    on_transcriber_error: WispTranscriberErrorCallback?,
+    on_terminal_error: WispTerminalErrorCallback?,
+    on_log: WispLogCallback?,
+    user_data: UnsafeMutableRawPointer?,
+    feedsCapturedAudioDirectlyToAnalyzer: Bool
+) -> OpaquePointer? {
     guard let output_dir,
           let locale,
           let on_result
@@ -251,16 +349,133 @@ public func wisp_session_new(
             }
         }
     }
+    let onTranscriberErrorClosure: @Sendable (Bool, String) -> Void = { terminal, msg in
+        guard let on_transcriber_error else { return }
+        callbacks.invoke {
+            msg.utf8CString.withUnsafeBufferPointer { buf in
+                let len = buf.count > 0 ? buf.count - 1 : 0
+                on_transcriber_error(
+                    terminal ? 1 : 0,
+                    buf.baseAddress,
+                    len,
+                    ud.value
+                )
+            }
+        }
+    }
+    let onAudioClosure: WispSession.OnAudio? = if let callback = on_audio {
+        {
+            (
+                source: WispSession.Source,
+                sequence: UInt64,
+                timestamp: Double,
+                sampleRate: UInt32,
+                channels: UInt32,
+                samples: [Float]
+            ) in
+            callbacks.invoke {
+                samples.withUnsafeBufferPointer { buffer in
+                    callback(
+                        source.rawValue,
+                        sequence,
+                        timestamp,
+                        sampleRate,
+                        channels,
+                        buffer.baseAddress,
+                        buffer.count,
+                        ud.value
+                    )
+                }
+            }
+        }
+    } else {
+        nil
+    }
+    let onAudioOverflowClosure: WispSession.OnAudioOverflow = { source, droppedFrames in
+        guard let on_audio_overflow else { return }
+        callbacks.invoke {
+            on_audio_overflow(source.rawValue, droppedFrames, ud.value)
+        }
+    }
+    let onTerminalErrorClosure: WispSession.OnTerminalError = { source, msg in
+        guard let on_terminal_error else { return }
+        callbacks.invoke {
+            msg.utf8CString.withUnsafeBufferPointer { buf in
+                let len = buf.count > 0 ? buf.count - 1 : 0
+                on_terminal_error(source?.rawValue ?? -1, buf.baseAddress, len, ud.value)
+            }
+        }
+    }
     do {
         let session = try WispSession(
             outputDir: URL(fileURLWithPath: outputDirStr),
             locale: Locale(identifier: localeStr),
+            transcriptionEnabled: transcription_enabled != 0,
+            allowRecordOnly: allow_record_only != 0,
+            feedsCapturedAudioDirectlyToAnalyzer: feedsCapturedAudioDirectlyToAnalyzer,
             onResult: onResultClosure,
+            onAudio: onAudioClosure,
+            onAudioOverflow: onAudioOverflowClosure,
+            onTranscriberError: onTranscriberErrorClosure,
+            onTerminalError: onTerminalErrorClosure,
             onLog: onLogClosure
         )
         return box(SessionHandle(session: session, callbacks: callbacks))
     } catch {
         return nil
+    }
+}
+
+private func runThrowingSynchronously(
+    _ handle: SessionHandle,
+    operation: @escaping @Sendable () async throws -> Void
+) -> Int32 {
+    let sem = DispatchSemaphore(value: 0)
+    let errorSlot = OSAllocatedUnfairLock<String?>(initialState: nil)
+    Task.detached {
+        do {
+            try await operation()
+        } catch {
+            errorSlot.withLock { $0 = "\(error)" }
+        }
+        sem.signal()
+    }
+    sem.wait()
+    if let error = errorSlot.withLock({ $0 }) {
+        handle.setError(error)
+        return 1
+    }
+    handle.setError(nil)
+    return 0
+}
+
+private func rejectReentrantSynchronousCall(
+    _ handle: SessionHandle,
+    operation: String
+) -> Int32? {
+    guard handle.callbacks.isExecutingOnCurrentThread else { return nil }
+    handle.setError(
+        "\(operation) cannot be called synchronously from this session's callback"
+    )
+    return 2
+}
+
+/// Start capture/recording only. Speech permission and analyzer setup are
+/// deliberately owned by `wisp_session_start_transcription`.
+@_cdecl("wisp_session_start_capture")
+public func wisp_session_start_capture(session: OpaquePointer?) -> Int32 {
+    guard let handle = unbox(session) else { return -1 }
+    return runThrowingSynchronously(handle) {
+        try await handle.session.startCapture()
+    }
+}
+
+/// Configure the native platform transcriber for a running capture.
+@_cdecl("wisp_session_start_transcription")
+public func wisp_session_start_transcription(session: OpaquePointer?) -> Int32 {
+    guard let handle = unbox(session) else { return -1 }
+    return runThrowingSynchronously(handle) {
+        try await handle.session.startTranscription()
     }
 }
 
@@ -308,6 +523,121 @@ public func wisp_session_set_microphone_muted(
     handle.session.setMicrophoneMuted(muted != 0)
 }
 
+/// Submit orchestrated interleaved Float32 PCM to the platform transcriber.
+/// Returns non-zero and stores a last-error message on invalid input/setup.
+@_cdecl("wisp_session_push_transcriber_audio")
+public func wisp_session_push_transcriber_audio(
+    session: OpaquePointer?,
+    source: Int32,
+    sample_rate: UInt32,
+    channels: UInt32,
+    samples: UnsafePointer<Float>?,
+    sample_count: Int
+) -> Int32 {
+    guard let handle = unbox(session) else { return -1 }
+    if let result = rejectReentrantSynchronousCall(
+        handle,
+        operation: "wisp_session_push_transcriber_audio"
+    ) {
+        return result
+    }
+    guard let source = WispSession.Source(rawValue: source) else {
+        handle.setError("wisp_session_push_transcriber_audio: invalid source")
+        return -1
+    }
+    guard sample_rate > 0 else {
+        handle.setError("wisp_session_push_transcriber_audio: sample_rate must be positive")
+        return -1
+    }
+    guard channels > 0 else {
+        handle.setError("wisp_session_push_transcriber_audio: channels must be positive")
+        return -1
+    }
+    guard sample_count > 0 else {
+        handle.setError("wisp_session_push_transcriber_audio: sample_count must be positive")
+        return -1
+    }
+    guard sample_count.isMultiple(of: Int(channels)) else {
+        handle.setError(
+            "wisp_session_push_transcriber_audio: sample_count must contain complete frames"
+        )
+        return -1
+    }
+    guard let samples else {
+        handle.setError("wisp_session_push_transcriber_audio: samples must not be NULL")
+        return -1
+    }
+    let copied = Array(UnsafeBufferPointer(start: samples, count: sample_count))
+    let sem = DispatchSemaphore(value: 0)
+    let errorSlot = OSAllocatedUnfairLock<String?>(initialState: nil)
+    Task.detached {
+        do {
+            try await handle.session.pushTranscriberAudio(
+                source: source,
+                sampleRate: sample_rate,
+                channels: channels,
+                samples: copied
+            )
+        } catch {
+            errorSlot.withLock { $0 = "\(error)" }
+        }
+        sem.signal()
+    }
+    sem.wait()
+    if let error = errorSlot.withLock({ $0 }) {
+        handle.setError(error)
+        return 1
+    }
+    handle.setError(nil)
+    return 0
+}
+
+/// Cancel every SpeechAnalyzer in the session while capture/Ogg continue.
+@_cdecl("wisp_session_disable_transcription")
+public func wisp_session_disable_transcription(session: OpaquePointer?) -> Int32 {
+    guard let handle = unbox(session) else { return -1 }
+    if let result = rejectReentrantSynchronousCall(
+        handle,
+        operation: "wisp_session_disable_transcription"
+    ) {
+        return result
+    }
+    return runThrowingSynchronously(handle) {
+        try await handle.session.disableTranscription()
+    }
+}
+
+/// Stop capture producers and recording, but leave analyzer finalization to
+/// the transcriber lifecycle.
+@_cdecl("wisp_session_stop_capture")
+public func wisp_session_stop_capture(session: OpaquePointer?) -> Int32 {
+    guard let handle = unbox(session) else { return -1 }
+    if let result = rejectReentrantSynchronousCall(
+        handle,
+        operation: "wisp_session_stop_capture"
+    ) {
+        return result
+    }
+    return runThrowingSynchronously(handle) {
+        await handle.session.stopCapture()
+    }
+}
+
+/// Finish analyzer input after every buffered capture frame has crossed Rust.
+@_cdecl("wisp_session_finish_transcription")
+public func wisp_session_finish_transcription(session: OpaquePointer?) -> Int32 {
+    guard let handle = unbox(session) else { return -1 }
+    if let result = rejectReentrantSynchronousCall(
+        handle,
+        operation: "wisp_session_finish_transcription"
+    ) {
+        return result
+    }
+    return runThrowingSynchronously(handle) {
+        try await handle.session.finishTranscription()
+    }
+}
+
 /// Stop capture and wait for results to drain. Blocks until done, except for
 /// a reentrant call from this session's callback: that call suppresses future
 /// callbacks, initiates stop, and returns so the current callback can unwind.
@@ -326,6 +656,25 @@ public func wisp_session_stop(session: OpaquePointer?) {
         return
     }
     stopSynchronously(handle.session)
+}
+
+/// Abort capture without draining staged PCM or SpeechAnalyzer finals.
+@_cdecl("wisp_session_abort")
+public func wisp_session_abort(session: OpaquePointer?) {
+    guard let handle = unbox(session) else { return }
+    handle.callbacks.suppressFutureCallbacks()
+    if handle.callbacks.isExecutingOnCurrentThread {
+        Task.detached {
+            await handle.session.abort()
+        }
+        return
+    }
+    let sem = DispatchSemaphore(value: 0)
+    Task.detached {
+        await handle.session.abort()
+        sem.signal()
+    }
+    sem.wait()
 }
 
 private func stopSynchronously(_ session: WispSession) {

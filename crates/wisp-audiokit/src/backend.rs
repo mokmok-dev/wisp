@@ -350,6 +350,22 @@ pub trait TranscriberBackend: Send {
         &mut self,
         frame: &AudioFrame,
     ) -> BackendResult<()>;
+    /// Preserve the recognition timeline when capture reports PCM that could
+    /// not cross the bounded capture boundary.
+    ///
+    /// Backends whose recognizer derives timestamps from the submitted sample
+    /// count should insert an equivalent interval of silence. Backends with an
+    /// external clock may keep the default no-op.
+    ///
+    /// # Errors
+    /// Returns an error when the backend cannot preserve the gap.
+    fn push_gap(
+        &mut self,
+        _track_id: TrackId,
+        _dropped_frames: u64,
+    ) -> BackendResult<()> {
+        Ok(())
+    }
     /// Wait for the next transcript update.
     ///
     /// # Errors
@@ -363,7 +379,11 @@ pub trait TranscriberBackend: Send {
     /// # Errors
     /// Returns an error when finalization fails.
     fn finish(&mut self) -> BackendResult<()>;
-    fn abort(&mut self);
+    /// Cancel recognition and discard buffered results.
+    ///
+    /// # Errors
+    /// Returns an error when the native recognizer could not be disabled.
+    fn abort(&mut self) -> BackendResult<()>;
 }
 
 /// Unified event surfaced by [`SessionOrchestrator`].
@@ -435,8 +455,8 @@ impl CleanupProgress {
 
 /// Minimal synchronous coordinator shared by desktop worker implementations.
 ///
-/// Existing macOS sessions remain behind their C/Swift compatibility adapter;
-/// new Rust-native backends can implement the traits directly.
+/// macOS uses this coordinator through production adapters around its
+/// C/Swift bridge; Rust-native backends implement the same traits directly.
 pub struct SessionOrchestrator<C, T> {
     capture: C,
     transcriber: Option<T>,
@@ -477,6 +497,28 @@ where
     /// included in the returned error and remains retryable through
     /// [`Self::shutdown`] with [`ShutdownMode::Abort`].
     pub fn start(&mut self) -> BackendResult<()> {
+        self.start_inner(false).map(|_| ())
+    }
+
+    /// Start capture and retain it in record-only mode if the optional
+    /// transcriber cannot start and can be cleanly disabled.
+    ///
+    /// The returned error is the transcriber startup failure that caused the
+    /// fallback. `Ok(None)` means capture and transcription both started.
+    /// If disabling the partially-started transcriber fails, the entire
+    /// transaction is aborted and an aggregated error is returned.
+    ///
+    /// # Errors
+    /// Returns capture startup failures and failures that prevent a safe
+    /// record-only fallback.
+    pub fn start_allowing_record_only(&mut self) -> BackendResult<Option<BackendError>> {
+        self.start_inner(true)
+    }
+
+    fn start_inner(
+        &mut self,
+        retain_capture_after_transcriber_failure: bool,
+    ) -> BackendResult<Option<BackendError>> {
         if self.state != OrchestratorState::Ready {
             return Err(self.invalid_state_error("session orchestrator has already been started"));
         }
@@ -484,6 +526,48 @@ where
         if let Some(transcriber) = &mut self.transcriber {
             let tracks = self.capture.probe().capabilities.tracks;
             if let Err(start_error) = transcriber.start(&tracks) {
+                if retain_capture_after_transcriber_failure {
+                    match transcriber.abort() {
+                        Ok(()) => {
+                            self.transcriber = None;
+                            self.state = OrchestratorState::Running;
+                            return Ok(Some(start_error));
+                        },
+                        Err(disable_error) => {
+                            self.state = OrchestratorState::CleanupPending;
+                            // The fallback admission already attempted the
+                            // transcriber abort once. Abort capture now, but do
+                            // not silently retry the same failed transcriber
+                            // phase in this call: both failures must remain
+                            // visible and only unfinished phases are retried by
+                            // a later shutdown.
+                            let mut progress = CleanupProgress::failed_transcriber_start();
+                            let capture_abort = self.capture.stop(ShutdownMode::Abort);
+                            if capture_abort.is_ok() {
+                                progress.capture.stopped = true;
+                                progress.capture.drained = true;
+                            }
+                            self.cleanup = Some(progress);
+                            return match capture_abort {
+                                Ok(()) => Err(BackendError::new(
+                                    disable_error.backend.clone(),
+                                    disable_error.kind,
+                                    format!(
+                                        "transcriber start failed ({start_error}); record-only fallback failed ({disable_error})"
+                                    ),
+                                )),
+                                Err(capture_error) => Err(BackendError::new(
+                                    capture_error.backend,
+                                    capture_error.kind,
+                                    format!(
+                                        "transcriber start failed ({start_error}); record-only fallback failed ({disable_error}); capture abort also failed: {}",
+                                        capture_error.message
+                                    ),
+                                )),
+                            };
+                        },
+                    }
+                }
                 self.state = OrchestratorState::CleanupPending;
                 self.cleanup = Some(CleanupProgress::failed_transcriber_start());
                 return match self.continue_cleanup(ShutdownMode::Abort) {
@@ -500,7 +584,7 @@ where
             }
         }
         self.state = OrchestratorState::Running;
-        Ok(())
+        Ok(None)
     }
 
     /// Pump one queued or newly captured event through the pipeline.
@@ -530,6 +614,13 @@ where
 
         let push_result = match (&capture_event, &mut self.transcriber) {
             (CaptureEvent::Samples(frame), Some(transcriber)) => transcriber.push(frame),
+            (
+                CaptureEvent::Overflow {
+                    track_id,
+                    dropped_frames,
+                },
+                Some(transcriber),
+            ) => transcriber.push_gap(*track_id, *dropped_frames),
             _ => Ok(()),
         };
         self.pending
@@ -569,6 +660,32 @@ where
         self.continue_cleanup(mode)
     }
 
+    /// Stop forwarding capture frames to the current transcriber while
+    /// leaving capture and recording running.
+    ///
+    /// Platform adapters use this after a terminal recognizer failure when
+    /// policy explicitly permits a record-only fallback. Buffered transcript
+    /// events and a pending transcriber error are discarded.
+    ///
+    /// # Errors
+    /// Returns [`BackendErrorKind::InvalidState`] unless the orchestrator is
+    /// currently running.
+    pub fn disable_transcriber(&mut self) -> BackendResult<()> {
+        if self.state != OrchestratorState::Running {
+            return Err(self.invalid_state_error(
+                "transcriber can only be disabled while the session is running",
+            ));
+        }
+        if let Some(transcriber) = &mut self.transcriber {
+            transcriber.abort()?;
+        }
+        self.transcriber = None;
+        self.pending
+            .retain(|event| !matches!(event, OrchestratorEvent::Transcript(_)));
+        self.pending_error = None;
+        Ok(())
+    }
+
     #[must_use]
     pub fn into_parts(self) -> (C, Option<T>) {
         (self.capture, self.transcriber)
@@ -593,6 +710,14 @@ where
     ) -> BackendResult<()> {
         let push_result = match (transcriber_accepts_audio, &event, &mut self.transcriber) {
             (true, CaptureEvent::Samples(frame), Some(transcriber)) => transcriber.push(frame),
+            (
+                true,
+                CaptureEvent::Overflow {
+                    track_id,
+                    dropped_frames,
+                },
+                Some(transcriber),
+            ) => transcriber.push_gap(*track_id, *dropped_frames),
             _ => Ok(()),
         };
         self.pending.push_back(OrchestratorEvent::Capture(event));
@@ -696,9 +821,16 @@ where
                 }
                 if progress.transcriber != TranscriberCleanupState::Cleaned {
                     if let Some(transcriber) = &mut self.transcriber {
-                        transcriber.abort();
+                        match transcriber.abort() {
+                            Ok(()) => {
+                                progress.transcriber = TranscriberCleanupState::Cleaned;
+                            },
+                            Err(error) if first_error.is_none() => first_error = Some(error),
+                            Err(_) => {},
+                        }
+                    } else {
+                        progress.transcriber = TranscriberCleanupState::Cleaned;
                     }
-                    progress.transcriber = TranscriberCleanupState::Cleaned;
                 }
             },
         }
@@ -979,6 +1111,27 @@ struct ProducerEnterHook {
 }
 
 impl RealtimeCaptureSender {
+    /// Account for frames dropped before an [`AudioFrame`] could be
+    /// constructed (for example, platform callback-pool exhaustion).
+    ///
+    /// This is non-blocking and allocation-free, so platform real-time
+    /// callbacks can preserve overflow accounting without fabricating PCM.
+    ///
+    /// # Errors
+    /// Returns [`BackendErrorKind::InvalidState`] after the receiver closes.
+    pub fn report_dropped_frames(
+        &self,
+        frame_count: u64,
+    ) -> BackendResult<()> {
+        if self.gate.is_closed() {
+            return Err(capture_receiver_disconnected_error());
+        }
+        self.dropped
+            .frames
+            .fetch_add(frame_count, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Enqueue an audio frame without waiting for capacity.
     ///
     /// # Errors
@@ -1606,6 +1759,7 @@ mod tests {
             sender.try_send(make_frame(2)).unwrap(),
             FrameEnqueue::Dropped
         );
+        sender.report_dropped_frames(80).unwrap();
         assert!(matches!(
             receiver.try_recv(),
             Some(CaptureEvent::Samples(frame)) if frame.sequence() == 0
@@ -1614,7 +1768,7 @@ mod tests {
             receiver.try_recv(),
             Some(CaptureEvent::Overflow {
                 track_id: TrackId::MICROPHONE,
-                dropped_frames: 320,
+                dropped_frames: 400,
             })
         ));
     }
@@ -2254,8 +2408,9 @@ mod tests {
             Ok(())
         }
 
-        fn abort(&mut self) {
+        fn abort(&mut self) -> BackendResult<()> {
             self.calls.lock().unwrap().push("transcriber-abort");
+            Ok(())
         }
     }
 
@@ -2354,6 +2509,40 @@ mod tests {
                 "transcriber-start",
                 "capture-stop-abort",
                 "transcriber-abort"
+            ]
+        );
+    }
+
+    #[test]
+    fn disabling_transcriber_keeps_capture_running_and_discards_transcripts() {
+        let segment = TranscriptSegment {
+            track_id: TrackId::MICROPHONE,
+            segment_id: TranscriptSegmentId::new(3),
+            text: "must not escape".into(),
+            start_seconds: 0.0,
+            end_seconds: 1.0,
+            confidence_mean: None,
+            confidence_min: None,
+        };
+        let (mut orchestrator, calls) =
+            fake_orchestrator(VecDeque::from([TranscriptEvent::Final(segment)]));
+        orchestrator.start().unwrap();
+
+        orchestrator.disable_transcriber().unwrap();
+        assert!(matches!(
+            orchestrator.pump_once(Duration::ZERO).unwrap(),
+            Some(OrchestratorEvent::Capture(CaptureEvent::Samples(_)))
+        ));
+        assert_eq!(orchestrator.pump_once(Duration::ZERO).unwrap(), None);
+        orchestrator.shutdown(ShutdownMode::Graceful).unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "capture-start",
+                "transcriber-start",
+                "transcriber-abort",
+                "capture-stop-graceful",
             ]
         );
     }
@@ -2629,8 +2818,9 @@ mod tests {
                 Ok(())
             }
 
-            fn abort(&mut self) {
+            fn abort(&mut self) -> BackendResult<()> {
                 self.calls.lock().unwrap().push("transcriber-abort");
+                Ok(())
             }
         }
 
@@ -2684,6 +2874,140 @@ mod tests {
                 "capture-stop-abort",
                 "transcriber-abort",
                 "capture-stop-abort",
+            ]
+        );
+    }
+
+    struct RecordOnlyFallbackFailingTranscriber {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        abort_failures_remaining: usize,
+    }
+
+    impl TranscriberBackend for RecordOnlyFallbackFailingTranscriber {
+        fn probe(&self) -> TranscriberProbe {
+            transcriber_probe(
+                "record-only-failure",
+                TranscriberClass::Platform,
+                RecognitionPrivacy::Offline,
+                true,
+            )
+        }
+
+        fn start(
+            &mut self,
+            _tracks: &[wisp_core::TrackDescriptor],
+        ) -> BackendResult<()> {
+            self.calls.lock().unwrap().push("transcriber-start");
+            Err(BackendError::new(
+                BackendId::new("record-only-failure"),
+                BackendErrorKind::MissingModel,
+                "startup failed",
+            ))
+        }
+
+        fn push(
+            &mut self,
+            _frame: &AudioFrame,
+        ) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn next_event(
+            &mut self,
+            _timeout: Duration,
+        ) -> BackendResult<Option<TranscriptEvent>> {
+            Ok(None)
+        }
+
+        fn finish(&mut self) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn abort(&mut self) -> BackendResult<()> {
+            self.calls.lock().unwrap().push("transcriber-abort");
+            if self.abort_failures_remaining > 0 {
+                self.abort_failures_remaining -= 1;
+                Err(BackendError::new(
+                    BackendId::new("record-only-failure"),
+                    BackendErrorKind::Internal,
+                    "disable failed",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn record_only_disable_failure_aborts_capture_and_retries_only_transcriber() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let capture = FakeCapture {
+            events: Arc::new(Mutex::new(VecDeque::new())),
+            calls: Arc::clone(&calls),
+            stop_failures_remaining: 0,
+        };
+        let transcriber = RecordOnlyFallbackFailingTranscriber {
+            calls: Arc::clone(&calls),
+            abort_failures_remaining: 1,
+        };
+        let mut orchestrator = SessionOrchestrator::new(capture, Some(transcriber));
+
+        let error = orchestrator.start_allowing_record_only().unwrap_err();
+        assert!(error.message.contains("record-only fallback failed"));
+        assert!(!error.message.contains("capture abort also failed"));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "capture-start",
+                "transcriber-start",
+                "transcriber-abort",
+                "capture-stop-abort",
+            ]
+        );
+
+        orchestrator.shutdown(ShutdownMode::Abort).unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "capture-start",
+                "transcriber-start",
+                "transcriber-abort",
+                "capture-stop-abort",
+                "transcriber-abort",
+            ],
+            "successful capture abort must not be repeated"
+        );
+    }
+
+    #[test]
+    fn record_only_disable_and_capture_abort_failures_are_aggregated_and_retried() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let capture = FakeCapture {
+            events: Arc::new(Mutex::new(VecDeque::new())),
+            calls: Arc::clone(&calls),
+            stop_failures_remaining: 1,
+        };
+        let transcriber = RecordOnlyFallbackFailingTranscriber {
+            calls: Arc::clone(&calls),
+            abort_failures_remaining: 1,
+        };
+        let mut orchestrator = SessionOrchestrator::new(capture, Some(transcriber));
+
+        let error = orchestrator.start_allowing_record_only().unwrap_err();
+        assert!(error.message.contains("startup failed"));
+        assert!(error.message.contains("disable failed"));
+        assert!(error.message.contains("capture abort also failed"));
+
+        orchestrator.shutdown(ShutdownMode::Abort).unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "capture-start",
+                "transcriber-start",
+                "transcriber-abort",
+                "capture-stop-abort",
+                "capture-stop-abort",
+                "transcriber-abort",
             ]
         );
     }

@@ -19,7 +19,7 @@ use crate::app::{
 use crate::library;
 use crate::library::SharedStorage;
 use crate::session_runner::Update;
-use crate::session_runner::Update::{Error, Event, StartFailed, Started, Stopped};
+use crate::session_runner::Update::{Error, Event, RuntimeFailed, StartFailed, Started, Stopped};
 use crate::transcript_view::now;
 
 pub(crate) const RECOVERY_FILE_NAME: &str = "transcript-recovery.json";
@@ -107,6 +107,21 @@ pub fn apply_update(
                 model.fail(error);
             } else if let Some(AppError::Persistence(message)) = model.last_error.as_mut() {
                 message.push_str("; audio startup also failed: ");
+                message.push_str(&error.to_string());
+            }
+        },
+        RuntimeFailed { session_id, error } => {
+            if !model.accepts_worker_update(session_id) {
+                return;
+            }
+            model.finalize_all_segments();
+            model.pending_session_write = Some(PendingSessionWrite::Finalise {
+                ended_at: Utc::now(),
+            });
+            if retry_pending_persistence(model, storage) {
+                model.fail(error);
+            } else if let Some(AppError::Persistence(message)) = model.last_error.as_mut() {
+                message.push_str("; audio runtime also failed: ");
                 message.push_str(&error.to_string());
             }
         },
@@ -1239,6 +1254,156 @@ mod tests {
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "mic audio before system setup failed");
         drop(store);
+
+        let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn runtime_failure_finalizes_partial_transcript_before_publishing_error() {
+        let storage = in_memory_storage();
+        let started_at = Utc
+            .with_ymd_and_hms(2026, 7, 15, 5, 35, 0)
+            .single()
+            .expect("valid timestamp");
+        let dir_name = library::session_dir_name(started_at);
+        let session_id = preallocate_session(&storage, started_at, &dir_name);
+        let mut model = AppModel::new();
+        assert!(model.begin_session_start());
+        model.current_session_id = Some(session_id);
+        model.linked_session_id = Some(session_id);
+        model.current_session_started_at = Some(started_at);
+        model.current_session_dir_name = Some(dir_name.clone());
+        apply_update(
+            Update::Started(SessionStart {
+                session_id,
+                started_at,
+                dir_name,
+            }),
+            &mut model,
+            &storage,
+        );
+        apply_update(
+            Update::Event {
+                session_id,
+                event: AudioEvent::Result(SessionResult {
+                    source: SourceLabel::System,
+                    segment_id: 17,
+                    is_final: false,
+                    text: "partial before runtime failure".into(),
+                    start_seconds: 0.5,
+                    end_seconds: 1.25,
+                    confidence_mean: None,
+                    confidence_min: None,
+                }),
+            },
+            &mut model,
+            &storage,
+        );
+
+        apply_update(
+            Update::RuntimeFailed {
+                session_id,
+                error: SessionError::Start("process tap disconnected".into()),
+            },
+            &mut model,
+            &storage,
+        );
+
+        assert_eq!(model.state, SessionState::Failed);
+        assert!(!model.has_unsettled_session());
+        assert!(model.segments[0].is_final);
+        let store = storage.lock().expect("storage lock");
+        let stored = store
+            .segments()
+            .list_by_session(session_id)
+            .expect("stored transcript");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].text, "partial before runtime failure");
+        assert!(
+            model
+                .last_error
+                .as_ref()
+                .expect("runtime error")
+                .to_string()
+                .contains("process tap disconnected")
+        );
+    }
+
+    #[test]
+    fn stale_runtime_failure_cannot_finalize_a_newer_session() {
+        let storage = in_memory_storage();
+        let started_at = Utc
+            .with_ymd_and_hms(2026, 7, 15, 5, 36, 0)
+            .single()
+            .expect("valid timestamp");
+        let stale_id = preallocate_session(&storage, started_at, "stale");
+        let current_id = preallocate_session(&storage, started_at, "current");
+        let mut model = AppModel::new();
+        assert!(model.begin_session_start());
+        model.current_session_id = Some(current_id);
+        model.linked_session_id = Some(current_id);
+        model.current_session_started_at = Some(started_at);
+        model.current_session_dir_name = Some("current".into());
+
+        apply_update(
+            Update::RuntimeFailed {
+                session_id: stale_id,
+                error: SessionError::Start("stale failure".into()),
+            },
+            &mut model,
+            &storage,
+        );
+
+        assert_eq!(model.state, SessionState::Starting);
+        assert_eq!(model.current_session_id, Some(current_id));
+        assert!(model.pending_session_write.is_none());
+        assert!(model.last_error.is_none());
+    }
+
+    #[test]
+    fn runtime_and_persistence_failures_are_composed_without_losing_either_cause() {
+        let storage = in_memory_storage();
+        let started_at = Utc
+            .with_ymd_and_hms(2026, 7, 15, 5, 37, 0)
+            .single()
+            .expect("valid timestamp");
+        let dir_name = library::session_dir_name(started_at);
+        let session_id = preallocate_session(&storage, started_at, &dir_name);
+        let output_dir =
+            std::env::temp_dir().join(format!("wisp-runtime-compose-{}", uuid::Uuid::new_v4()));
+        let mut model = AppModel::new();
+        assert!(model.begin_session_start());
+        model.current_session_id = Some(session_id);
+        model.linked_session_id = Some(session_id);
+        model.current_session_started_at = Some(started_at);
+        model.current_session_dir_name = Some(dir_name);
+        model.current_output_dir = Some(output_dir.clone());
+
+        let poisoned_storage = Arc::clone(&storage);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = poisoned_storage.lock().expect("storage lock");
+            panic!("poison persistence lock");
+        }));
+        assert!(poisoned.is_err());
+
+        apply_update(
+            Update::RuntimeFailed {
+                session_id,
+                error: SessionError::Start("native runtime cause".into()),
+            },
+            &mut model,
+            &storage,
+        );
+
+        let message = model
+            .last_error
+            .as_ref()
+            .expect("composed persistence error")
+            .to_string();
+        assert!(message.contains("persistence failed"));
+        assert!(message.contains("audio runtime also failed"));
+        assert!(message.contains("native runtime cause"));
+        assert!(model.has_pending_persistence());
 
         let _ = fs::remove_dir_all(output_dir);
     }

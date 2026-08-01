@@ -45,7 +45,6 @@ jobs:
           fetch-depth: 0
 
       - uses: ./.github/actions/setup-nix
-      - uses: ./.github/actions/setup-rust-cache
 
       - name: Compute new version
         id: ver

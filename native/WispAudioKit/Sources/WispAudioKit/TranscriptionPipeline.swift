@@ -456,7 +456,7 @@ actor AnalyzerCoordinator {
 }
 
 struct AnalyzerTimeline {
-    static let maximumRetainedGapCount = 4_096
+    static let maximumRetainedGapCount = 4096
 
     private var compressedEnd = 0.0
     private var finalizedCompressedEnd = 0.0

@@ -814,11 +814,13 @@ final class WispSessionTests: XCTestCase {
             frameCapacity: 7
         ))
         offered.frameLength = 7
-        let (_, continuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(
+        let (stream, continuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
-        _ = continuation.yield(evicted)
-        let disposition = continuation.yield(offered)
+        let disposition = withExtendedLifetime(stream) {
+            _ = continuation.yield(evicted)
+            return continuation.yield(offered)
+        }
         continuation.finish()
 
         XCTAssertEqual(

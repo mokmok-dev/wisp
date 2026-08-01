@@ -7,6 +7,8 @@
 
 mod backend;
 mod error;
+#[cfg(target_os = "macos")]
+mod macos_backend;
 #[cfg(any(test, target_os = "windows"))]
 mod ogg_opus_recorder;
 #[cfg(target_os = "windows")]
@@ -22,6 +24,8 @@ pub use backend::{
     select_transcriber_after_failure,
 };
 pub use error::{Result, SessionError, SetupError, SetupResult};
+#[cfg(target_os = "macos")]
+pub use macos_backend::{MacosCaptureBackend, MacosSession, MacosTranscriberBackend};
 #[cfg(target_os = "windows")]
 pub use wasapi_capture::{
     WASAPI_CAPTURE_QUEUE_CAPACITY, WASAPI_CHANNELS, WASAPI_SAMPLE_RATE, WasapiCapture,
@@ -34,6 +38,20 @@ pub use wisp_core::{
 };
 
 use std::path::{Path, PathBuf};
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MacosTranscriberFailure {
+    pub(crate) terminal: bool,
+    pub(crate) message: String,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MacosCaptureFailure {
+    pub(crate) track_id: Option<TrackId>,
+    pub(crate) message: String,
+}
 
 /// TCC-style OS permission gated by Wisp at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -757,11 +775,12 @@ where
         self.try_recv_result().ok()
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     fn recv(&self) -> Option<T> {
         self.recv_result().ok()
     }
 
+    #[cfg(any(test, target_os = "windows"))]
     fn recv_timeout(
         &self,
         timeout: std::time::Duration,
@@ -786,7 +805,7 @@ where
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     fn recv_result(&self) -> std::result::Result<T, crossbeam_channel::RecvError> {
         let mut finals_open = true;
         let mut final_gap_open = true;
@@ -825,6 +844,7 @@ where
         }
     }
 
+    #[cfg(any(test, target_os = "windows"))]
     fn recv_timeout_result(
         &self,
         timeout: std::time::Duration,
@@ -988,6 +1008,7 @@ where
         CallbackSweep::Empty
     }
 
+    #[cfg(any(test, target_os = "windows"))]
     fn run_wait_hook(&self) {
         #[cfg(not(test))]
         let _ = self;
@@ -2301,13 +2322,19 @@ mod imp {
     use std::time::Duration;
 
     use wisp_audiokit_sys as sys;
-    use wisp_core::SourceLabel;
+    use wisp_core::{
+        AudioFrame, CaptureEvent, MonotonicTimestamp, SourceKind, SourceLabel, TrackId,
+    };
 
     use crate::error::{Result, SessionError};
     use crate::{
-        CallbackEventClass, CallbackEventReceiver, CallbackEventSender, Permission,
-        PermissionStatus, SessionConfig, SessionOptions, callback_event_channel_with_final_gap,
+        CallbackEnqueue, CallbackEventClass, CallbackEventReceiver, CallbackEventSender,
+        CaptureEventReceiver, MacosCaptureFailure, MacosTranscriberFailure, Permission,
+        PermissionStatus, RealtimeCaptureSender, SessionConfig,
+        callback_event_channel_with_final_gap, realtime_capture_channel,
     };
+
+    const MACOS_CAPTURE_QUEUE_CAPACITY: usize = 64;
 
     fn permission_to_raw(perm: Permission) -> i32 {
         match perm {
@@ -2372,7 +2399,7 @@ mod imp {
 
     // ---- Types ---------------------------------------------------------
 
-    /// One transcription update from a running [`Session`].
+    /// One transcription update from a running macOS native session.
     #[derive(Debug, Clone, PartialEq)]
     pub struct SessionResult {
         pub source: SourceLabel,
@@ -2398,20 +2425,30 @@ mod imp {
         ))
     }
 
+    fn transcriber_failure_gap_event(dropped_terminal_failures: u64) -> MacosTranscriberFailure {
+        MacosTranscriberFailure {
+            terminal: true,
+            message: format!(
+                "transcriber failure queue overflowed; dropped {dropped_terminal_failures} terminal failure(s)"
+            ),
+        }
+    }
+
     // ---- Session -------------------------------------------------------
 
-    /// Owns one running (or yet-to-be-started) capture + transcription session.
+    /// Low-level native handle used by the production macOS backends.
     ///
-    /// Construct with [`Session::new`], start with [`Session::start`], pull
-    /// events from [`Session::recv`] / [`Session::try_recv`], and drop to
-    /// release. Drop calls `wisp_session_stop` + `wisp_session_free` so a
-    /// running session is always cleaned up.
-    pub struct Session {
+    /// This type is crate-private so the public compatibility [`crate::Session`]
+    /// cannot bypass [`crate::MacosSession`] and its backend orchestrator.
+    pub(crate) struct NativeSession {
         handle: NonNull<sys::WispSession>,
         receiver: CallbackEventReceiver<Event, (SourceLabel, u64)>,
+        transcriber_failure_receiver: CallbackEventReceiver<MacosTranscriberFailure, u64>,
+        capture_failure_receiver: CallbackEventReceiver<MacosCaptureFailure, u64>,
+        audio_receiver: Option<CaptureEventReceiver>,
         // Kept alive so the callbacks' user_data pointer stays valid for
         // as long as the Swift side might call them.
-        _ctx: Box<CallbackContext>,
+        ctx: Box<CallbackContext>,
     }
 
     // SAFETY: Session owns the C handle and the receiver. The handle is
@@ -2419,7 +2456,7 @@ mod imp {
     // access internally, so it is sound to move the handle across threads.
     // (`Session` stays `!Sync` overall because the `NonNull` field is
     // `!Sync` — only `Send` needs the manual impl.)
-    unsafe impl Send for Session {}
+    unsafe impl Send for NativeSession {}
 
     // Swift may invoke `on_result_thunk` / `on_log_thunk` from different
     // threads. The thunks form `&CallbackContext` from a raw `user_data`
@@ -2428,52 +2465,60 @@ mod imp {
     // UB while retaining nonblocking backpressure.
     struct CallbackContext {
         sender: CallbackEventSender<Event, (SourceLabel, u64)>,
+        transcriber_failure_sender: CallbackEventSender<MacosTranscriberFailure, u64>,
+        capture_failure_sender: CallbackEventSender<MacosCaptureFailure, u64>,
+        audio_senders: Option<[RealtimeCaptureSender; 2]>,
+        first_audio_timestamps: [std::sync::atomic::AtomicU64; 2],
     }
 
-    impl Session {
-        /// Construct a new session. Does no I/O — call [`Self::start`] next.
-        ///
-        /// `output_dir` is the directory in which the per-session Ogg files
-        /// will be written (created if needed). `locale` is a BCP-47
-        /// language tag passed to the Swift speech recognizer
-        /// (e.g. `"ja-JP"`).
-        ///
-        /// # Errors
-        /// Returns [`SessionError::InvalidPath`] / [`SessionError::InvalidLocale`]
-        /// when the inputs contain a NUL byte, and [`SessionError::Construction`]
-        /// when the Swift side rejects them (e.g. the directory could not
-        /// be created).
-        pub fn new(
-            output_dir: impl AsRef<Path>,
-            locale: &str,
-        ) -> Result<Self> {
-            Self::new_with_config(output_dir, SessionConfig::platform_default(locale))
+    const UNSET_AUDIO_TIMESTAMP_BITS: u64 = f64::NAN.to_bits();
+
+    impl CallbackContext {
+        fn audio_track_index(track_id: TrackId) -> Option<usize> {
+            match track_id {
+                TrackId::MICROPHONE => Some(0),
+                TrackId::SYSTEM => Some(1),
+                _ => None,
+            }
         }
 
-        /// Construct a new session with an explicit recognizer config.
-        ///
-        /// macOS currently always uses Apple's `SpeechAnalyzer`; the
-        /// recognizer selection is accepted so the desktop shell can use one
-        /// session-start path across platforms.
-        ///
-        /// # Errors
-        /// See [`Self::new`].
-        pub fn new_with_config(
+        fn remember_first_audio_timestamp(
+            &self,
+            track_id: TrackId,
+            timestamp_seconds: f64,
+        ) {
+            let Some(index) = Self::audio_track_index(track_id) else {
+                return;
+            };
+            let _ = self.first_audio_timestamps[index].compare_exchange(
+                UNSET_AUDIO_TIMESTAMP_BITS,
+                timestamp_seconds.to_bits(),
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            );
+        }
+
+        fn first_audio_timestamp(
+            &self,
+            track_id: TrackId,
+        ) -> Option<MonotonicTimestamp> {
+            let index = Self::audio_track_index(track_id)?;
+            let bits =
+                self.first_audio_timestamps[index].load(std::sync::atomic::Ordering::Acquire);
+            (bits != UNSET_AUDIO_TIMESTAMP_BITS).then(|| {
+                MonotonicTimestamp::from_duration(Duration::from_secs_f64(f64::from_bits(bits)))
+            })
+        }
+    }
+
+    impl NativeSession {
+        pub(crate) fn new_for_backend(
             output_dir: impl AsRef<Path>,
             config: SessionConfig,
+            transcription_enabled: bool,
+            emit_audio: bool,
+            allow_record_only: bool,
         ) -> Result<Self> {
-            Self::new_with_options(output_dir, config.into())
-        }
-
-        /// Construct a session with explicit transcription policy.
-        ///
-        /// # Errors
-        /// See [`Self::new`].
-        pub fn new_with_options(
-            output_dir: impl AsRef<Path>,
-            options: SessionOptions,
-        ) -> Result<Self> {
-            let (config, _policy) = options.into_parts();
             let output_dir = output_dir.as_ref();
             let path_str = output_dir
                 .to_str()
@@ -2484,16 +2529,51 @@ mod imp {
                 .map_err(|_| SessionError::InvalidLocale(config.locale))?;
 
             let (sender, receiver) = callback_event_channel_with_final_gap(final_gap_event);
-            let ctx = Box::new(CallbackContext { sender });
+            let (transcriber_failure_sender, transcriber_failure_receiver) =
+                callback_event_channel_with_final_gap(transcriber_failure_gap_event);
+            let (capture_failure_sender, capture_failure_receiver) =
+                callback_event_channel_with_final_gap(|dropped| MacosCaptureFailure {
+                    track_id: None,
+                    message: format!(
+                        "terminal capture failure queue overflowed; dropped {dropped} failure(s)"
+                    ),
+                });
+            let (audio_senders, audio_receiver) = if emit_audio {
+                let (senders, receiver) = realtime_capture_channel(
+                    MACOS_CAPTURE_QUEUE_CAPACITY,
+                    &[TrackId::MICROPHONE, TrackId::SYSTEM],
+                );
+                (
+                    Some([senders[0].clone(), senders[1].clone()]),
+                    Some(receiver),
+                )
+            } else {
+                (None, None)
+            };
+            let ctx = Box::new(CallbackContext {
+                sender,
+                transcriber_failure_sender,
+                capture_failure_sender,
+                audio_senders,
+                first_audio_timestamps: std::array::from_fn(|_| {
+                    std::sync::atomic::AtomicU64::new(UNSET_AUDIO_TIMESTAMP_BITS)
+                }),
+            });
             let user_data = std::ptr::from_ref::<CallbackContext>(ctx.as_ref()) as *mut _;
 
             // SAFETY: pointers are valid for the duration of the call and
             // `user_data` is kept alive by holding `ctx` in `Session`.
             let raw = unsafe {
-                sys::wisp_session_new(
+                sys::wisp_session_new_v2(
                     path_c.as_ptr(),
                     locale_c.as_ptr(),
+                    i32::from(transcription_enabled),
+                    i32::from(allow_record_only),
                     Some(on_result_thunk),
+                    emit_audio.then_some(on_audio_thunk),
+                    emit_audio.then_some(on_audio_overflow_thunk),
+                    Some(on_transcriber_error_thunk),
+                    Some(on_terminal_error_thunk),
                     Some(on_log_thunk),
                     user_data,
                 )
@@ -2502,34 +2582,11 @@ mod imp {
             Ok(Self {
                 handle,
                 receiver,
-                _ctx: ctx,
+                transcriber_failure_receiver,
+                capture_failure_receiver,
+                audio_receiver,
+                ctx,
             })
-        }
-
-        /// Start capture + transcription. Blocks until ready or fails.
-        ///
-        /// # Errors
-        /// Returns [`SessionError::Start`] with the Swift-side error
-        /// message on failure (permission denial, missing audio device,
-        /// model download failure, ...).
-        pub fn start(&mut self) -> Result<()> {
-            // SAFETY: handle is non-null and the Swift side serializes
-            // start/stop/free internally.
-            let rc = unsafe { sys::wisp_session_start(self.handle.as_ptr()) };
-            if rc == 0 {
-                return Ok(());
-            }
-            let msg = unsafe { sys::wisp_session_last_error_message(self.handle.as_ptr()) };
-            let detail = if msg.is_null() {
-                format!("unknown error (rc={rc})")
-            } else {
-                // SAFETY: Swift documents the pointer is valid until the
-                // next mutating call; we copy out immediately.
-                unsafe { CStr::from_ptr(msg) }
-                    .to_string_lossy()
-                    .into_owned()
-            };
-            Err(SessionError::Start(detail))
         }
 
         /// Whether microphone capture reached the running state. This is
@@ -2555,11 +2612,102 @@ mod imp {
             }
         }
 
-        /// Stop the session and wait for buffered results to drain. Blocks.
-        /// Idempotent — safe to call multiple times.
-        pub fn stop(&self) {
-            // SAFETY: handle is non-null; stop is idempotent on the Swift side.
-            unsafe { sys::wisp_session_stop(self.handle.as_ptr()) };
+        pub(crate) fn push_transcriber_frame(
+            &self,
+            frame: &AudioFrame,
+        ) -> Result<()> {
+            let source = match (frame.track_id(), frame.source()) {
+                (TrackId::MICROPHONE, SourceKind::Microphone) => sys::WISP_SOURCE_MIC,
+                (TrackId::SYSTEM, SourceKind::SystemAudio) => sys::WISP_SOURCE_SYSTEM,
+                _ => {
+                    return Err(SessionError::Start(
+                        "frame is not a macOS microphone/system track".into(),
+                    ));
+                },
+            };
+            let Some(samples) = frame.samples().as_f32() else {
+                return Err(SessionError::Start(
+                    "macOS SpeechAnalyzer requires Float32 PCM".into(),
+                ));
+            };
+            let rc = unsafe {
+                sys::wisp_session_push_transcriber_audio(
+                    self.handle.as_ptr(),
+                    source,
+                    frame.format().sample_rate,
+                    u32::from(frame.format().channels),
+                    samples.as_ptr(),
+                    samples.len(),
+                )
+            };
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(SessionError::Start(self.last_error_detail(rc)))
+            }
+        }
+
+        pub(crate) fn start_capture(&mut self) -> Result<()> {
+            let rc = unsafe { sys::wisp_session_start_capture(self.handle.as_ptr()) };
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(SessionError::Start(self.last_error_detail(rc)))
+            }
+        }
+
+        pub(crate) fn start_transcription(&self) -> Result<()> {
+            let rc = unsafe { sys::wisp_session_start_transcription(self.handle.as_ptr()) };
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(SessionError::Start(self.last_error_detail(rc)))
+            }
+        }
+
+        pub(crate) fn disable_transcription(&self) -> Result<()> {
+            let rc = unsafe { sys::wisp_session_disable_transcription(self.handle.as_ptr()) };
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(SessionError::Start(self.last_error_detail(rc)))
+            }
+        }
+
+        pub(crate) fn abort(&self) {
+            unsafe { sys::wisp_session_abort(self.handle.as_ptr()) };
+        }
+
+        pub(crate) fn stop_capture(&self) -> Result<()> {
+            let rc = unsafe { sys::wisp_session_stop_capture(self.handle.as_ptr()) };
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(SessionError::Start(self.last_error_detail(rc)))
+            }
+        }
+
+        pub(crate) fn finish_transcription(&self) -> Result<()> {
+            let rc = unsafe { sys::wisp_session_finish_transcription(self.handle.as_ptr()) };
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(SessionError::Start(self.last_error_detail(rc)))
+            }
+        }
+
+        fn last_error_detail(
+            &self,
+            rc: i32,
+        ) -> String {
+            let message = unsafe { sys::wisp_session_last_error_message(self.handle.as_ptr()) };
+            if message.is_null() {
+                format!("unknown error (rc={rc})")
+            } else {
+                unsafe { CStr::from_ptr(message) }
+                    .to_string_lossy()
+                    .into_owned()
+            }
         }
 
         /// Non-blocking event poll.
@@ -2568,26 +2716,38 @@ mod imp {
             self.receiver.try_recv()
         }
 
-        /// Block until the next event arrives, or return `None` if the
-        /// session has been dropped / closed.
-        #[must_use]
-        pub fn recv(&self) -> Option<Event> {
-            self.receiver.recv()
+        pub(crate) fn try_recv_audio(&self) -> Option<CaptureEvent> {
+            self.audio_receiver
+                .as_ref()
+                .and_then(CaptureEventReceiver::try_recv)
         }
 
-        /// Block until the next event arrives or `timeout` elapses.
-        /// Returns `None` on timeout or when the session has been
-        /// dropped / closed.
-        #[must_use]
-        pub fn recv_timeout(
+        pub(crate) fn try_recv_transcriber_failure(&self) -> Option<MacosTranscriberFailure> {
+            self.transcriber_failure_receiver.try_recv()
+        }
+
+        pub(crate) fn try_recv_capture_failure(&self) -> Option<MacosCaptureFailure> {
+            self.capture_failure_receiver.try_recv()
+        }
+
+        pub(crate) fn recv_audio_timeout(
             &self,
             timeout: Duration,
-        ) -> Option<Event> {
-            self.receiver.recv_timeout(timeout)
+        ) -> Option<CaptureEvent> {
+            self.audio_receiver
+                .as_ref()
+                .and_then(|receiver| receiver.recv_timeout(timeout))
+        }
+
+        pub(crate) fn first_audio_timestamp(
+            &self,
+            track_id: TrackId,
+        ) -> Option<MonotonicTimestamp> {
+            self.ctx.first_audio_timestamp(track_id)
         }
     }
 
-    impl Drop for Session {
+    impl Drop for NativeSession {
         fn drop(&mut self) {
             // SAFETY: handle is non-null and we own it. Stop is a no-op if
             // the session was never started or has already stopped.
@@ -2647,7 +2807,19 @@ mod imp {
         } else {
             CallbackEventClass::Partial(key)
         };
-        let _ = ctx.sender.try_send(class, Event::Result(result));
+        let was_final = result.is_final;
+        let outcome = ctx.sender.try_send(class, Event::Result(result));
+        if was_final && outcome == CallbackEnqueue::DroppedFull {
+            let _ = ctx.transcriber_failure_sender.try_send(
+                CallbackEventClass::Final(Some(segment_id)),
+                MacosTranscriberFailure {
+                    terminal: true,
+                    message: format!(
+                        "transcription final callback overflowed for segment {segment_id}"
+                    ),
+                },
+            );
+        }
     }
 
     unsafe extern "C" fn on_log_thunk(
@@ -2669,6 +2841,570 @@ mod imp {
         let _ = ctx
             .sender
             .try_send(CallbackEventClass::Log, Event::Log(text));
+    }
+
+    unsafe extern "C" fn on_transcriber_error_thunk(
+        terminal: i32,
+        message_utf8: *const std::os::raw::c_char,
+        message_len: usize,
+        user_data: *mut std::os::raw::c_void,
+    ) {
+        if user_data.is_null() {
+            return;
+        }
+        let ctx = unsafe { &*(user_data.cast::<CallbackContext>()) };
+        let message = if message_utf8.is_null() || message_len == 0 {
+            "unknown SpeechAnalyzer failure".to_owned()
+        } else {
+            let bytes =
+                unsafe { std::slice::from_raw_parts(message_utf8.cast::<u8>(), message_len) };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        let failure = MacosTranscriberFailure {
+            terminal: terminal != 0,
+            message,
+        };
+        let class = if failure.terminal {
+            CallbackEventClass::Final(Some(0))
+        } else {
+            CallbackEventClass::Log
+        };
+        let _ = ctx.transcriber_failure_sender.try_send(class, failure);
+    }
+
+    unsafe extern "C" fn on_terminal_error_thunk(
+        source: i32,
+        message_utf8: *const std::os::raw::c_char,
+        message_len: usize,
+        user_data: *mut std::os::raw::c_void,
+    ) {
+        if user_data.is_null() {
+            return;
+        }
+        let ctx = unsafe { &*(user_data.cast::<CallbackContext>()) };
+        let message = if message_utf8.is_null() || message_len == 0 {
+            "unknown terminal capture failure".to_owned()
+        } else {
+            let bytes =
+                unsafe { std::slice::from_raw_parts(message_utf8.cast::<u8>(), message_len) };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        let (track_id, key) = match source {
+            sys::WISP_SOURCE_MIC => (Some(TrackId::MICROPHONE), Some(1)),
+            sys::WISP_SOURCE_SYSTEM => (Some(TrackId::SYSTEM), Some(2)),
+            -1 => (None, Some(0)),
+            _ => return,
+        };
+        let _ = ctx.capture_failure_sender.try_send(
+            CallbackEventClass::Final(key),
+            MacosCaptureFailure { track_id, message },
+        );
+    }
+
+    unsafe extern "C" fn on_audio_thunk(
+        source: i32,
+        sequence: u64,
+        timestamp_seconds: f64,
+        sample_rate: u32,
+        channels: u32,
+        samples: *const f32,
+        sample_count: usize,
+        user_data: *mut std::os::raw::c_void,
+    ) {
+        if user_data.is_null()
+            || samples.is_null()
+            || sample_count == 0
+            || channels == 0
+            || !timestamp_seconds.is_finite()
+            || timestamp_seconds < 0.0
+            || sample_rate == 0
+        {
+            return;
+        }
+        let ctx = unsafe { &*(user_data.cast::<CallbackContext>()) };
+        let Some(senders) = &ctx.audio_senders else {
+            return;
+        };
+        let (sender, track_id, source_kind) = match source {
+            sys::WISP_SOURCE_MIC => (&senders[0], TrackId::MICROPHONE, SourceKind::Microphone),
+            sys::WISP_SOURCE_SYSTEM => (&senders[1], TrackId::SYSTEM, SourceKind::SystemAudio),
+            _ => return,
+        };
+        let Ok(channels) = u16::try_from(channels) else {
+            return;
+        };
+        let timestamp =
+            MonotonicTimestamp::from_duration(Duration::from_secs_f64(timestamp_seconds));
+        ctx.remember_first_audio_timestamp(track_id, timestamp_seconds);
+        let values = unsafe { std::slice::from_raw_parts(samples, sample_count) }.to_vec();
+        let Ok(frame) = AudioFrame::from_f32(
+            track_id,
+            source_kind,
+            sequence,
+            timestamp,
+            sample_rate,
+            channels,
+            values,
+        ) else {
+            return;
+        };
+        let _ = sender.try_send(frame);
+    }
+
+    unsafe extern "C" fn on_audio_overflow_thunk(
+        source: i32,
+        dropped_frames: u64,
+        user_data: *mut std::os::raw::c_void,
+    ) {
+        if user_data.is_null() || dropped_frames == 0 {
+            return;
+        }
+        let ctx = unsafe { &*(user_data.cast::<CallbackContext>()) };
+        let Some(senders) = &ctx.audio_senders else {
+            return;
+        };
+        let sender = match source {
+            sys::WISP_SOURCE_MIC => &senders[0],
+            sys::WISP_SOURCE_SYSTEM => &senders[1],
+            _ => return,
+        };
+        let _ = sender.report_dropped_frames(dropped_frames);
+    }
+
+    #[cfg(test)]
+    mod callback_tests {
+        use super::*;
+        use crate::CALLBACK_FINAL_CAPACITY;
+
+        struct CallbackHarness {
+            context: Box<CallbackContext>,
+            _event_receiver: CallbackEventReceiver<Event, (SourceLabel, u64)>,
+            transcriber_receiver: CallbackEventReceiver<MacosTranscriberFailure, u64>,
+            capture_receiver: CallbackEventReceiver<MacosCaptureFailure, u64>,
+            audio_receiver: Option<CaptureEventReceiver>,
+        }
+
+        fn callback_context(with_audio: bool) -> CallbackHarness {
+            callback_context_with_capacity(with_audio, 8)
+        }
+
+        fn callback_context_with_capacity(
+            with_audio: bool,
+            audio_capacity: usize,
+        ) -> CallbackHarness {
+            let (sender, receiver) = callback_event_channel_with_final_gap(final_gap_event);
+            let (transcriber_failure_sender, transcriber_failure_receiver) =
+                callback_event_channel_with_final_gap(transcriber_failure_gap_event);
+            let (capture_failure_sender, capture_failure_receiver) =
+                callback_event_channel_with_final_gap(|dropped| MacosCaptureFailure {
+                    track_id: None,
+                    message: format!("dropped {dropped}"),
+                });
+            let (audio_senders, audio_receiver) = if with_audio {
+                let (senders, receiver) = realtime_capture_channel(
+                    audio_capacity,
+                    &[TrackId::MICROPHONE, TrackId::SYSTEM],
+                );
+                (
+                    Some([senders[0].clone(), senders[1].clone()]),
+                    Some(receiver),
+                )
+            } else {
+                (None, None)
+            };
+            CallbackHarness {
+                context: Box::new(CallbackContext {
+                    sender,
+                    transcriber_failure_sender,
+                    capture_failure_sender,
+                    audio_senders,
+                    first_audio_timestamps: std::array::from_fn(|_| {
+                        std::sync::atomic::AtomicU64::new(UNSET_AUDIO_TIMESTAMP_BITS)
+                    }),
+                }),
+                _event_receiver: receiver,
+                transcriber_receiver: transcriber_failure_receiver,
+                capture_receiver: capture_failure_receiver,
+                audio_receiver,
+            }
+        }
+
+        #[test]
+        fn first_audio_timestamp_survives_rust_queue_rejection_before_delivery() {
+            let harness = callback_context_with_capacity(true, 1);
+            let receiver = harness.audio_receiver.as_ref().unwrap();
+            let user_data = std::ptr::from_ref(harness.context.as_ref())
+                .cast_mut()
+                .cast();
+            let samples = [0.1_f32; 480];
+
+            unsafe {
+                on_audio_thunk(
+                    sys::WISP_SOURCE_SYSTEM,
+                    0,
+                    0.2,
+                    48_000,
+                    1,
+                    samples.as_ptr(),
+                    samples.len(),
+                    user_data,
+                );
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    0,
+                    0.25,
+                    48_000,
+                    1,
+                    samples.as_ptr(),
+                    samples.len(),
+                    user_data,
+                );
+            }
+
+            assert!(matches!(
+                receiver.try_recv(),
+                Some(CaptureEvent::Samples(frame)) if frame.track_id() == TrackId::SYSTEM
+            ));
+            assert!(matches!(
+                receiver.try_recv(),
+                Some(CaptureEvent::Overflow {
+                    track_id: TrackId::MICROPHONE,
+                    dropped_frames: 480,
+                })
+            ));
+
+            unsafe {
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    1,
+                    0.26,
+                    48_000,
+                    1,
+                    samples.as_ptr(),
+                    samples.len(),
+                    user_data,
+                );
+            }
+            assert!(matches!(
+                receiver.try_recv(),
+                Some(CaptureEvent::Samples(frame)) if frame.track_id() == TrackId::MICROPHONE
+            ));
+            assert_eq!(
+                harness
+                    .context
+                    .first_audio_timestamp(TrackId::MICROPHONE)
+                    .map(MonotonicTimestamp::as_duration),
+                Some(Duration::from_secs_f64(0.25))
+            );
+        }
+
+        #[test]
+        fn direct_final_result_overflow_publishes_terminal_transcriber_failure() {
+            let harness = callback_context(false);
+            let user_data = std::ptr::from_ref(harness.context.as_ref())
+                .cast_mut()
+                .cast();
+            let text = b"final";
+
+            for segment_id in 0..=CALLBACK_FINAL_CAPACITY as u64 {
+                unsafe {
+                    on_result_thunk(
+                        sys::WISP_SOURCE_MIC,
+                        segment_id,
+                        1,
+                        text.as_ptr().cast(),
+                        text.len(),
+                        0.0,
+                        1.0,
+                        f64::NAN,
+                        f64::NAN,
+                        user_data,
+                    );
+                }
+            }
+
+            let failure = harness
+                .transcriber_receiver
+                .try_recv()
+                .expect("overflowed final must use the terminal failure lane");
+            assert!(failure.terminal);
+            assert!(
+                failure
+                    .message
+                    .contains(&CALLBACK_FINAL_CAPACITY.to_string())
+            );
+        }
+
+        #[test]
+        #[allow(clippy::too_many_lines)]
+        fn audio_callback_accepts_exact_valid_frames_and_rejects_malformed_inputs() {
+            let harness = callback_context(true);
+            let receiver = harness.audio_receiver.as_ref().unwrap();
+            let user_data = std::ptr::from_ref(harness.context.as_ref())
+                .cast_mut()
+                .cast();
+            let mic = [0.1_f32, 0.2];
+            let system = [0.3_f32, 0.4, 0.5, 0.6];
+
+            unsafe {
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    7,
+                    1.25,
+                    48_000,
+                    1,
+                    mic.as_ptr(),
+                    mic.len(),
+                    user_data,
+                );
+                on_audio_thunk(
+                    sys::WISP_SOURCE_SYSTEM,
+                    8,
+                    2.5,
+                    44_100,
+                    2,
+                    system.as_ptr(),
+                    system.len(),
+                    user_data,
+                );
+                on_audio_thunk(99, 9, 0.0, 48_000, 1, mic.as_ptr(), mic.len(), user_data);
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    9,
+                    f64::NAN,
+                    48_000,
+                    1,
+                    mic.as_ptr(),
+                    mic.len(),
+                    user_data,
+                );
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    9,
+                    -1.0,
+                    48_000,
+                    1,
+                    mic.as_ptr(),
+                    mic.len(),
+                    user_data,
+                );
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    9,
+                    0.0,
+                    0,
+                    1,
+                    mic.as_ptr(),
+                    mic.len(),
+                    user_data,
+                );
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    9,
+                    0.0,
+                    48_000,
+                    0,
+                    mic.as_ptr(),
+                    mic.len(),
+                    user_data,
+                );
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    9,
+                    f64::INFINITY,
+                    48_000,
+                    1,
+                    mic.as_ptr(),
+                    mic.len(),
+                    user_data,
+                );
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    9,
+                    0.0,
+                    48_000,
+                    u32::MAX,
+                    mic.as_ptr(),
+                    mic.len(),
+                    user_data,
+                );
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    9,
+                    0.0,
+                    48_000,
+                    2,
+                    mic.as_ptr(),
+                    1,
+                    user_data,
+                );
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    9,
+                    0.0,
+                    48_000,
+                    1,
+                    std::ptr::null(),
+                    mic.len(),
+                    user_data,
+                );
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    9,
+                    0.0,
+                    48_000,
+                    1,
+                    mic.as_ptr(),
+                    0,
+                    user_data,
+                );
+                on_audio_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    9,
+                    0.0,
+                    48_000,
+                    1,
+                    mic.as_ptr(),
+                    mic.len(),
+                    std::ptr::null_mut(),
+                );
+            }
+
+            let CaptureEvent::Samples(mic_frame) = receiver.try_recv().unwrap() else {
+                panic!("expected microphone frame");
+            };
+            assert_eq!(mic_frame.track_id(), TrackId::MICROPHONE);
+            assert_eq!(mic_frame.sequence(), 7);
+            assert_eq!(
+                mic_frame.timestamp().as_duration(),
+                Duration::from_secs_f64(1.25)
+            );
+            assert_eq!(mic_frame.samples().as_f32(), Some(mic.as_slice()));
+            let CaptureEvent::Samples(system_frame) = receiver.try_recv().unwrap() else {
+                panic!("expected system frame");
+            };
+            assert_eq!(system_frame.track_id(), TrackId::SYSTEM);
+            assert_eq!(system_frame.sequence(), 8);
+            assert_eq!(system_frame.format().channels, 2);
+            assert_eq!(system_frame.samples().as_f32(), Some(system.as_slice()));
+            assert!(receiver.try_recv().is_none());
+        }
+
+        #[test]
+        fn audio_overflow_callback_reports_only_valid_nonzero_sources() {
+            let harness = callback_context(true);
+            let receiver = harness.audio_receiver.as_ref().unwrap();
+            let user_data = std::ptr::from_ref(harness.context.as_ref())
+                .cast_mut()
+                .cast();
+
+            unsafe {
+                on_audio_overflow_thunk(sys::WISP_SOURCE_MIC, 11, user_data);
+                on_audio_overflow_thunk(sys::WISP_SOURCE_SYSTEM, 22, user_data);
+                on_audio_overflow_thunk(99, 33, user_data);
+                on_audio_overflow_thunk(sys::WISP_SOURCE_MIC, 0, user_data);
+                on_audio_overflow_thunk(sys::WISP_SOURCE_MIC, 44, std::ptr::null_mut());
+            }
+
+            assert_eq!(
+                receiver.try_recv(),
+                Some(CaptureEvent::Overflow {
+                    track_id: TrackId::MICROPHONE,
+                    dropped_frames: 11,
+                })
+            );
+            assert_eq!(
+                receiver.try_recv(),
+                Some(CaptureEvent::Overflow {
+                    track_id: TrackId::SYSTEM,
+                    dropped_frames: 22,
+                })
+            );
+            assert!(receiver.try_recv().is_none());
+        }
+
+        #[test]
+        fn transcriber_error_callback_preserves_payload_and_defaults_empty_message() {
+            let harness = callback_context(false);
+            let user_data = std::ptr::from_ref(harness.context.as_ref())
+                .cast_mut()
+                .cast();
+            let recoverable = b"temporary analyzer gap";
+
+            unsafe {
+                on_transcriber_error_thunk(
+                    0,
+                    recoverable.as_ptr().cast(),
+                    recoverable.len(),
+                    user_data,
+                );
+                on_transcriber_error_thunk(1, std::ptr::null(), 0, user_data);
+                on_transcriber_error_thunk(
+                    1,
+                    recoverable.as_ptr().cast(),
+                    recoverable.len(),
+                    std::ptr::null_mut(),
+                );
+            }
+
+            assert_eq!(
+                harness.transcriber_receiver.try_recv(),
+                Some(MacosTranscriberFailure {
+                    terminal: true,
+                    message: "unknown SpeechAnalyzer failure".into(),
+                })
+            );
+            assert_eq!(
+                harness.transcriber_receiver.try_recv(),
+                Some(MacosTranscriberFailure {
+                    terminal: false,
+                    message: "temporary analyzer gap".into(),
+                })
+            );
+            assert!(harness.transcriber_receiver.try_recv().is_none());
+        }
+
+        #[test]
+        fn terminal_error_callback_accepts_known_or_sourceless_failures_only() {
+            let harness = callback_context(false);
+            let user_data = std::ptr::from_ref(harness.context.as_ref())
+                .cast_mut()
+                .cast();
+            let message = b"writer failed";
+
+            unsafe {
+                on_terminal_error_thunk(
+                    sys::WISP_SOURCE_MIC,
+                    message.as_ptr().cast(),
+                    message.len(),
+                    user_data,
+                );
+                on_terminal_error_thunk(-1, std::ptr::null(), 0, user_data);
+                on_terminal_error_thunk(99, message.as_ptr().cast(), message.len(), user_data);
+                on_terminal_error_thunk(
+                    sys::WISP_SOURCE_SYSTEM,
+                    message.as_ptr().cast(),
+                    message.len(),
+                    std::ptr::null_mut(),
+                );
+            }
+
+            assert_eq!(
+                harness.capture_receiver.try_recv(),
+                Some(MacosCaptureFailure {
+                    track_id: Some(TrackId::MICROPHONE),
+                    message: "writer failed".into(),
+                })
+            );
+            assert_eq!(
+                harness.capture_receiver.try_recv(),
+                Some(MacosCaptureFailure {
+                    track_id: None,
+                    message: "unknown terminal capture failure".into(),
+                })
+            );
+            assert!(harness.capture_receiver.try_recv().is_none());
+        }
     }
 }
 
@@ -3737,9 +4473,178 @@ mod imp {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) use imp::NativeSession;
+#[cfg(not(target_os = "macos"))]
+pub use imp::Session;
 pub use imp::version;
-pub use imp::{Event, Session, SessionResult, check_permission, request_permission};
+pub use imp::{Event, SessionResult, check_permission, request_permission};
 pub use wisp_core::SourceLabel;
+
+/// Source-compatible macOS session facade.
+///
+/// Every lifecycle and event operation is delegated to [`MacosSession`], so
+/// legacy callers receive transcription only after PCM has crossed the
+/// backend-neutral capture queue and [`SessionOrchestrator`].
+#[cfg(target_os = "macos")]
+pub struct Session {
+    inner: std::sync::Mutex<MacosSession>,
+    control_waiters: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(target_os = "macos")]
+struct SessionControlGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+
+#[cfg(target_os = "macos")]
+impl<'a> SessionControlGuard<'a> {
+    fn new(waiters: &'a std::sync::atomic::AtomicUsize) -> Self {
+        waiters.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(waiters)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for SessionControlGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Session {
+    const RECEIVE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+    /// Construct a platform-default macOS session.
+    ///
+    /// # Errors
+    /// Returns path, locale, policy-selection, or native construction errors.
+    pub fn new(
+        output_dir: impl AsRef<Path>,
+        locale: &str,
+    ) -> Result<Self> {
+        MacosSession::new(output_dir, locale).map(Self::from_macos)
+    }
+
+    /// Construct a macOS session from the source-compatible configuration.
+    ///
+    /// # Errors
+    /// Returns path, locale, policy-selection, or native construction errors.
+    pub fn new_with_config(
+        output_dir: impl AsRef<Path>,
+        config: SessionConfig,
+    ) -> Result<Self> {
+        MacosSession::new_with_config(output_dir, config).map(Self::from_macos)
+    }
+
+    /// Construct a macOS session with an explicit transcription policy.
+    ///
+    /// # Errors
+    /// Returns path, locale, policy-selection, or native construction errors.
+    pub fn new_with_options(
+        output_dir: impl AsRef<Path>,
+        options: SessionOptions,
+    ) -> Result<Self> {
+        MacosSession::new_with_options(output_dir, options).map(Self::from_macos)
+    }
+
+    fn from_macos(inner: MacosSession) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(inner),
+            control_waiters: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Start capture and the selected transcription backend.
+    ///
+    /// # Errors
+    /// Returns a transactional platform/backend start failure.
+    pub fn start(&mut self) -> Result<()> {
+        self.lock_inner().start()
+    }
+
+    /// Whether native capture reached the running milestone.
+    #[must_use]
+    pub fn has_started_capture(&self) -> bool {
+        self.lock_inner().has_started_capture()
+    }
+
+    /// Replace microphone PCM with silence while retaining both timelines.
+    pub fn set_microphone_muted(
+        &self,
+        muted: bool,
+    ) {
+        let _control = SessionControlGuard::new(&self.control_waiters);
+        self.lock_inner().set_microphone_muted(muted);
+    }
+
+    /// Gracefully stop and drain capture, recording, and transcription.
+    pub fn stop(&self) {
+        let _control = SessionControlGuard::new(&self.control_waiters);
+        self.lock_inner().stop();
+    }
+
+    /// Receive the next compatibility event.
+    #[must_use]
+    pub fn recv(&self) -> Option<Event> {
+        loop {
+            if let Some(event) = self.recv_timeout(std::time::Duration::from_secs(1)) {
+                return Some(event);
+            }
+            if self.lock_inner().is_stopped() {
+                return None;
+            }
+        }
+    }
+
+    /// Receive the next compatibility event before `timeout`.
+    #[must_use]
+    pub fn recv_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<Event> {
+        let started_at = std::time::Instant::now();
+        let mut first_poll = true;
+        loop {
+            let remaining = timeout.saturating_sub(started_at.elapsed());
+            if self
+                .control_waiters
+                .load(std::sync::atomic::Ordering::Acquire)
+                > 0
+            {
+                if remaining.is_zero() {
+                    return None;
+                }
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(1)));
+                continue;
+            }
+            if !first_poll && remaining.is_zero() {
+                return self.lock_inner().try_recv();
+            }
+            first_poll = false;
+            let poll_interval = remaining.min(Self::RECEIVE_POLL_INTERVAL);
+            let mut inner = self.lock_inner();
+            if let Some(event) = inner.recv_timeout(poll_interval) {
+                return Some(event);
+            }
+            if inner.is_stopped() {
+                return None;
+            }
+            drop(inner);
+        }
+    }
+
+    /// Poll for one compatibility event without blocking.
+    #[must_use]
+    pub fn try_recv(&self) -> Option<Event> {
+        self.lock_inner().try_recv()
+    }
+
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, MacosSession> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
 
 impl SessionResult {
     /// Convert the platform compatibility result into the backend-neutral
@@ -6427,8 +7332,8 @@ mod tests {
 
     #[test]
     fn session_constructs_and_drops_without_starting() {
-        let tmp = std::env::temp_dir().join(format!("wisp-audiokit-test-{}", std::process::id()));
-        let s = Session::new(&tmp, "ja-JP").expect("session new");
+        let tmp = tempfile::tempdir().expect("temporary output directory");
+        let s = Session::new(tmp.path(), "ja-JP").expect("session new");
         // Pull events: there are none yet because we never started.
         assert!(s.try_recv().is_none());
         drop(s);

@@ -1,7 +1,6 @@
 @preconcurrency import AVFoundation
 import CoreAudio
 import Foundation
-import os.lock
 
 /// Captures system audio via Core Audio Process Tap (macOS 14.2+).
 ///
@@ -15,7 +14,11 @@ import os.lock
 ///   2. Create a private Aggregate Device that wraps the tap as a sub-tap
 ///   3. `AudioDeviceCreateIOProcIDWithBlock` to start receiving PCM via HAL
 public final class ProcessTapCapture: @unchecked Sendable {
-    private let onBuffer: (AVAudioPCMBuffer) -> Void
+    private let onBuffer: ((AVAudioPCMBuffer) -> Void)?
+    private let onRawBuffer: ((
+        UnsafePointer<AudioBufferList>,
+        AVAudioFormat
+    ) -> Void)?
     private let lifecycleLock = NSLock()
 
     private var tapID: AudioObjectID = .init(kAudioObjectUnknown)
@@ -23,12 +26,21 @@ public final class ProcessTapCapture: @unchecked Sendable {
     private var ioProcID: AudioDeviceIOProcID?
     public private(set) var captureFormat: AVAudioFormat?
 
-    // Diagnostics: count callbacks vs successful buffer conversions
-    private let ioCallbackCount = OSAllocatedUnfairLock<Int>(initialState: 0)
-    private let bufferYieldCount = OSAllocatedUnfairLock<Int>(initialState: 0)
-
     public init(onBuffer: @escaping (AVAudioPCMBuffer) -> Void) {
         self.onBuffer = onBuffer
+        onRawBuffer = nil
+    }
+
+    /// Allocation-free IOProc delivery for consumers with their own
+    /// preallocated handoff. The pointer is callback-scoped.
+    public init(
+        onRawBuffer: @escaping (
+            UnsafePointer<AudioBufferList>,
+            AVAudioFormat
+        ) -> Void
+    ) {
+        onBuffer = nil
+        self.onRawBuffer = onRawBuffer
     }
 
     deinit {
@@ -127,20 +139,22 @@ public final class ProcessTapCapture: @unchecked Sendable {
 
         // 6. Install IOProc to receive audio buffers.
         let onBufferLocal = onBuffer
+        let onRawBufferLocal = onRawBuffer
         let formatLocal = avFormat
-        let ioCounter = ioCallbackCount
-        let yieldCounter = bufferYieldCount
         status = AudioDeviceCreateIOProcIDWithBlock(
             &localProcID,
             localAggID,
             DispatchQueue.global(qos: .userInitiated),
             { _, inputData, _, _, _ in
-                ioCounter.withLock { $0 += 1 }
+                if let onRawBufferLocal {
+                    onRawBufferLocal(inputData, formatLocal)
+                    return
+                }
                 guard let pcm = makePCMBuffer(
                     from: inputData,
                     format: formatLocal
-                ) else { return }
-                yieldCounter.withLock { $0 += 1 }
+                ), let onBufferLocal
+                else { return }
                 onBufferLocal(pcm)
             }
         )
@@ -165,10 +179,6 @@ public final class ProcessTapCapture: @unchecked Sendable {
     public func stop() {
         lifecycleLock.lock()
         defer { lifecycleLock.unlock() }
-
-        let ioCount = ioCallbackCount.withLock { $0 }
-        let yieldCount = bufferYieldCount.withLock { $0 }
-        wispLog("[SYS] diagnostics: IOProc=\(ioCount) calls, yields=\(yieldCount) buffers")
 
         destroyCaptureResources(tapID: tapID, aggregateID: aggregateID, ioProcID: ioProcID)
         ioProcID = nil
@@ -264,30 +274,37 @@ private func makePCMBuffer(
     from listPtr: UnsafePointer<AudioBufferList>,
     format: AVAudioFormat
 ) -> AVAudioPCMBuffer? {
-    let mutableListPtr = UnsafeMutableAudioBufferListPointer(
+    let sourceBuffers = UnsafeMutableAudioBufferListPointer(
         UnsafeMutablePointer(mutating: listPtr)
     )
-    guard let firstBuffer = mutableListPtr.first else { return nil }
-
-    let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
-    guard bytesPerFrame > 0 else { return nil }
-
-    // For interleaved Float32 stereo the whole frame is in mBuffers[0].
-    // For non-interleaved planar, mBuffers has N entries (one per channel).
-    let frameCount = AVAudioFrameCount(Int(firstBuffer.mDataByteSize) / bytesPerFrame)
-    guard frameCount > 0,
-          let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount)
-    else { return nil }
+    guard let layout = packedNativeFloat32Layout(
+        buffers: sourceBuffers,
+        format: format,
+        maximumSamples: RealtimeAudioHandoff.maximumSamplesPerBuffer
+    ), let frameCount = AVAudioFrameCount(exactly: layout.frameCount),
+    let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount)
+    else {
+        return nil
+    }
     pcm.frameLength = frameCount
-
-    for (idx, srcBuf) in mutableListPtr.enumerated() {
-        guard idx < Int(format.channelCount), let srcPtr = srcBuf.mData else { continue }
-        let byteCount = Int(srcBuf.mDataByteSize)
-        if let dst = pcm.floatChannelData?[idx] {
-            memcpy(dst, srcPtr, byteCount)
-        } else if let dst = pcm.int16ChannelData?[idx] {
-            memcpy(dst, srcPtr, byteCount)
-        }
+    let destinationBuffers = UnsafeMutableAudioBufferListPointer(
+        pcm.mutableAudioBufferList
+    )
+    guard destinationBuffers.count == sourceBuffers.count,
+          destinationBuffers.allSatisfy({
+              $0.mData != nil && Int($0.mDataByteSize) >= layout.bytesPerBuffer
+          })
+    else {
+        return nil
+    }
+    for index in sourceBuffers.indices {
+        // Source pointer/size and destination capacity were all validated
+        // before the first callback-scoped byte is read.
+        memcpy(
+            destinationBuffers[index].mData!,
+            sourceBuffers[index].mData!,
+            layout.bytesPerBuffer
+        )
     }
     return pcm
 }

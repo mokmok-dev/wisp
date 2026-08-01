@@ -15,9 +15,16 @@ final class OpusOggRecorder: @unchecked Sendable {
 
     private let continuation: AsyncStream<AVAudioPCMBuffer>.Continuation
     private let encodingTask: Task<Void, Never>
-    private let droppedBuffers = OSAllocatedUnfairLock<Int>(initialState: 0)
+    private let droppedFrames = OSAllocatedUnfairLock<UInt64>(initialState: 0)
+    private let onDroppedFrames: @Sendable (UInt64) -> Void
 
-    init(url: URL, sourceFormat: AVAudioFormat) throws {
+    init(
+        url: URL,
+        sourceFormat: AVAudioFormat,
+        onFatal: @escaping @Sendable (String) -> Void = { wispLog($0) },
+        onDroppedFrames: @escaping @Sendable (UInt64) -> Void = { _ in }
+    ) throws {
+        self.onDroppedFrames = onDroppedFrames
         let channelCount = min(max(sourceFormat.channelCount, 1), 2)
         let encoder = try OpusEncoder(url: url, channelCount: channelCount)
         let (stream, continuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(
@@ -27,11 +34,19 @@ final class OpusOggRecorder: @unchecked Sendable {
         encodingTask = Task.detached(priority: .utility) {
             do {
                 for await buffer in stream {
+                    if Task.isCancelled {
+                        try encoder.closeAfterError()
+                        return
+                    }
                     try encoder.encode(buffer)
+                }
+                if Task.isCancelled {
+                    try encoder.closeAfterError()
+                    return
                 }
                 try encoder.finish()
             } catch {
-                wispLog("[OGG] encoder error for \(url.lastPathComponent): \(error)")
+                onFatal("[OGG] encoder error for \(url.lastPathComponent): \(error)")
                 try? encoder.closeAfterError()
             }
         }
@@ -40,19 +55,17 @@ final class OpusOggRecorder: @unchecked Sendable {
     /// Copies and queues a callback-owned PCM buffer without performing codec
     /// or file I/O on the real-time audio thread.
     func push(_ buffer: AVAudioPCMBuffer) {
+        let frames = UInt64(buffer.frameLength)
         guard let copy = buffer.detachedCopy() else {
-            droppedBuffers.withLock { $0 += 1 }
+            reportDropped(frames)
             return
         }
-        switch continuation.yield(copy) {
-        case .enqueued:
-            break
-        case .dropped:
-            droppedBuffers.withLock { $0 += 1 }
-        case .terminated:
-            break
-        @unknown default:
-            droppedBuffers.withLock { $0 += 1 }
+        let disposition = continuation.yield(copy)
+        if let dropped = recorderDroppedFrameCount(
+            disposition,
+            offeredFrames: frames
+        ) {
+            reportDropped(dropped)
         }
     }
 
@@ -61,10 +74,38 @@ final class OpusOggRecorder: @unchecked Sendable {
     func finish() async {
         continuation.finish()
         await encodingTask.value
-        let dropped = droppedBuffers.withLock { $0 }
-        if dropped > 0 {
-            wispLog("[OGG] dropped \(dropped) buffered audio chunks")
-        }
+    }
+
+    /// Stop without intentionally draining queued buffers. Already-written
+    /// Ogg pages remain usable as a truncated recording.
+    func abort() async {
+        encodingTask.cancel()
+        continuation.finish()
+        await encodingTask.value
+    }
+
+    private func reportDropped(_ frames: UInt64) {
+        guard frames > 0 else { return }
+        droppedFrames.withLock { $0 &+= frames }
+        onDroppedFrames(frames)
+    }
+}
+
+/// AsyncStream's `bufferingNewest` evicts and returns the oldest buffered
+/// element. Account for that element rather than the newly accepted one.
+func recorderDroppedFrameCount(
+    _ disposition: AsyncStream<AVAudioPCMBuffer>.Continuation.YieldResult,
+    offeredFrames: UInt64
+) -> UInt64? {
+    switch disposition {
+    case .enqueued:
+        nil
+    case .dropped(let droppedBuffer):
+        UInt64(droppedBuffer.frameLength)
+    case .terminated:
+        offeredFrames
+    @unknown default:
+        offeredFrames
     }
 }
 

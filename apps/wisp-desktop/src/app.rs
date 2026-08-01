@@ -15,7 +15,8 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use wisp_audiokit::{
     Event, LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SessionConfig,
-    SessionError, SessionResult, SourceLabel, local_model_spec, local_model_status,
+    SessionError, SessionOptions, SessionResult, SourceLabel, TranscriptionPolicy,
+    local_model_spec, local_model_status,
 };
 use wisp_core::{Session as StoredSession, SessionId};
 use wisp_lifecycle::{Phase, UpdateContext, ViewOwner, WorkerUpdate, can_replace_transcript};
@@ -149,6 +150,27 @@ impl Permissions {
     /// the normal Record screen.
     pub fn all_granted(self) -> bool {
         self.microphone.is_granted() && self.speech.is_granted()
+    }
+
+    /// Whether the minimum permissions required by this session policy are
+    /// available. macOS may record after Speech Recognition is explicitly
+    /// denied/restricted only when policy permits record-only fallback.
+    pub fn satisfies(
+        self,
+        policy: TranscriptionPolicy,
+    ) -> bool {
+        if !self.microphone.is_granted() {
+            return false;
+        }
+        if self.speech.is_granted() {
+            return true;
+        }
+        cfg!(target_os = "macos")
+            && policy.allow_record_only
+            && matches!(
+                self.speech,
+                PermissionStatus::Denied | PermissionStatus::Restricted
+            )
     }
 
     pub fn set_status(
@@ -643,7 +665,8 @@ impl AppModel {
     }
 
     pub fn setup_complete(&self) -> bool {
-        self.permissions.all_granted() && self.setup.is_complete()
+        let options: SessionOptions = self.setup.session_config("ja-JP").into();
+        self.permissions.satisfies(options.transcription_policy()) && self.setup.is_complete()
     }
 }
 
@@ -1034,5 +1057,29 @@ mod tests {
         }
         assert!(m.recent_log.len() <= 200);
         assert!(m.recent_log.back().unwrap().contains("299"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_permission_gate_exposes_explicit_record_only_fallback() {
+        let permissions = Permissions {
+            microphone: PermissionStatus::Granted,
+            speech: PermissionStatus::Denied,
+            pending: None,
+        };
+        assert!(permissions.satisfies(TranscriptionPolicy::platform_default()));
+        assert!(!permissions.satisfies(TranscriptionPolicy {
+            allow_record_only: false,
+            ..TranscriptionPolicy::platform_default()
+        }));
+
+        let undetermined = Permissions {
+            speech: PermissionStatus::Undetermined,
+            ..permissions
+        };
+        assert!(
+            !undetermined.satisfies(TranscriptionPolicy::platform_default()),
+            "the onboarding screen should still offer the Speech prompt before denial"
+        );
     }
 }

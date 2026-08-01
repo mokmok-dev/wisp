@@ -12,6 +12,7 @@ public enum PoCError: Error, CustomStringConvertible {
     case noDisplay
     case scStreamSetupFailed(String)
     case outputFilesAlreadyExist(String)
+    case analyzerFinalizationFailed(String)
 
     public var description: String {
         switch self {
@@ -27,6 +28,8 @@ public enum PoCError: Error, CustomStringConvertible {
         case .scStreamSetupFailed(let msg): "SCStream setup failed: \(msg)"
         case .outputFilesAlreadyExist(let path):
             "Recording output files already exist in: \(path)"
+        case .analyzerFinalizationFailed(let message):
+            "SpeechAnalyzer finalization failed: \(message)"
         }
     }
 }

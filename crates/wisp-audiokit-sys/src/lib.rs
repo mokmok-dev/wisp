@@ -60,6 +60,39 @@ pub type WispResultCallback = unsafe extern "C" fn(
 pub type WispLogCallback =
     unsafe extern "C" fn(message_utf8: *const c_char, message_len: usize, user_data: *mut c_void);
 
+/// Callback invoked for one interleaved Float32 PCM chunk.
+pub type WispAudioCallback = unsafe extern "C" fn(
+    source: i32,
+    sequence: u64,
+    timestamp_seconds: f64,
+    sample_rate: u32,
+    channels: u32,
+    samples: *const f32,
+    sample_count: usize,
+    user_data: *mut c_void,
+);
+
+/// Callback invoked when the platform transcriber reports a recoverable or
+/// terminal failure.
+pub type WispTranscriberErrorCallback = unsafe extern "C" fn(
+    terminal: i32,
+    message_utf8: *const c_char,
+    message_len: usize,
+    user_data: *mut c_void,
+);
+
+/// Callback invoked when bounded Swift callback staging drops native PCM.
+pub type WispAudioOverflowCallback =
+    unsafe extern "C" fn(source: i32, dropped_frames: u64, user_data: *mut c_void);
+
+/// Reserved terminal capture/recording failure callback.
+pub type WispTerminalErrorCallback = unsafe extern "C" fn(
+    source: i32,
+    message_utf8: *const c_char,
+    message_len: usize,
+    user_data: *mut c_void,
+);
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     /// Returns a static, NUL-terminated UTF-8 version string for the
@@ -76,6 +109,28 @@ unsafe extern "C" {
         user_data: *mut c_void,
     ) -> *mut WispSession;
 
+    /// Versioned constructor carrying backend-neutral options and callbacks.
+    /// The original five-argument constructor remains ABI-stable.
+    pub fn wisp_session_new_v2(
+        output_dir: *const c_char,
+        locale: *const c_char,
+        transcription_enabled: c_int,
+        allow_record_only: c_int,
+        on_result: Option<WispResultCallback>,
+        on_audio: Option<WispAudioCallback>,
+        on_audio_overflow: Option<WispAudioOverflowCallback>,
+        on_transcriber_error: Option<WispTranscriberErrorCallback>,
+        on_terminal_error: Option<WispTerminalErrorCallback>,
+        on_log: Option<WispLogCallback>,
+        user_data: *mut c_void,
+    ) -> *mut WispSession;
+
+    /// Start capture/recording without touching `SpeechAnalyzer`.
+    pub fn wisp_session_start_capture(session: *mut WispSession) -> c_int;
+
+    /// Configure and start `SpeechAnalyzer` after capture is running.
+    pub fn wisp_session_start_transcription(session: *mut WispSession) -> c_int;
+
     /// Start capture + transcription. Blocks until ready or failed.
     /// Returns 0 on success, non-zero on failure.
     pub fn wisp_session_start(session: *mut WispSession) -> c_int;
@@ -89,10 +144,33 @@ unsafe extern "C" {
         muted: c_int,
     );
 
+    /// Submit one orchestrated interleaved Float32 PCM frame to `SpeechAnalyzer`.
+    /// Returns non-zero when transcription is inactive or input is invalid.
+    pub fn wisp_session_push_transcriber_audio(
+        session: *mut WispSession,
+        source: c_int,
+        sample_rate: u32,
+        channels: u32,
+        samples: *const f32,
+        sample_count: usize,
+    ) -> c_int;
+
+    /// Cancel every `SpeechAnalyzer` while capture/Ogg recording continue.
+    pub fn wisp_session_disable_transcription(session: *mut WispSession) -> c_int;
+
+    /// Stop capture producers and finish recording, preserving analyzer input.
+    pub fn wisp_session_stop_capture(session: *mut WispSession) -> c_int;
+
+    /// Finish analyzer input and wait for final transcript callbacks.
+    pub fn wisp_session_finish_transcription(session: *mut WispSession) -> c_int;
+
     /// Stop capture and wait for results to drain. Blocks except when called
     /// reentrantly from this session's result/log callback; that case starts
     /// the shared stop and returns so the callback can unwind.
     pub fn wisp_session_stop(session: *mut WispSession);
+
+    /// Stop without draining staged PCM or transcript finals.
+    pub fn wisp_session_abort(session: *mut WispSession);
 
     /// Stop if necessary and free the session handle. This is the final
     /// resource/callback barrier for ordinary non-reentrant callers.
@@ -113,4 +191,19 @@ unsafe extern "C" {
     /// resulting `WISP_PERMISSION_STATUS_*`. Safe to call from any thread —
     /// the macOS APIs marshal the dialog to the main thread internally.
     pub fn wisp_permission_request(permission: i32) -> c_int;
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod abi_tests {
+    use super::*;
+
+    #[test]
+    fn backend_v2_lifecycle_symbols_match_the_declared_c_abi() {
+        let _: unsafe extern "C" fn(*mut WispSession) -> c_int = wisp_session_start_capture;
+        let _: unsafe extern "C" fn(*mut WispSession) -> c_int = wisp_session_start_transcription;
+        let _: unsafe extern "C" fn(*mut WispSession) -> c_int = wisp_session_stop_capture;
+        let _: unsafe extern "C" fn(*mut WispSession) -> c_int = wisp_session_finish_transcription;
+        let _: unsafe extern "C" fn(*mut WispSession) -> c_int = wisp_session_disable_transcription;
+        let _: unsafe extern "C" fn(*mut WispSession) = wisp_session_abort;
+    }
 }

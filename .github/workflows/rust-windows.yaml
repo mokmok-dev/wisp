@@ -31,6 +31,8 @@ jobs:
       # the ordinary Linux job cannot see code behind cfg(target_os).
       - run: cargo clippy -p wisp-audiokit --all-targets -- -D warnings
       - run: cargo test -p wisp-audiokit --all-targets
+      - run: cargo test --manifest-path vendor/wasapi/Cargo.toml --lib
+      - run: cargo test -p wisp-desktop --all-targets
 
       - name: Build Windows binaries
         run: cargo build -p wisp-desktop -p wisp-mcp --release --locked

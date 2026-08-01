@@ -670,7 +670,7 @@ fn run_capture_worker(
                 quit_on_bad_format.quit();
             }
         })
-        .process(|stream, data| {
+        .process(move |stream, data| {
             if !data.format_valid {
                 return;
             }

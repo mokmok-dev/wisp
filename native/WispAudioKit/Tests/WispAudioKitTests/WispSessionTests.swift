@@ -817,11 +817,10 @@ final class WispSessionTests: XCTestCase {
         let (stream, continuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
-        let disposition = withExtendedLifetime(stream) {
-            _ = continuation.yield(evicted)
-            return continuation.yield(offered)
-        }
+        _ = continuation.yield(evicted)
+        let disposition = continuation.yield(offered)
         continuation.finish()
+        withExtendedLifetime(stream) {}
 
         XCTAssertEqual(
             recorderDroppedFrameCount(disposition, offeredFrames: 7),

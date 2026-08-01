@@ -1137,7 +1137,7 @@ mod tests {
             .try_send(make_frame(TrackId::MICROPHONE, 0, vec![0.5; 320]))
             .unwrap();
         senders[0]
-            .try_send(make_frame(TrackId::MICROPHONE, 320, vec![0.5; 320]))
+            .try_send(make_frame(TrackId::MICROPHONE, 320, vec![0.5; 3_200]))
             .unwrap();
         drop(senders);
         let (notification_sender, notifications) = crossbeam_channel::bounded(2);
@@ -1145,10 +1145,17 @@ mod tests {
         recording_loop(&receiver, mic, system, &notification_sender).unwrap();
 
         let mic_pcm = decode_ogg(&mic_path);
-        assert_eq!(mic_pcm.len(), 640 * 3);
+        assert_eq!(mic_pcm.len(), 3_520 * 3);
         assert!(mean_abs(&mic_pcm[200..700]) > 0.1);
-        assert!(mean_abs(&mic_pcm[1_300..1_800]) < 0.1);
-        assert!(notifications.recv().unwrap().contains("dropped 320 frames"));
+        // Check well past the Opus transition so codec ringing at the
+        // signal-to-silence boundary cannot make this assertion flaky.
+        assert!(mean_abs(&mic_pcm[8_000..9_000]) < 0.1);
+        assert!(
+            notifications
+                .recv()
+                .unwrap()
+                .contains("dropped 3200 frames")
+        );
     }
 
     #[test]

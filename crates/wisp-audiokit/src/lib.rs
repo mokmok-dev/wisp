@@ -1124,18 +1124,18 @@ fn saturating_atomic_increment(value: &std::sync::atomic::AtomicU64) {
 }
 
 #[cfg(any(test, target_os = "windows"))]
-enum MergedSessionReceive<T> {
+enum MergedSessionReceive<T, N = String> {
     Main(T),
-    Notification(String),
+    Notification(N),
     RuntimeControl(WindowsRuntimeNotification),
 }
 
 #[cfg(test)]
-fn try_recv_callback_session_channels<T, K>(
+fn try_recv_callback_session_channels<T, K, N>(
     main: &CallbackEventReceiver<T, K>,
-    fatal: &crossbeam_channel::Receiver<String>,
-    warning: &crossbeam_channel::Receiver<String>,
-) -> Option<MergedSessionReceive<T>>
+    fatal: &crossbeam_channel::Receiver<N>,
+    warning: &crossbeam_channel::Receiver<N>,
+) -> Option<MergedSessionReceive<T, N>>
 where
     K: CallbackEventKey,
 {
@@ -1143,12 +1143,12 @@ where
 }
 
 #[cfg(any(test, target_os = "windows"))]
-fn try_recv_callback_session_channels_with_control<T, K>(
+fn try_recv_callback_session_channels_with_control<T, K, N>(
     main: &CallbackEventReceiver<T, K>,
-    fatal: &crossbeam_channel::Receiver<String>,
+    fatal: &crossbeam_channel::Receiver<N>,
     runtime_control: Option<&crossbeam_channel::Receiver<WindowsRuntimeNotification>>,
-    warning: &crossbeam_channel::Receiver<String>,
-) -> Option<MergedSessionReceive<T>>
+    warning: &crossbeam_channel::Receiver<N>,
+) -> Option<MergedSessionReceive<T, N>>
 where
     K: CallbackEventKey,
 {
@@ -1174,12 +1174,12 @@ where
 }
 
 #[cfg(test)]
-fn recv_session_channels<T>(
+fn recv_session_channels<T, N>(
     main: &crossbeam_channel::Receiver<T>,
-    fatal: &crossbeam_channel::Receiver<String>,
-    warning: &crossbeam_channel::Receiver<String>,
+    fatal: &crossbeam_channel::Receiver<N>,
+    warning: &crossbeam_channel::Receiver<N>,
     timeout: Option<std::time::Duration>,
-) -> Option<MergedSessionReceive<T>> {
+) -> Option<MergedSessionReceive<T, N>> {
     let started = std::time::Instant::now();
     let mut main_open = true;
     let mut fatal_open = true;
@@ -1250,12 +1250,12 @@ fn recv_session_channels<T>(
 }
 
 #[cfg(test)]
-fn recv_callback_session_channels<T, K>(
+fn recv_callback_session_channels<T, K, N>(
     main: &CallbackEventReceiver<T, K>,
-    fatal: &crossbeam_channel::Receiver<String>,
-    warning: &crossbeam_channel::Receiver<String>,
+    fatal: &crossbeam_channel::Receiver<N>,
+    warning: &crossbeam_channel::Receiver<N>,
     timeout: Option<std::time::Duration>,
-) -> Option<MergedSessionReceive<T>>
+) -> Option<MergedSessionReceive<T, N>>
 where
     K: CallbackEventKey,
 {
@@ -1263,13 +1263,13 @@ where
 }
 
 #[cfg(any(test, target_os = "windows"))]
-fn recv_callback_session_channels_with_control<T, K>(
+fn recv_callback_session_channels_with_control<T, K, N>(
     main: &CallbackEventReceiver<T, K>,
-    fatal: &crossbeam_channel::Receiver<String>,
+    fatal: &crossbeam_channel::Receiver<N>,
     runtime_control: Option<&crossbeam_channel::Receiver<WindowsRuntimeNotification>>,
-    warning: &crossbeam_channel::Receiver<String>,
+    warning: &crossbeam_channel::Receiver<N>,
     timeout: Option<std::time::Duration>,
-) -> Option<MergedSessionReceive<T>>
+) -> Option<MergedSessionReceive<T, N>>
 where
     K: CallbackEventKey,
 {
@@ -3429,6 +3429,7 @@ mod imp {
     use wisp_core::SourceLabel;
 
     use crate::error::{Result, SessionError};
+    use crate::wasapi_capture::RecordingNotification;
     use crate::{
         CallbackEventClass, CallbackEventReceiver, CallbackEventSender, MergedSessionReceive,
         OneShotSessionLifecycle, Permission, PermissionStatus, SessionConfig, SessionOptions,
@@ -3830,6 +3831,8 @@ mod imp {
         lifecycle: Arc<OneShotSessionLifecycle>,
         runtime_control_receiver: crossbeam_channel::Receiver<WindowsRuntimeNotification>,
         cleanup: WindowsCleanupCoordinator,
+        runtime_failure: std::sync::Mutex<Option<SessionError>>,
+        runtime_failure_recorded: AtomicBool,
     }
 
     impl Session {
@@ -3888,6 +3891,8 @@ mod imp {
                 lifecycle: Arc::new(OneShotSessionLifecycle::new()),
                 runtime_control_receiver,
                 cleanup,
+                runtime_failure: std::sync::Mutex::new(None),
+                runtime_failure_recorded: AtomicBool::new(false),
             })
         }
 
@@ -3952,16 +3957,52 @@ mod imp {
 
         /// Stop the session. Idempotent.
         pub fn stop(&self) {
+            if let Some(error) = self.stop_cleanup_error() {
+                self.record_runtime_failure(error.to_string());
+            }
+        }
+
+        /// Stop capture and return the complete terminal failure, including
+        /// cleanup/finalization errors that occur after an earlier failure was
+        /// already observed by the caller.
+        #[must_use]
+        pub fn stop_and_take_runtime_failure(&self) -> Option<SessionError> {
+            let primary = self.take_runtime_failure();
+            let cleanup = self.stop_cleanup_error();
+            match (primary, cleanup) {
+                (Some(primary), Some(cleanup)) => Some(SessionError::Start(format!(
+                    "{primary}; cleanup/finalization also failed: {cleanup}"
+                ))),
+                (Some(primary), None) => Some(primary),
+                (None, Some(cleanup)) => Some(cleanup),
+                (None, None) => None,
+            }
+        }
+
+        fn stop_cleanup_error(&self) -> Option<SessionError> {
             let (claimed, started_retry, report) = super::claim_and_wait_windows_stop(
                 &self.lifecycle,
                 || self.cleanup.request_all(),
                 |generation| self.cleanup.wait_for_all(generation),
             );
-            if (claimed || started_retry)
-                && let Some(err) = report.and_then(|report| report.error)
-            {
+            let error = (claimed || started_retry)
+                .then(|| report.and_then(|report| report.error))
+                .flatten()
+                .map(SessionError::Start);
+            if let Some(err) = &error {
                 enqueue_event(&self.sender, Event::Log(format!("[WIN] {err}")));
             }
+            error
+        }
+
+        /// Take a terminal capture/writer/finalization failure, if one has
+        /// occurred. The value is consumed so callers publish it once.
+        #[must_use]
+        pub fn take_runtime_failure(&self) -> Option<SessionError> {
+            self.runtime_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
         }
 
         /// Non-blocking event poll.
@@ -3970,6 +4011,9 @@ mod imp {
             let Some(recording) = self.recording.as_ref() else {
                 return self.receiver.try_recv();
             };
+            if let Some(event) = self.poll_recording_failure(recording) {
+                return Some(event);
+            }
             match try_recv_callback_session_channels_with_control(
                 &self.receiver,
                 recording.fatal_error_receiver(),
@@ -3978,10 +4022,10 @@ mod imp {
             ) {
                 Some(MergedSessionReceive::Main(event)) => Some(event),
                 Some(MergedSessionReceive::Notification(message)) => {
-                    Some(Event::Log(format!("[WIN] {message}")))
+                    Some(self.recording_notification_event(message))
                 },
                 Some(MergedSessionReceive::RuntimeControl(control)) => {
-                    Some(Self::runtime_control_event(control))
+                    Some(self.runtime_control_event(control))
                 },
                 None => None,
             }
@@ -3992,22 +4036,28 @@ mod imp {
         #[must_use]
         pub fn recv(&self) -> Option<Event> {
             if let Some(recording) = &self.recording {
-                return match recv_callback_session_channels_with_control(
-                    &self.receiver,
-                    recording.fatal_error_receiver(),
-                    Some(&self.runtime_control_receiver),
-                    recording.warning_receiver(),
-                    None,
-                ) {
-                    Some(MergedSessionReceive::Main(event)) => Some(event),
-                    Some(MergedSessionReceive::Notification(message)) => {
-                        Some(Event::Log(format!("[WIN] {message}")))
-                    },
-                    Some(MergedSessionReceive::RuntimeControl(control)) => {
-                        Some(Self::runtime_control_event(control))
-                    },
-                    None => None,
-                };
+                loop {
+                    if let Some(event) = self.poll_recording_failure(recording) {
+                        return Some(event);
+                    }
+                    if let Some(received) = recv_callback_session_channels_with_control(
+                        &self.receiver,
+                        recording.fatal_error_receiver(),
+                        Some(&self.runtime_control_receiver),
+                        recording.warning_receiver(),
+                        Some(Duration::from_millis(100)),
+                    ) {
+                        return match received {
+                            MergedSessionReceive::Main(event) => Some(event),
+                            MergedSessionReceive::Notification(notification) => {
+                                Some(self.recording_notification_event(notification))
+                            },
+                            MergedSessionReceive::RuntimeControl(control) => {
+                                Some(self.runtime_control_event(control))
+                            },
+                        };
+                    }
+                }
             }
             self.receiver.recv()
         }
@@ -4019,6 +4069,9 @@ mod imp {
             timeout: Duration,
         ) -> Option<Event> {
             if let Some(recording) = &self.recording {
+                if let Some(event) = self.poll_recording_failure(recording) {
+                    return Some(event);
+                }
                 return match recv_callback_session_channels_with_control(
                     &self.receiver,
                     recording.fatal_error_receiver(),
@@ -4028,10 +4081,10 @@ mod imp {
                 ) {
                     Some(MergedSessionReceive::Main(event)) => Some(event),
                     Some(MergedSessionReceive::Notification(message)) => {
-                        Some(Event::Log(format!("[WIN] {message}")))
+                        Some(self.recording_notification_event(message))
                     },
                     Some(MergedSessionReceive::RuntimeControl(control)) => {
-                        Some(Self::runtime_control_event(control))
+                        Some(self.runtime_control_event(control))
                     },
                     None => None,
                 };
@@ -4139,8 +4192,53 @@ mod imp {
             enqueue_event(&self.sender, Event::Log(notice));
         }
 
-        fn runtime_control_event(control: WindowsRuntimeNotification) -> Event {
+        fn recording_notification_event(
+            &self,
+            notification: RecordingNotification,
+        ) -> Event {
+            let (level, message) = match notification {
+                RecordingNotification::Fatal(message) => {
+                    self.record_runtime_failure(message.clone());
+                    ("FATAL", message)
+                },
+                RecordingNotification::Warning(message) => ("WARN", message),
+            };
+            Event::Log(format!("[WIN][{level}] {message}"))
+        }
+
+        fn poll_recording_failure(
+            &self,
+            recording: &WasapiRecording,
+        ) -> Option<Event> {
+            let error = recording.detect_terminal_failure()?;
+            let message = error.to_string();
+            self.record_runtime_failure(message.clone())
+                .then(|| Event::Log(format!("[FATAL] {message}")))
+        }
+
+        fn runtime_control_event(
+            &self,
+            control: WindowsRuntimeNotification,
+        ) -> Event {
+            if let WindowsRuntimeNotification::Fatal(message) = &control {
+                self.record_runtime_failure(message.clone());
+            }
             Event::Log(super::format_windows_runtime_notification(control))
+        }
+
+        fn record_runtime_failure(
+            &self,
+            message: String,
+        ) -> bool {
+            if self.runtime_failure_recorded.swap(true, Ordering::SeqCst) {
+                return false;
+            }
+            let mut failure = self
+                .runtime_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *failure = Some(SessionError::Start(message));
+            true
         }
     }
 
@@ -5686,8 +5784,8 @@ mod compatibility_tests {
         );
 
         let (_main_sender, main_receiver) = callback_event_channel::<String, u64>();
-        let (_fatal_sender, fatal_receiver) = crossbeam_channel::bounded(1);
-        let (_warning_sender, warning_receiver) = crossbeam_channel::bounded(1);
+        let (_fatal_sender, fatal_receiver) = crossbeam_channel::bounded::<String>(1);
+        let (_warning_sender, warning_receiver) = crossbeam_channel::bounded::<String>(1);
         let Some(MergedSessionReceive::RuntimeControl(notification)) =
             try_recv_callback_session_channels_with_control(
                 &main_receiver,
@@ -7035,8 +7133,8 @@ mod compatibility_tests {
     #[test]
     fn callback_merger_prioritizes_fatal_then_reserved_final() {
         let (sender, main_receiver) = callback_event_channel::<&str, u64>();
-        let (fatal_sender, fatal_receiver) = crossbeam_channel::bounded(1);
-        let (_warning_sender, warning_receiver) = crossbeam_channel::bounded(1);
+        let (fatal_sender, fatal_receiver) = crossbeam_channel::bounded::<String>(1);
+        let (_warning_sender, warning_receiver) = crossbeam_channel::bounded::<String>(1);
         sender.try_send(CallbackEventClass::Partial(1), "partial");
         sender.try_send(CallbackEventClass::Final(Some(1)), "final");
         fatal_sender.send("fatal".into()).unwrap();
@@ -7064,8 +7162,8 @@ mod compatibility_tests {
     #[test]
     fn callback_poll_prioritizes_fatal_then_final_then_warning() {
         let (sender, main_receiver) = callback_event_channel::<&str, u64>();
-        let (fatal_sender, fatal_receiver) = crossbeam_channel::bounded(1);
-        let (warning_sender, warning_receiver) = crossbeam_channel::bounded(1);
+        let (fatal_sender, fatal_receiver) = crossbeam_channel::bounded::<String>(1);
+        let (warning_sender, warning_receiver) = crossbeam_channel::bounded::<String>(1);
         sender.try_send(CallbackEventClass::Final(Some(1)), "final");
         warning_sender.send("warning".into()).unwrap();
         fatal_sender.send("fatal".into()).unwrap();
@@ -7100,7 +7198,7 @@ mod compatibility_tests {
 
         let (sender, main_receiver) =
             callback_event_channel_with_final_gap::<String, u64>(final_gap);
-        let (_fatal_sender, fatal_receiver) = crossbeam_channel::bounded(1);
+        let (_fatal_sender, fatal_receiver) = crossbeam_channel::bounded::<String>(1);
         let (warning_sender, warning_receiver) = crossbeam_channel::bounded(2);
         sender.try_send(CallbackEventClass::Final(Some(1)), "final".into());
         warning_sender.send("warning-final".into()).unwrap();
@@ -7192,8 +7290,8 @@ mod compatibility_tests {
     #[test]
     fn callback_merger_blocking_wait_rechecks_fatal_before_all_main_lanes() {
         let (sender, mut main_receiver) = callback_event_channel::<&str, u64>();
-        let (fatal_sender, fatal_receiver) = crossbeam_channel::bounded(1);
-        let (warning_sender, warning_receiver) = crossbeam_channel::bounded(1);
+        let (fatal_sender, fatal_receiver) = crossbeam_channel::bounded::<String>(1);
+        let (warning_sender, warning_receiver) = crossbeam_channel::bounded::<String>(1);
         let hook = std::sync::Arc::new(super::CallbackWaitHook {
             fired: AtomicBool::new(false),
             entered: std::sync::Barrier::new(2),

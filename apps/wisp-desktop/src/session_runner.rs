@@ -262,11 +262,21 @@ fn run_session(
             Ok(Command::Start { .. }) | Err(TryRecvError::Empty) => {},
         }
         if let Some(event) = session.recv_timeout(CMD_POLL_INTERVAL) {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             let terminal_error = session.take_runtime_failure();
             let _ = update_tx.send(Update::Event { session_id, event });
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             if let Some(error) = terminal_error {
+                // Runtime failure is terminal, but native capture/writer
+                // ownership must be stopped and finalized before persistence
+                // observes RuntimeFailed.
+                #[cfg(target_os = "windows")]
+                let error = merge_runtime_failures(error, session.stop_and_take_runtime_failure());
+                #[cfg(target_os = "macos")]
+                let error = {
+                    session.stop();
+                    merge_runtime_failures(error, session.take_runtime_failure())
+                };
                 publish_runtime_failure_after_drain(
                     || session.try_recv(),
                     session_id,
@@ -286,20 +296,37 @@ fn stop_and_publish(
     session_id: SessionId,
     update_tx: &Sender<Update>,
 ) {
+    #[cfg(target_os = "windows")]
+    let terminal_error = session.stop_and_take_runtime_failure();
+    #[cfg(not(target_os = "windows"))]
     session.stop();
     // Drain whatever the analyzer flushed during stop().
     while let Some(event) = session.try_recv() {
         let _ = update_tx.send(Update::Event { session_id, event });
     }
     #[cfg(target_os = "macos")]
-    if let Some(error) = session.take_runtime_failure() {
+    let terminal_error = session.take_runtime_failure();
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if let Some(error) = terminal_error {
         let _ = update_tx.send(Update::RuntimeFailed { session_id, error });
         return;
     }
     let _ = update_tx.send(Update::Stopped { session_id });
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn merge_runtime_failures(
+    primary: SessionError,
+    cleanup: Option<SessionError>,
+) -> SessionError {
+    cleanup.map_or(primary.clone(), |cleanup| {
+        SessionError::Start(format!(
+            "{primary}; cleanup/finalization also failed: {cleanup}"
+        ))
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn publish_runtime_failure_after_drain(
     mut try_recv: impl FnMut() -> Option<Event>,
     session_id: SessionId,
@@ -322,20 +349,20 @@ fn is_transcript_result(event: &Event) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use std::collections::VecDeque;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use std::sync::mpsc::channel;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use wisp_audiokit::SessionError;
     use wisp_audiokit::{Event, SessionResult, SourceLabel};
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use wisp_core::SessionId;
 
     use super::is_transcript_result;
-    #[cfg(target_os = "macos")]
-    use super::{Update, publish_runtime_failure_after_drain};
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    use super::{Update, merge_runtime_failures, publish_runtime_failure_after_drain};
 
     #[test]
     fn only_transcript_results_require_preserving_a_failed_start() {
@@ -352,9 +379,9 @@ mod tests {
         })));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
-    fn runtime_failure_publishes_final_flushed_during_cleanup_first() {
+    fn runtime_failure_publishes_drained_events_before_terminal_update() {
         let session_id = SessionId::from(42);
         let final_result = Event::Result(SessionResult {
             source: SourceLabel::System,
@@ -390,5 +417,17 @@ mod tests {
                 ..
             } if actual == session_id
         ));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn runtime_failure_preserves_cleanup_failure_context() {
+        let combined = merge_runtime_failures(
+            SessionError::Start("capture failed".into()),
+            Some(SessionError::Start("sync failed".into())),
+        );
+        let message = combined.to_string();
+        assert!(message.contains("capture failed"));
+        assert!(message.contains("sync failed"));
     }
 }

@@ -4531,7 +4531,7 @@ mod imp {
 
         #[must_use]
         pub fn try_recv(&self) -> Option<Event> {
-            if let Some(event) = self.pending.try_recv().ok() {
+            if let Ok(event) = self.pending.try_recv() {
                 return Some(event);
             }
             let recording = self.recording.as_ref()?;

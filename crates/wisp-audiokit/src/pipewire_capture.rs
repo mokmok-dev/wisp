@@ -3,7 +3,7 @@
 //! `PipeWire` performs graph-format conversion to the 16 kHz mono `f32` format
 //! consumed by the shared Ogg/Opus recorder. The process callbacks only use
 //! the bounded, non-blocking capture queue; disk I/O runs on a separate
-//! writer thread. Processing runs on the PipeWire main loop rather than its
+//! writer thread. Processing runs on the `PipeWire` main loop rather than its
 //! real-time thread because converting mapped PCM into owned frames allocates.
 
 use std::fs;
@@ -170,7 +170,6 @@ impl PipewireCapture {
             match startup_receiver.recv_timeout(remaining) {
                 Ok(Startup::Ready(TrackId::MICROPHONE)) => microphone_ready = true,
                 Ok(Startup::Ready(TrackId::SYSTEM)) => system_finished_startup = true,
-                Ok(Startup::Ready(_)) => {},
                 Ok(Startup::Failed(TrackId::MICROPHONE, message)) => {
                     stop_workers(&mut workers);
                     return Err(SessionError::Start(format!(
@@ -182,8 +181,9 @@ impl PipewireCapture {
                     startup_warnings
                         .push(format!("PipeWire sink monitor is unavailable: {message}"));
                 },
-                Ok(Startup::Failed(_, _)) => {},
-                Err(channel::RecvTimeoutError::Timeout) => continue,
+                Ok(Startup::Ready(_))
+                | Ok(Startup::Failed(_, _))
+                | Err(channel::RecvTimeoutError::Timeout) => {},
                 Err(channel::RecvTimeoutError::Disconnected) => {
                     stop_workers(&mut workers);
                     return Err(SessionError::Start(
@@ -563,7 +563,7 @@ fn capture_worker(
         track_id,
         sink_monitor,
         sender,
-        startup.clone(),
+        &startup,
         stop_requested,
         microphone_muted,
         capture_origin,
@@ -572,11 +572,12 @@ fn capture_worker(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_capture_worker(
     track_id: TrackId,
     sink_monitor: bool,
     sender: RealtimeCaptureSender,
-    startup: channel::Sender<Startup>,
+    startup: &channel::Sender<Startup>,
     stop_requested: Arc<AtomicBool>,
     microphone_muted: Arc<AtomicBool>,
     capture_origin: Instant,
@@ -612,7 +613,7 @@ fn run_capture_worker(
         track_id,
         source,
         sender,
-        startup,
+        startup: startup.clone(),
         format: spa::param::audio::AudioInfoRaw::new(),
         sequence: 0,
         next_timestamp_frame: None,
@@ -633,17 +634,17 @@ fn run_capture_worker(
                 report_ready_if_valid(data);
             },
             pw::stream::StreamState::Error(message) => {
-                if !data.startup_reported {
-                    data.startup_reported = true;
-                    let _ = data
-                        .startup
-                        .try_send(Startup::Failed(data.track_id, message.clone()));
-                } else {
+                if data.startup_reported {
                     let _ = data.sender.send_control(CaptureControlEvent::Error {
                         track_id: Some(data.track_id),
                         message,
                         recoverable: false,
                     });
+                } else {
+                    data.startup_reported = true;
+                    let _ = data
+                        .startup
+                        .try_send(Startup::Failed(data.track_id, message.clone()));
                 }
                 quit_on_error.quit();
             },
@@ -1218,7 +1219,7 @@ mod tests {
         );
     }
 
-    /// Opt-in smoke test for Linux CI jobs that provide a PipeWire virtual
+    /// Opt-in smoke test for Linux CI jobs that provide a `PipeWire` virtual
     /// microphone (and optionally a default sink monitor).
     #[test]
     #[ignore = "requires a running PipeWire graph with a default microphone"]
@@ -1284,10 +1285,12 @@ mod tests {
     }
 
     fn mean(samples: &[f32]) -> f32 {
-        samples.iter().sum::<f32>() / samples.len() as f32
+        let sample_count = f32::from(u16::try_from(samples.len()).unwrap());
+        samples.iter().sum::<f32>() / sample_count
     }
 
     fn mean_abs(samples: &[f32]) -> f32 {
-        samples.iter().map(|sample| sample.abs()).sum::<f32>() / samples.len() as f32
+        let sample_count = f32::from(u16::try_from(samples.len()).unwrap());
+        samples.iter().map(|sample| sample.abs()).sum::<f32>() / sample_count
     }
 }

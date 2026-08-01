@@ -8,7 +8,9 @@ Wisp captures your microphone and system audio (the other side of a call) at the
 > preview: WASAPI recording stays local, while the optional
 > `Windows.Media.SpeechRecognition` free-form dictation route uses Microsoft's
 > online service. Local-model transcription wiring is in progress.
-> Linux support is coming soon.
+> Linux recording is in preview: PipeWire captures the default microphone and,
+> when exposed by the session manager, the default sink monitor into separate
+> Ogg/Opus files. Linux transcription is not implemented yet.
 
 ---
 
@@ -16,7 +18,7 @@ Wisp captures your microphone and system audio (the other side of a call) at the
 
 - **Offline-first** — macOS audio and transcripts stay on your device. Windows WASAPI recordings are local; fully local Windows transcription is the next integration step.
 - **On-device transcription on macOS** — Uses [`SpeechAnalyzer`](https://developer.apple.com/documentation/speech), the new API in Apple's Speech framework. Windows' optional platform dictation backend is online.
-- **System audio + microphone capture** — Uses macOS 14.4+ [Core Audio Process Taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps). Windows uses WASAPI shared-mode mic + system loopback capture and stores each source as Ogg/Opus.
+- **System audio + microphone capture** — Uses macOS 14.4+ [Core Audio Process Taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps). Windows uses WASAPI shared-mode mic + system loopback capture. Linux uses PipeWire microphone + sink-monitor capture where the graph exposes a monitor. Windows and Linux store each source separately as Ogg/Opus.
 - **Built in Rust with a GPU-rendered UI** — The UI is built on [GPUI](https://www.gpui.rs/), the framework that powers the [Zed](https://zed.dev/) editor. Native-feeling responsiveness and smooth scrolling.
 - **Simple local storage** — Recordings are stored as Ogg/Opus and metadata as SQLite under `~/Library/Application Support/dev.mokmok.wisp/`. Easy to export and analyze later.
 
@@ -80,14 +82,18 @@ The Rust boundary separates OS capture from transcription:
   `Session` API remains available but is no longer the macOS desktop path.
 
 This boundary is intentionally a foundation, not a claim that every backend is
-complete. Linux PipeWire capture, connecting Windows WASAPI frames to actual
-local-model inference, and a Nemotron transcriber adapter are follow-up work.
+complete. Linux PipeWire recording is implemented, while Linux transcription,
+connecting Windows WASAPI frames to actual local-model inference, and a
+Nemotron transcriber adapter are follow-up work.
 
 ## Requirements
 
 - **macOS 26 (Tahoe)** — Wisp relies on `SpeechAnalyzer`, Core Audio Process Taps, and the new Metal Toolchain, so macOS 26 is required for now.
 - **Xcode 26** — for the Swift 6.0 / macOS 26 SDK.
 - **Windows 10/11 preview** — records WASAPI mic + loopback audio locally. The optional `Windows.Media.SpeechRecognition` dictation route requires network access and MSIX package identity; setup can download a local Whisper-family model under `%APPDATA%\dev.mokmok.wisp\models`.
+- **Linux preview** — PipeWire 0.3 development files and `pkg-config` are
+  required to build. A running PipeWire session manager must expose a default
+  audio source; default-sink monitor capture is optional.
 - **Rust 1.96** — pinned in `rust-toolchain.toml`.
 - Microphone and system-audio recording permissions. macOS will prompt on first launch.
 
@@ -126,6 +132,31 @@ If you'd rather use Rust + Xcode directly:
 cargo build -p wisp-desktop --release
 ```
 
+On Debian/Ubuntu Linux, install the PipeWire build dependency before building:
+
+```bash
+sudo apt install clang libclang-dev libpipewire-0.3-dev pkg-config
+cargo build -p wisp-audiokit
+```
+
+`PipewireRecording::start(output_dir)` records to `mic.ogg` and `system.ogg`.
+`system.ogg` remains a valid Ogg/Opus stream when the session manager does not
+expose sink-monitor capture; it is padded with silence to keep both tracks on
+a shared timeline. Normal `stop()` drains queued PCM and finalizes both files.
+This API is record-only; it does not provide Linux
+transcription.
+
+Linux CI can exercise the real PipeWire path by starting an isolated PipeWire
+daemon with a virtual default microphone (and optionally a default sink), then
+running:
+
+```bash
+cargo test -p wisp-audiokit pipewire_virtual_node_integration -- --ignored
+```
+
+The ordinary test suite stays hardware-free and feeds synthetic frames through
+the same alignment and Ogg/Opus finalization loop.
+
 ### Formal verification
 
 The session worker protocol and navigation/session guards are checked against
@@ -163,7 +194,7 @@ MCP hosts should run the bundled `wisp-mcp` binary over stdio, for example `/App
 ## Roadmap
 
 - [ ] **Windows support** — WASAPI mic + loopback Ogg/Opus recording is in place; connecting the same PCM stream to local-model transcription is the remaining core path.
-- [ ] **Linux support** — implement a PipeWire capture adapter and pair it with a local transcription backend.
+- [ ] **Linux transcription** — PipeWire mic + optional sink-monitor Ogg/Opus recording is in preview; pair its PCM stream with a local transcription backend.
 - [ ] **Additional local models** — evaluate and implement Nemotron behind `TranscriberBackend`; no Nemotron runtime is bundled today.
 - [x] Copy transcript to clipboard (plain text) and export as Markdown (`.md`) with a lightweight, CloudEvents-inspired YAML frontmatter envelope (`id`, `type`, `source`, `time`, `subject`, …).
 - [ ] Export to SRT / JSON.

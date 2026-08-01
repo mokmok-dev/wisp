@@ -1,16 +1,18 @@
 //! Safe Rust wrapper over Wisp's platform audio/transcription backends.
 //!
 //! macOS is backed by the Swift `WispAudioKit` framework. Windows records
-//! WASAPI microphone and system-loopback audio as Ogg/Opus and exposes setup
-//! for platform or local-model transcription; unsupported platforms keep a
-//! stub so the workspace stays buildable.
+//! WASAPI microphone and system-loopback audio as Ogg/Opus. Linux records
+//! `PipeWire` microphone and, when available, sink-monitor audio as Ogg/Opus.
+//! Other platforms keep a stub so the workspace stays buildable.
 
 mod backend;
 mod error;
 #[cfg(target_os = "macos")]
 mod macos_backend;
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 mod ogg_opus_recorder;
+#[cfg(target_os = "linux")]
+mod pipewire_capture;
 #[cfg(target_os = "windows")]
 mod wasapi_capture;
 
@@ -26,6 +28,11 @@ pub use backend::{
 pub use error::{Result, SessionError, SetupError, SetupResult};
 #[cfg(target_os = "macos")]
 pub use macos_backend::{MacosCaptureBackend, MacosSession, MacosTranscriberBackend};
+#[cfg(target_os = "linux")]
+pub use pipewire_capture::{
+    PIPEWIRE_CAPTURE_QUEUE_CAPACITY, PIPEWIRE_CHANNELS, PIPEWIRE_SAMPLE_RATE, PipewireCapture,
+    PipewireCaptureBackend, PipewireRecording,
+};
 #[cfg(target_os = "windows")]
 pub use wasapi_capture::{
     WASAPI_CAPTURE_QUEUE_CAPACITY, WASAPI_CHANNELS, WASAPI_SAMPLE_RATE, WasapiCapture,
@@ -4445,7 +4452,299 @@ mod imp {
     }
 }
 
-#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+#[cfg(target_os = "linux")]
+mod imp {
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use wisp_core::SourceLabel;
+
+    use crate::error::{Result, SessionError};
+    use crate::{Permission, PermissionStatus, PipewireRecording, SessionConfig, SessionOptions};
+
+    /// Version label for the Linux `PipeWire` recording backend.
+    #[must_use]
+    pub fn version() -> &'static str {
+        "linux-pipewire-0.1.0"
+    }
+
+    /// `PipeWire` permissions are decided by the session manager/desktop portal
+    /// when a stream is connected, so startup is the authoritative probe.
+    #[must_use]
+    pub fn check_permission(_permission: Permission) -> PermissionStatus {
+        PermissionStatus::Granted
+    }
+
+    /// `PipeWire` permissions are requested as part of stream connection.
+    #[must_use]
+    pub fn request_permission(_permission: Permission) -> PermissionStatus {
+        PermissionStatus::Granted
+    }
+
+    /// Linux transcription is not implemented in this recording milestone.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct SessionResult {
+        pub source: SourceLabel,
+        pub segment_id: u64,
+        pub is_final: bool,
+        pub text: String,
+        pub start_seconds: f64,
+        pub end_seconds: f64,
+        pub confidence_mean: Option<f64>,
+        pub confidence_min: Option<f64>,
+    }
+
+    /// Linux sessions currently emit recording lifecycle and warning logs.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Event {
+        Result(SessionResult),
+        Log(String),
+    }
+
+    /// Record-only Linux session backed by `PipeWire` and Ogg/Opus.
+    pub struct Session {
+        output_dir: std::path::PathBuf,
+        options: SessionOptions,
+        recording: Option<Arc<PipewireRecording>>,
+        pending: crossbeam_channel::Receiver<Event>,
+        publisher: crossbeam_channel::Sender<Event>,
+        started: bool,
+    }
+
+    impl Session {
+        /// Construct a record-only Linux session.
+        ///
+        /// # Errors
+        /// Returns [`SessionError::InvalidLocale`] for a locale containing NUL
+        /// or [`SessionError::Construction`] if the output directory cannot be
+        /// created.
+        pub fn new(
+            output_dir: impl AsRef<Path>,
+            locale: &str,
+        ) -> Result<Self> {
+            Self::new_with_config(output_dir, SessionConfig::platform_default(locale))
+        }
+
+        /// Construct a session with an explicit recognizer configuration.
+        ///
+        /// Linux still records only; the recognizer selection is retained for
+        /// future local-transcriber integration.
+        ///
+        /// # Errors
+        /// Returns the same construction errors as [`Self::new`].
+        pub fn new_with_config(
+            output_dir: impl AsRef<Path>,
+            config: SessionConfig,
+        ) -> Result<Self> {
+            Self::new_with_options(output_dir, config.into())
+        }
+
+        /// Construct a session with explicit transcription fallback policy.
+        ///
+        /// # Errors
+        /// Returns the same construction errors as [`Self::new`].
+        pub fn new_with_options(
+            output_dir: impl AsRef<Path>,
+            options: SessionOptions,
+        ) -> Result<Self> {
+            if options.config().locale.contains('\0') {
+                return Err(SessionError::InvalidLocale(options.config().locale.clone()));
+            }
+            let output_dir = output_dir.as_ref().to_path_buf();
+            std::fs::create_dir_all(&output_dir).map_err(|_| SessionError::Construction)?;
+            let (publisher, pending) = crossbeam_channel::bounded(32);
+            Ok(Self {
+                output_dir,
+                options,
+                recording: None,
+                pending,
+                publisher,
+                started: false,
+            })
+        }
+
+        /// Start `PipeWire` capture and Ogg/Opus recording.
+        ///
+        /// Linux transcription remains unavailable. Startup succeeds in
+        /// record-only mode only when the configured policy permits it.
+        ///
+        /// # Errors
+        /// Returns [`SessionError::Start`] for repeated starts, a policy that
+        /// forbids record-only fallback, or `PipeWire`/recording setup failure.
+        pub fn start(&mut self) -> Result<()> {
+            if self.started {
+                return Err(SessionError::Start(
+                    "Linux session has already been started and cannot be restarted".into(),
+                ));
+            }
+            if !self.options.transcription_policy().allow_record_only {
+                return Err(SessionError::Start(
+                    "Linux transcription is unavailable and session policy forbids record-only fallback"
+                        .into(),
+                ));
+            }
+            let recording = Arc::new(PipewireRecording::start(&self.output_dir)?);
+            let mic_path = recording.mic_path().display();
+            let system_path = recording.system_path().display();
+            let _ = self.publisher.try_send(Event::Log(format!(
+                "[LINUX] recording PipeWire microphone to {mic_path}"
+            )));
+            let _ = self.publisher.try_send(Event::Log(format!(
+                "[LINUX] recording PipeWire sink monitor to {system_path}"
+            )));
+            let _ = self.publisher.try_send(Event::Log(
+                "[LINUX] transcription is unavailable; continuing in record-only mode".into(),
+            ));
+            self.recording = Some(recording);
+            self.started = true;
+            Ok(())
+        }
+
+        #[must_use]
+        pub const fn has_started_capture(&self) -> bool {
+            self.started
+        }
+
+        pub fn set_microphone_muted(
+            &self,
+            muted: bool,
+        ) {
+            if let Some(recording) = &self.recording {
+                recording.set_microphone_muted(muted);
+            }
+        }
+
+        /// Stop and finalize both Ogg files. Errors are exposed as log events
+        /// for compatibility with the existing infallible session facade.
+        pub fn stop(&self) {
+            if let Some(recording) = &self.recording
+                && let Err(error) = recording.stop()
+            {
+                let _ = self
+                    .publisher
+                    .try_send(Event::Log(format!("[LINUX] {error}")));
+            }
+        }
+
+        #[must_use]
+        pub fn try_recv(&self) -> Option<Event> {
+            if let Ok(event) = self.pending.try_recv() {
+                return Some(event);
+            }
+            let recording = self.recording.as_ref()?;
+            recording
+                .try_recv_warning()
+                .map(|warning| Event::Log(format!("[LINUX] {warning}")))
+        }
+
+        #[must_use]
+        pub fn recv(&self) -> Option<Event> {
+            loop {
+                if let Some(event) = self.try_recv() {
+                    return Some(event);
+                }
+                if self
+                    .recording
+                    .as_ref()
+                    .is_some_and(|recording| recording.is_finished())
+                {
+                    return None;
+                }
+                if let Some(recording) = &self.recording
+                    && let Some(warning) =
+                        recording.recv_warning_timeout(Duration::from_millis(100))
+                {
+                    return Some(Event::Log(format!("[LINUX] {warning}")));
+                } else if self.recording.is_none() {
+                    return self.pending.recv().ok();
+                }
+            }
+        }
+
+        #[must_use]
+        pub fn recv_timeout(
+            &self,
+            timeout: Duration,
+        ) -> Option<Event> {
+            let started = std::time::Instant::now();
+            loop {
+                if let Some(event) = self.try_recv() {
+                    return Some(event);
+                }
+                if self
+                    .recording
+                    .as_ref()
+                    .is_some_and(|recording| recording.is_finished())
+                {
+                    return None;
+                }
+                let remaining = timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return None;
+                }
+                if let Some(recording) = &self.recording {
+                    if let Some(warning) =
+                        recording.recv_warning_timeout(remaining.min(Duration::from_millis(100)))
+                    {
+                        return Some(Event::Log(format!("[LINUX] {warning}")));
+                    }
+                } else {
+                    return self.pending.recv_timeout(remaining).ok();
+                }
+            }
+        }
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::{
+            PrivacyRequirement, SessionConfig, SessionOptions, TranscriberClass,
+            TranscriptionPolicy,
+        };
+
+        use super::Session;
+
+        #[test]
+        fn construction_and_record_only_policy_checks_do_not_touch_hardware() {
+            let directory = tempfile::tempdir().unwrap();
+            let policy = TranscriptionPolicy {
+                privacy: PrivacyRequirement::OfflineRequired,
+                preferred: TranscriberClass::LocalModel,
+                allow_backend_fallback: false,
+                allow_record_only: false,
+            };
+            let options = SessionOptions::new(SessionConfig::platform_default("en-US"), policy);
+            let mut session = Session::new_with_options(directory.path(), options).unwrap();
+
+            assert!(!session.has_started_capture());
+            let error = session.start().unwrap_err();
+            assert!(error.to_string().contains("forbids record-only fallback"));
+            assert!(!session.has_started_capture());
+        }
+
+        #[test]
+        fn invalid_locale_is_rejected_before_hardware_access() {
+            let directory = tempfile::tempdir().unwrap();
+
+            let error = Session::new(directory.path(), "en\0US").err().unwrap();
+
+            assert!(matches!(error, crate::SessionError::InvalidLocale(_)));
+        }
+    }
+}
+
+#[cfg(all(
+    not(target_os = "linux"),
+    not(target_os = "macos"),
+    not(target_os = "windows")
+))]
 mod imp {
     use std::path::Path;
     use std::time::Duration;

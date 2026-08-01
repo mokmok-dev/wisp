@@ -44,10 +44,19 @@ in
   };
 
   default = pkgs.mkShell {
-    packages = with pkgs; [
-      rustToolchain
-      sccache
-    ];
+    packages =
+      (with pkgs; [
+        rustToolchain
+        sccache
+      ])
+      ++ pkgs.lib.optionals pkgs.stdenv.isLinux (
+        with pkgs;
+        [
+          pipewire
+          pkg-config
+          rustPlatform.bindgenHook
+        ]
+      );
 
     shellHook = ''
       export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"

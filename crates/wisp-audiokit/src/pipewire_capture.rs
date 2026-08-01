@@ -771,6 +771,7 @@ fn run_capture_worker(
     });
     timer
         .update_timer(Some(STOP_POLL_INTERVAL), Some(STOP_POLL_INTERVAL))
+        .into_result()
         .map_err(|error| error.to_string())?;
     mainloop.run();
     drop(timer);
@@ -1014,10 +1015,10 @@ fn duration_to_frames(
 }
 
 fn stop_workers(workers: &mut [CaptureWorker]) {
-    for worker in workers {
+    for worker in workers.iter_mut() {
         worker.stop_requested.store(true, Ordering::Release);
     }
-    for worker in workers {
+    for worker in workers.iter_mut() {
         if let Some(handle) = worker.handle.take() {
             let _ = handle.join();
         }
@@ -1264,22 +1265,22 @@ mod tests {
         let pre_skip = usize::from(u16::from_le_bytes([head.data[10], head.data[11]]));
         let _tags = reader.read_packet().unwrap().unwrap();
         let mut decoder = Decoder::new(48_000, Channels::Mono).unwrap();
-        let mut decoded = Vec::new();
+        let mut samples = Vec::new();
         let mut final_granule = 0_u64;
         while let Some(packet) = reader.read_packet().unwrap() {
             let mut packet_pcm = vec![0.0; 5_760];
             let count = decoder
                 .decode_float(&packet.data, &mut packet_pcm, DecodeMode::Normal)
                 .unwrap();
-            decoded.extend_from_slice(&packet_pcm[..count]);
+            samples.extend_from_slice(&packet_pcm[..count]);
             if packet.last_in_stream() {
                 final_granule = packet.absgp_page();
             }
         }
         let audio_samples = usize::try_from(final_granule).unwrap() - pre_skip;
-        decoded.drain(..pre_skip);
-        decoded.truncate(audio_samples);
-        decoded
+        samples.drain(..pre_skip);
+        samples.truncate(audio_samples);
+        samples
     }
 
     fn mean(samples: &[f32]) -> f32 {

@@ -25,6 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-nix
+        with:
+          # Avoid another Nix-based workflow winning the shared primary key
+          # before this job can persist Crane's buildDepsOnly artifacts.
+          cache-suffix: crane
       # Crane shares buildDepsOnly artifacts between the package, clippy, and
       # test derivations. setup-nix persists those derivations between runs.
       - run: nix flake check --print-build-logs

@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use ogg::{PacketWriteEndInfo, PacketWriter};
@@ -35,6 +35,7 @@ pub(crate) struct OggOpusRecorder {
     audio_samples: u64,
     encoded_samples: u64,
     pending: Option<PendingPacket>,
+    output_dir: PathBuf,
     finished: bool,
 }
 
@@ -60,6 +61,10 @@ impl OggOpusRecorder {
         // concurrent recordings collision-safe, POSIX guarantees that an
         // existing final-component symlink is not followed in this mode.
         let file = options.open(path)?;
+        let output_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
         let mut writer = PacketWriter::new(BufWriter::new(file));
         let serial = NEXT_SERIAL.fetch_add(1, Ordering::Relaxed) ^ std::process::id();
         writer.write_packet(
@@ -84,6 +89,7 @@ impl OggOpusRecorder {
             audio_samples: 0,
             encoded_samples: 0,
             pending: None,
+            output_dir,
             finished: false,
         })
     }
@@ -132,7 +138,8 @@ impl OggOpusRecorder {
             PacketWriteEndInfo::EndStream,
             final_granule,
         )?;
-        writer.inner_mut().flush()?;
+        durably_commit(writer.inner_mut())?;
+        sync_output_directory(&self.output_dir)?;
         self.finished = true;
         Ok(())
     }
@@ -180,6 +187,21 @@ impl OggOpusRecorder {
     }
 }
 
+#[cfg(unix)]
+fn sync_output_directory(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+#[allow(clippy::unnecessary_wraps)] // Keep the platform-specific durability hook fallible.
+fn sync_output_directory(_path: &Path) -> io::Result<()> {
+    // Windows does not expose a stable std API for opening a directory with
+    // FILE_FLAG_BACKUP_SEMANTICS and flushing its metadata. The file handle
+    // itself is flushed by durably_commit; directory-entry durability remains
+    // subject to the filesystem's guarantees.
+    Ok(())
+}
+
 impl Drop for OggOpusRecorder {
     fn drop(&mut self) {
         let _ = self.finish();
@@ -211,6 +233,26 @@ fn codec_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
 
+trait DurableSink {
+    fn flush_sink(&mut self) -> io::Result<()>;
+    fn sync_sink(&mut self) -> io::Result<()>;
+}
+
+impl DurableSink for BufWriter<File> {
+    fn flush_sink(&mut self) -> io::Result<()> {
+        self.flush()
+    }
+
+    fn sync_sink(&mut self) -> io::Result<()> {
+        self.get_ref().sync_all()
+    }
+}
+
+fn durably_commit(sink: &mut impl DurableSink) -> io::Result<()> {
+    sink.flush_sink()?;
+    sink.sync_sink()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::{self, File};
@@ -218,10 +260,19 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
-    use ogg::PacketReader;
+    use ogg::{Packet, PacketReader};
     use ropus::{Channels, DecodeMode, Decoder};
 
-    use super::{GRANULE_RATE_MULTIPLIER, OggOpusRecorder};
+    use super::{DurableSink, GRANULE_RATE_MULTIPLIER, OggOpusRecorder, durably_commit};
+
+    fn read_packets(path: &std::path::Path) -> Vec<Packet> {
+        let mut reader = PacketReader::new(File::open(path).unwrap());
+        let mut packets = Vec::new();
+        while let Some(packet) = reader.read_packet().unwrap() {
+            packets.push(packet);
+        }
+        packets
+    }
 
     #[test]
     fn writes_headers_audio_and_exact_end_granule() {
@@ -306,5 +357,98 @@ mod tests {
         drop(recorder);
 
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn finish_is_idempotent_and_push_after_finish_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("finished.ogg");
+        let mut recorder = OggOpusRecorder::create(&path).unwrap();
+        recorder.push(&[0.25; 17]).unwrap();
+
+        recorder.finish().unwrap();
+        recorder.finish().unwrap();
+        assert!(recorder.push(&[0.5]).is_err());
+
+        let packets = read_packets(&path);
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|packet| packet.last_in_stream())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn exact_frame_boundary_and_partial_frame_both_end_cleanly() {
+        for (name, sample_count) in [("boundary.ogg", 320), ("partial.ogg", 321)] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(name);
+            let mut recorder = OggOpusRecorder::create(&path).unwrap();
+            recorder.push(&vec![0.125; sample_count]).unwrap();
+            let pre_skip = recorder.pre_skip;
+            recorder.finish().unwrap();
+
+            let packets = read_packets(&path);
+            let last = packets.last().unwrap();
+            assert!(last.last_in_stream());
+            assert_eq!(
+                last.absgp_page(),
+                u64::from(pre_skip)
+                    + u64::try_from(sample_count).unwrap() * u64::from(GRANULE_RATE_MULTIPLIER)
+            );
+        }
+    }
+
+    #[derive(Default)]
+    struct FaultSink {
+        flush_error: bool,
+        sync_error: bool,
+        flushes: usize,
+        syncs: usize,
+    }
+
+    impl DurableSink for FaultSink {
+        fn flush_sink(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            if self.flush_error {
+                Err(std::io::Error::other("flush fault"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn sync_sink(&mut self) -> std::io::Result<()> {
+            self.syncs += 1;
+            if self.sync_error {
+                Err(std::io::Error::other("sync fault"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn durability_reports_flush_and_sync_faults_in_order() {
+        let mut flush_fault = FaultSink {
+            flush_error: true,
+            ..FaultSink::default()
+        };
+        assert_eq!(
+            durably_commit(&mut flush_fault).unwrap_err().to_string(),
+            "flush fault"
+        );
+        assert_eq!((flush_fault.flushes, flush_fault.syncs), (1, 0));
+
+        let mut sync_fault = FaultSink {
+            sync_error: true,
+            ..FaultSink::default()
+        };
+        assert_eq!(
+            durably_commit(&mut sync_fault).unwrap_err().to_string(),
+            "sync fault"
+        );
+        assert_eq!((sync_fault.flushes, sync_fault.syncs), (1, 1));
     }
 }

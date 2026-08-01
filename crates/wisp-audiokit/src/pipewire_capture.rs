@@ -132,7 +132,7 @@ impl PipewireCapture {
                         track_id,
                         sink_monitor,
                         sender,
-                        worker_startup,
+                        &worker_startup,
                         stop_requested,
                         worker_muted,
                         capture_origin,
@@ -181,8 +181,7 @@ impl PipewireCapture {
                     startup_warnings
                         .push(format!("PipeWire sink monitor is unavailable: {message}"));
                 },
-                Ok(Startup::Ready(_))
-                | Ok(Startup::Failed(_, _))
+                Ok(Startup::Ready(_) | Startup::Failed(_, _))
                 | Err(channel::RecvTimeoutError::Timeout) => {},
                 Err(channel::RecvTimeoutError::Disconnected) => {
                     stop_workers(&mut workers);
@@ -554,7 +553,7 @@ fn capture_worker(
     track_id: TrackId,
     sink_monitor: bool,
     sender: RealtimeCaptureSender,
-    startup: channel::Sender<Startup>,
+    startup: &channel::Sender<Startup>,
     stop_requested: Arc<AtomicBool>,
     microphone_muted: Arc<AtomicBool>,
     capture_origin: Instant,
@@ -563,7 +562,7 @@ fn capture_worker(
         track_id,
         sink_monitor,
         sender,
-        &startup,
+        startup,
         stop_requested,
         microphone_muted,
         capture_origin,

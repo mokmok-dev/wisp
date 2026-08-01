@@ -21,6 +21,11 @@ jobs:
           command: cargo-kani
           args: "-p wisp-lifecycle"
       - uses: ./.github/actions/setup-nix
-      - uses: ./.github/actions/setup-rust-cache
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          cache-bin: "false"
+          cache-workspace-crates: "true"
+          cache-on-failure: "true"
+          cmd-format: nix develop .#ci --quiet -c {0}
       - name: Explore lifecycle interleavings with Shuttle
         run: nix develop .#ci --quiet --command cargo test -p wisp-lifecycle --test shuttle_lifecycle

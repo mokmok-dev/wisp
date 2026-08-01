@@ -11,6 +11,7 @@ on:
       - ".github/workflows/rust.yaml"
       - "flake.lock"
       - "flake.nix"
+      - "nix/crane.nix"
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-rust
   cancel-in-progress: true
@@ -24,9 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-nix
-      - uses: ./.github/actions/setup-rust-cache
-      - run: nix develop .#ci --quiet --command cargo fmt --all -- --check
-      # Linux lacks the X11 libraries GPUI links against. Desktop coverage
-      # lives in the platform-specific macOS and Windows workflows.
-      - run: nix develop .#ci --quiet --command cargo clippy --workspace --exclude wisp-desktop --all-targets -- -D warnings
-      - run: nix develop .#ci --quiet --command cargo test --workspace --exclude wisp-desktop --all-targets
+        with:
+          # Avoid another Nix-based workflow winning the shared primary key
+          # before this job can persist Crane's buildDepsOnly artifacts.
+          cache-suffix: crane
+      # Crane shares buildDepsOnly artifacts between the package, clippy, and
+      # test derivations. setup-nix persists those derivations between runs.
+      - run: nix flake check --print-build-logs

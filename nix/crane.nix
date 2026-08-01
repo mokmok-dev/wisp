@@ -42,6 +42,13 @@ let
     inherit src;
     cargoExtraArgs = "--locked --workspace --exclude wisp-desktop";
     strictDeps = true;
+  }
+  // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+    nativeBuildInputs = [
+      pkgs.pkg-config
+      pkgs.rustPlatform.bindgenHook
+    ];
+    buildInputs = [ pkgs.pipewire ];
   };
   portableArtifacts = crane.buildDepsOnly portableArgs;
 in

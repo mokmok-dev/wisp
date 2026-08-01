@@ -1,13 +1,15 @@
 //! Streaming mono Ogg/Opus writer used by the Windows WASAPI backend.
 
 use std::collections::VecDeque;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use ogg::{PacketWriteEndInfo, PacketWriter};
 use ropus::{Application, Bitrate, Channels, Encoder};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 const SAMPLE_RATE: u32 = 16_000;
 const FRAME_SAMPLES: usize = 320;
@@ -50,7 +52,14 @@ impl OggOpusRecorder {
         let pre_skip_header = u16::try_from(pre_skip)
             .map_err(|_| io::Error::other(format!("Opus pre-skip {pre_skip} exceeds u16")))?;
 
-        let file = File::create(path)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        // `create_new` maps to O_CREAT|O_EXCL. In addition to making
+        // concurrent recordings collision-safe, POSIX guarantees that an
+        // existing final-component symlink is not followed in this mode.
+        let file = options.open(path)?;
         let mut writer = PacketWriter::new(BufWriter::new(file));
         let serial = NEXT_SERIAL.fetch_add(1, Ordering::Relaxed) ^ std::process::id();
         writer.write_packet(
@@ -204,7 +213,10 @@ fn codec_error(error: impl std::fmt::Display) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
+    use std::fs::{self, File};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     use ogg::PacketReader;
     use ropus::{Channels, DecodeMode, Decoder};
@@ -269,5 +281,30 @@ mod tests {
         let audio = reader.read_packet().unwrap().unwrap();
         assert!(audio.last_in_stream());
         assert!(reader.read_packet().unwrap().is_none());
+    }
+
+    #[test]
+    fn refuses_to_replace_an_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("existing.ogg");
+        fs::write(&path, b"keep me").unwrap();
+
+        let error = OggOpusRecorder::create(&path).err().unwrap();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(path).unwrap(), b"keep me");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_owner_only_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private.ogg");
+
+        let recorder = OggOpusRecorder::create(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        drop(recorder);
+
+        assert_eq!(mode, 0o600);
     }
 }

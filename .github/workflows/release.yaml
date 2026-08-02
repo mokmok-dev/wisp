@@ -13,6 +13,11 @@ on:
         required: true
         type: boolean
         default: true
+      monitor_only:
+        description: "Poll and resume the oldest pending notarization instead of building."
+        required: true
+        type: boolean
+        default: false
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -22,6 +27,7 @@ permissions:
   id-token: write
 jobs:
   macos:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.monitor_only }}
     # wisp-desktop links against APIs that ship only in macOS 26 (Tahoe),
     # so the build host has to be Tahoe too. macos-26 is the
     # GitHub-hosted Apple Silicon runner image for it.
@@ -82,25 +88,161 @@ jobs:
             apps/wisp-desktop/Info.plist > "$APP/Contents/Info.plist"
           /usr/bin/plutil -lint "$APP/Contents/Info.plist"
 
-      - name: Ad-hoc codesign
-        # No Apple Developer ID yet; ad-hoc (`--sign -`) is enough to make
-        # Gatekeeper let users open the app via right-click → Open. Once a
-        # cert is available, swap in the real identity and add notarization.
-        #
-        # The entitlements file is required even for ad-hoc signing because
-        # we enable hardened runtime (--options runtime). Without
-        # `com.apple.security.device.audio-input`, AVCaptureDevice and
-        # AVAudioApplication silently return "denied" for the mic
-        # permission request — no OS prompt, no TCC entry.
+      - name: Import Developer ID certificate
+        id: signing
+        # Imports the Developer ID Application cert into a throwaway keychain
+        # so `codesign` can find a real identity. When the cert secret is not
+        # configured (e.g. a fork), we fall back to ad-hoc signing so the
+        # build still produces an openable — if unnotarized — app.
+        env:
+          CERT_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
-          codesign --force --deep --options runtime \
-            --entitlements apps/wisp-desktop/wisp-desktop.entitlements \
-            --sign - Wisp.app
-          codesign --verify --verbose Wisp.app
+          if [ -z "${CERT_P12_BASE64:-}" ]; then
+            echo "::warning::No Developer ID certificate configured; signing ad-hoc (app will show the 'unidentified developer' warning)."
+            echo "mode=adhoc" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" -P "$CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # Make the temp keychain searchable alongside the login keychain.
+          EXISTING_KEYCHAINS=()
+          while IFS= read -r KEYCHAIN; do
+            EXISTING_KEYCHAINS+=("${KEYCHAIN//\"/}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$KEYCHAIN_PATH" \
+            "${EXISTING_KEYCHAINS[@]}"
+
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | awk -F '"' '/Developer ID Application/ {print $2; exit}')"
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No 'Developer ID Application' identity found in the imported certificate." >&2
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" >&2 || true
+            exit 1
+          fi
+
+          rm -f "$CERT_PATH"
+          echo "mode=developer-id" >> "$GITHUB_OUTPUT"
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+          echo "Using signing identity: $IDENTITY"
+
+      - name: Codesign Wisp.app
+        # The entitlements file is required because we enable hardened runtime
+        # (--options runtime, itself required for notarization). Without
+        # `com.apple.security.device.audio-input`, AVCaptureDevice and
+        # AVAudioApplication silently return "denied" for the mic permission
+        # request — no OS prompt, no TCC entry.
+        #
+        # We sign inside-out (helper binary first, then the app bundle) as
+        # Apple recommends, and add a secure timestamp (--timestamp) which
+        # notarization requires. The mcp helper does not touch the mic, so it
+        # is signed with hardened runtime but without the app entitlements.
+        run: |
+          set -euo pipefail
+          APP="Wisp.app"
+          ENTITLEMENTS="apps/wisp-desktop/wisp-desktop.entitlements"
+
+          if [ "${{ steps.signing.outputs.mode }}" = "developer-id" ]; then
+            SIGN_ID="${{ steps.signing.outputs.identity }}"
+            codesign --force --options runtime --timestamp \
+              --sign "$SIGN_ID" "$APP/Contents/MacOS/wisp-mcp"
+            codesign --force --options runtime --timestamp \
+              --entitlements "$ENTITLEMENTS" \
+              --sign "$SIGN_ID" "$APP/Contents/MacOS/wisp-desktop"
+            codesign --force --options runtime --timestamp \
+              --entitlements "$ENTITLEMENTS" \
+              --sign "$SIGN_ID" "$APP"
+          else
+            codesign --force --deep --options runtime \
+              --entitlements "$ENTITLEMENTS" \
+              --sign - "$APP"
+          fi
+          codesign --verify --strict --verbose=2 "$APP"
+
+      - name: Submit Wisp.app for notarization
+        id: notary
+        # Upload the signed app, persist its Submission ID with the app as an
+        # Actions artifact, and release this expensive macOS runner. The
+        # scheduled notary-monitor workflow polls Apple and resumes the
+        # release after the request reaches a terminal state.
+        if: ${{ steps.signing.outputs.mode == 'developer-id' }}
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_API_KEY_P8_BASE64:-}" ]; then
+            echo "::error::Developer ID signing is active but notary credentials are missing (APPLE_NOTARY_* secrets)." >&2
+            exit 1
+          fi
+
+          KEY_PATH="$RUNNER_TEMP/notary_key.p8"
+          echo "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$KEY_PATH"
+
+          STATE_DIR="$RUNNER_TEMP/wisp-notary-state"
+          mkdir -p "$STATE_DIR"
+          NOTARIZE_ZIP="$STATE_DIR/Wisp-notarize.zip"
+          ditto -c -k --sequesterRsrc --keepParent Wisp.app "$NOTARIZE_ZIP"
+
+          SUBMIT_JSON="$RUNNER_TEMP/notary-submit.json"
+          xcrun notarytool submit "$NOTARIZE_ZIP" \
+            --key "$KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --no-progress \
+            --output-format json > "$SUBMIT_JSON"
+
+          SUBMISSION_ID="$(jq -r '.id' "$SUBMIT_JSON")"
+          if ! [[ "$SUBMISSION_ID" =~ ^[0-9A-Fa-f-]{36}$ ]]; then
+            echo "::error::notarytool returned an invalid Submission ID." >&2
+            jq . "$SUBMIT_JSON" >&2
+            exit 1
+          fi
+
+          ARTIFACT_ONLY="${{ github.event_name == 'workflow_dispatch' && inputs.artifact_only }}"
+          jq -n \
+            --arg phase "app" \
+            --arg submission_id "$SUBMISSION_ID" \
+            --arg source_run_id "$GITHUB_RUN_ID" \
+            --arg source_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg source_sha "$GITHUB_SHA" \
+            --arg tag "${{ steps.meta.outputs.tag }}" \
+            --arg version "${{ steps.meta.outputs.version }}" \
+            --arg artifact_only "$ARTIFACT_ONLY" \
+            '{
+              schema: 1,
+              phase: $phase,
+              submission_id: $submission_id,
+              source_run_id: $source_run_id,
+              source_run_attempt: $source_run_attempt,
+              source_sha: $source_sha,
+              tag: $tag,
+              version: $version,
+              artifact_only: ($artifact_only == "true"),
+              app_archive: "Wisp-notarize.zip"
+            }' > "$STATE_DIR/request.json"
+
+          echo "submission_id=$SUBMISSION_ID" >> "$GITHUB_OUTPUT"
+          echo "state_dir=$STATE_DIR" >> "$GITHUB_OUTPUT"
+          echo "Submitted Wisp.app for notarization: $SUBMISSION_ID"
 
       - name: Create DMG
         id: dmg
+        if: ${{ steps.signing.outputs.mode == 'adhoc' }}
         run: |
           set -euo pipefail
           SHORT_SHA="${GITHUB_SHA::7}"
@@ -124,8 +266,17 @@ jobs:
             "$DMG"
           echo "path=$DMG" >> "$GITHUB_OUTPUT"
 
-      - name: Upload test app artifact
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_only }}
+      - name: Save pending notarization
+        if: ${{ steps.signing.outputs.mode == 'developer-id' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wisp-notary-app-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.notary.outputs.state_dir }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload ad-hoc test app artifact
+        if: ${{ steps.signing.outputs.mode == 'adhoc' && github.event_name == 'workflow_dispatch' && inputs.artifact_only }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wisp-macos-app-${{ github.sha }}
@@ -135,8 +286,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish release
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.artifact_only }}
+      - name: Publish ad-hoc release
+        if: ${{ steps.signing.outputs.mode == 'adhoc' && (github.event_name != 'workflow_dispatch' || !inputs.artifact_only) }}
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
@@ -146,3 +297,8 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: ${{ steps.dmg.outputs.path }}
+
+  monitor:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.monitor_only }}
+    uses: ./.github/workflows/notary-monitor.yaml
+    secrets: inherit

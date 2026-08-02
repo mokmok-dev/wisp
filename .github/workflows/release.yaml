@@ -13,6 +13,11 @@ on:
         required: true
         type: boolean
         default: true
+      monitor_only:
+        description: "Poll and resume the oldest pending notarization instead of building."
+        required: true
+        type: boolean
+        default: false
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -22,6 +27,7 @@ permissions:
   id-token: write
 jobs:
   macos:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.monitor_only }}
     # wisp-desktop links against APIs that ship only in macOS 26 (Tahoe),
     # so the build host has to be Tahoe too. macos-26 is the
     # GitHub-hosted Apple Silicon runner image for it.
@@ -161,7 +167,7 @@ jobs:
           fi
           codesign --verify --strict --verbose=2 "$APP"
 
-      - name: Notarize and staple Wisp.app
+      - name: Submit Wisp.app for notarization
         id: notary
         # Upload the signed app, persist its Submission ID with the app as an
         # Actions artifact, and release this expensive macOS runner. The
@@ -286,3 +292,8 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: ${{ steps.dmg.outputs.path }}
+
+  monitor:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.monitor_only }}
+    uses: ./.github/workflows/notary-monitor.yaml
+    secrets: inherit

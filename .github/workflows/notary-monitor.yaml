@@ -5,6 +5,7 @@ on:
     # asynchronous, so a delayed poll is harmless.
     - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
   group: notary-monitor

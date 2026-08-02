@@ -7161,7 +7161,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-audiokit"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "crossbeam-channel",
  "ogg",
@@ -7179,11 +7179,11 @@ dependencies = [
 
 [[package]]
 name = "wisp-audiokit-sys"
-version = "0.0.15"
+version = "0.0.16"
 
 [[package]]
 name = "wisp-core"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "chrono",
  "serde",
@@ -7192,7 +7192,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-desktop"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "chrono",
  "gpui",
@@ -7208,21 +7208,21 @@ dependencies = [
 
 [[package]]
 name = "wisp-lifecycle"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "shuttle",
 ]
 
 [[package]]
 name = "wisp-mcp"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "wisp-storage"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "chrono",
  "rusqlite",

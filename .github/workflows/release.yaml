@@ -108,8 +108,12 @@ jobs:
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           # Make the temp keychain searchable alongside the login keychain.
+          EXISTING_KEYCHAINS=()
+          while IFS= read -r KEYCHAIN; do
+            EXISTING_KEYCHAINS+=("${KEYCHAIN//\"/}")
+          done < <(security list-keychains -d user)
           security list-keychains -d user -s "$KEYCHAIN_PATH" \
-            $(security list-keychains -d user | sed s/\"//g)
+            "${EXISTING_KEYCHAINS[@]}"
 
           IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
             | awk -F '"' '/Developer ID Application/ {print $2; exit}')"
@@ -158,10 +162,11 @@ jobs:
           codesign --verify --strict --verbose=2 "$APP"
 
       - name: Notarize and staple Wisp.app
-        # Submit the signed app to Apple's notary service and staple the
-        # ticket onto the bundle itself. Stapling the .app (not just the DMG)
-        # matters because Wisp is offline-first: a stapled ticket lets
-        # Gatekeeper approve the app on first launch with Wi-Fi turned off.
+        id: notary
+        # Upload the signed app, persist its Submission ID with the app as an
+        # Actions artifact, and release this expensive macOS runner. The
+        # scheduled notary-monitor workflow polls Apple and resumes the
+        # release after the request reaches a terminal state.
         if: ${{ steps.signing.outputs.mode == 'developer-id' }}
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
@@ -177,24 +182,56 @@ jobs:
           KEY_PATH="$RUNNER_TEMP/notary_key.p8"
           echo "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$KEY_PATH"
 
-          # notarytool cannot take a bare .app, so submit a zip of it.
-          NOTARIZE_ZIP="$RUNNER_TEMP/Wisp-notarize.zip"
+          STATE_DIR="$RUNNER_TEMP/wisp-notary-state"
+          mkdir -p "$STATE_DIR"
+          NOTARIZE_ZIP="$STATE_DIR/Wisp-notarize.zip"
           ditto -c -k --sequesterRsrc --keepParent Wisp.app "$NOTARIZE_ZIP"
 
+          SUBMIT_JSON="$RUNNER_TEMP/notary-submit.json"
           xcrun notarytool submit "$NOTARIZE_ZIP" \
             --key "$KEY_PATH" \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER_ID" \
-            --wait
+            --no-progress \
+            --output-format json > "$SUBMIT_JSON"
 
-          xcrun stapler staple Wisp.app
-          xcrun stapler validate Wisp.app
-          spctl --assess --type execute --verbose=4 Wisp.app
+          SUBMISSION_ID="$(jq -r '.id' "$SUBMIT_JSON")"
+          if ! [[ "$SUBMISSION_ID" =~ ^[0-9A-Fa-f-]{36}$ ]]; then
+            echo "::error::notarytool returned an invalid Submission ID." >&2
+            jq . "$SUBMIT_JSON" >&2
+            exit 1
+          fi
 
-          rm -f "$KEY_PATH" "$NOTARIZE_ZIP"
+          ARTIFACT_ONLY="${{ github.event_name == 'workflow_dispatch' && inputs.artifact_only }}"
+          jq -n \
+            --arg phase "app" \
+            --arg submission_id "$SUBMISSION_ID" \
+            --arg source_run_id "$GITHUB_RUN_ID" \
+            --arg source_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg source_sha "$GITHUB_SHA" \
+            --arg tag "${{ steps.meta.outputs.tag }}" \
+            --arg version "${{ steps.meta.outputs.version }}" \
+            --arg artifact_only "$ARTIFACT_ONLY" \
+            '{
+              schema: 1,
+              phase: $phase,
+              submission_id: $submission_id,
+              source_run_id: $source_run_id,
+              source_run_attempt: $source_run_attempt,
+              source_sha: $source_sha,
+              tag: $tag,
+              version: $version,
+              artifact_only: ($artifact_only == "true"),
+              app_archive: "Wisp-notarize.zip"
+            }' > "$STATE_DIR/request.json"
+
+          echo "submission_id=$SUBMISSION_ID" >> "$GITHUB_OUTPUT"
+          echo "state_dir=$STATE_DIR" >> "$GITHUB_OUTPUT"
+          echo "Submitted Wisp.app for notarization: $SUBMISSION_ID"
 
       - name: Create DMG
         id: dmg
+        if: ${{ steps.signing.outputs.mode == 'adhoc' }}
         run: |
           set -euo pipefail
           SHORT_SHA="${GITHUB_SHA::7}"
@@ -218,32 +255,17 @@ jobs:
             "$DMG"
           echo "path=$DMG" >> "$GITHUB_OUTPUT"
 
-      - name: Notarize and staple DMG
-        # The app inside is already notarized and stapled; we also notarize
-        # the DMG itself so the disk image opens cleanly when downloaded.
+      - name: Save pending notarization
         if: ${{ steps.signing.outputs.mode == 'developer-id' }}
-        env:
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
-        run: |
-          set -euo pipefail
-          KEY_PATH="$RUNNER_TEMP/notary_key.p8"
-          echo "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$KEY_PATH"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wisp-notary-app-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.notary.outputs.state_dir }}
+          if-no-files-found: error
+          retention-days: 90
 
-          xcrun notarytool submit "${{ steps.dmg.outputs.path }}" \
-            --key "$KEY_PATH" \
-            --key-id "$APPLE_API_KEY_ID" \
-            --issuer "$APPLE_API_ISSUER_ID" \
-            --wait
-
-          xcrun stapler staple "${{ steps.dmg.outputs.path }}"
-          xcrun stapler validate "${{ steps.dmg.outputs.path }}"
-
-          rm -f "$KEY_PATH"
-
-      - name: Upload test app artifact
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_only }}
+      - name: Upload ad-hoc test app artifact
+        if: ${{ steps.signing.outputs.mode == 'adhoc' && github.event_name == 'workflow_dispatch' && inputs.artifact_only }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wisp-macos-app-${{ github.sha }}
@@ -253,8 +275,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish release
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.artifact_only }}
+      - name: Publish ad-hoc release
+        if: ${{ steps.signing.outputs.mode == 'adhoc' && (github.event_name != 'workflow_dispatch' || !inputs.artifact_only) }}
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}

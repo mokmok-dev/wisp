@@ -1,0 +1,345 @@
+name: notary-monitor
+on:
+  schedule:
+    # GitHub may delay scheduled runs during heavy load. Notarization is
+    # asynchronous, so a delayed poll is harmless.
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: notary-monitor
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  find-pending:
+    runs-on: ubuntu-latest
+    outputs:
+      found: ${{ steps.find.outputs.found }}
+      artifact_id: ${{ steps.find.outputs.artifact_id }}
+      artifact_name: ${{ steps.find.outputs.artifact_name }}
+      phase: ${{ steps.find.outputs.phase }}
+      token: ${{ steps.find.outputs.token }}
+    steps:
+      - name: Find the oldest actionable notarization
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          ARTIFACTS_JSON="$(gh api --paginate --slurp --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100")"
+          FLAT_JSON="$(jq -c \
+            '[.[] | .artifacts[] | select(.expired == false)]' \
+            <<< "$ARTIFACTS_JSON")"
+
+          SELECTED=""
+          while IFS=$'\t' read -r _ NAME ID; do
+            case "$NAME" in
+              wisp-notary-app-*)
+                PHASE="app"
+                TOKEN="${NAME#wisp-notary-app-}"
+                NEXT_NAME="wisp-notary-dmg-$TOKEN"
+                ;;
+              wisp-notary-dmg-*)
+                PHASE="dmg"
+                TOKEN="${NAME#wisp-notary-dmg-}"
+                NEXT_NAME=""
+                ;;
+              *)
+                continue
+                ;;
+            esac
+
+            DONE_NAME="wisp-notary-done-$TOKEN"
+            if jq -e --arg name "$DONE_NAME" \
+              'any(.[]; .name == $name)' <<< "$FLAT_JSON" >/dev/null; then
+              continue
+            fi
+            FAILURE_NAME="wisp-notary-failure-$TOKEN"
+            if jq -e --arg name "$FAILURE_NAME" \
+              'any(.[]; .name == $name)' <<< "$FLAT_JSON" >/dev/null; then
+              continue
+            fi
+            if [ -n "$NEXT_NAME" ] && jq -e --arg name "$NEXT_NAME" \
+              'any(.[]; .name == $name)' <<< "$FLAT_JSON" >/dev/null; then
+              continue
+            fi
+
+            SELECTED="$NAME"$'\t'"$ID"$'\t'"$PHASE"$'\t'"$TOKEN"
+            break
+          done < <(jq -r \
+            'sort_by(.created_at)[] | [.created_at, .name, (.id | tostring)] | @tsv' \
+            <<< "$FLAT_JSON")
+
+          if [ -z "$SELECTED" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No pending Wisp notarization artifacts."
+            exit 0
+          fi
+
+          IFS=$'\t' read -r NAME ID PHASE TOKEN <<< "$SELECTED"
+          {
+            echo "found=true"
+            echo "artifact_id=$ID"
+            echo "artifact_name=$NAME"
+            echo "phase=$PHASE"
+            echo "token=$TOKEN"
+          } >> "$GITHUB_OUTPUT"
+          echo "Found $PHASE notarization state: $NAME"
+
+  process:
+    needs: find-pending
+    if: ${{ needs.find-pending.outputs.found == 'true' }}
+    runs-on: macos-26
+    outputs:
+      result: ${{ steps.process.outputs.result }}
+      next_state_dir: ${{ steps.process.outputs.next_state_dir }}
+      final_dir: ${{ steps.process.outputs.final_dir }}
+      diagnostic_dir: ${{ steps.process.outputs.diagnostic_dir }}
+      artifact_only: ${{ steps.process.outputs.artifact_only }}
+      tag: ${{ steps.process.outputs.tag }}
+      dmg_path: ${{ steps.process.outputs.dmg_path }}
+      done_dir: ${{ steps.process.outputs.done_dir }}
+      source_sha: ${{ steps.process.outputs.source_sha }}
+    steps:
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcrun notarytool --version
+
+      - name: Download notarization state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.find-pending.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/notary-input"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
+            > "$RUNNER_TEMP/notary-state.zip"
+          ditto -x -k "$RUNNER_TEMP/notary-state.zip" \
+            "$RUNNER_TEMP/notary-input"
+          jq -e '.schema == 1 and (.phase == "app" or .phase == "dmg")' \
+            "$RUNNER_TEMP/notary-input/request.json" >/dev/null
+
+      - name: Check history and resume release
+        id: process
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          EXPECTED_PHASE: ${{ needs.find-pending.outputs.phase }}
+          TOKEN: ${{ needs.find-pending.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          INPUT_DIR="$RUNNER_TEMP/notary-input"
+          REQUEST="$INPUT_DIR/request.json"
+          KEY_PATH="$RUNNER_TEMP/notary-key.p8"
+          echo "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$KEY_PATH"
+
+          PHASE="$(jq -r '.phase' "$REQUEST")"
+          SUBMISSION_ID="$(jq -r '.submission_id' "$REQUEST")"
+          if [ "$PHASE" != "$EXPECTED_PHASE" ]; then
+            echo "::error::Artifact phase $PHASE does not match $EXPECTED_PHASE." >&2
+            exit 1
+          fi
+
+          # Keep a history snapshot for observability, then query the exact
+          # request so similarly named submissions cannot be confused.
+          HISTORY_JSON="$RUNNER_TEMP/notary-history.json"
+          INFO_JSON="$RUNNER_TEMP/notary-info.json"
+          xcrun notarytool history \
+            --key "$KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --no-progress \
+            --output-format json > "$HISTORY_JSON"
+          jq -e . "$HISTORY_JSON" >/dev/null
+
+          xcrun notarytool info "$SUBMISSION_ID" \
+            --key "$KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --no-progress \
+            --output-format json > "$INFO_JSON"
+          STATUS="$(jq -r '.status' "$INFO_JSON")"
+          echo "Notarization $SUBMISSION_ID ($PHASE): $STATUS"
+
+          ARTIFACT_ONLY="$(jq -r '.artifact_only' "$REQUEST")"
+          TAG="$(jq -r '.tag' "$REQUEST")"
+          SOURCE_SHA="$(jq -r '.source_sha' "$REQUEST")"
+          {
+            echo "artifact_only=$ARTIFACT_ONLY"
+            echo "tag=$TAG"
+            echo "source_sha=$SOURCE_SHA"
+          } >> "$GITHUB_OUTPUT"
+
+          case "$STATUS" in
+            "In Progress")
+              echo "result=pending" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            "Accepted")
+              ;;
+            *)
+              DIAGNOSTIC_DIR="$RUNNER_TEMP/notary-diagnostic"
+              mkdir -p "$DIAGNOSTIC_DIR"
+              cp "$REQUEST" "$INFO_JSON" "$HISTORY_JSON" "$DIAGNOSTIC_DIR/"
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --key "$KEY_PATH" \
+                --key-id "$APPLE_API_KEY_ID" \
+                --issuer "$APPLE_API_ISSUER_ID" \
+                "$DIAGNOSTIC_DIR/notary-log.json" || true
+              echo "result=failed" >> "$GITHUB_OUTPUT"
+              echo "diagnostic_dir=$DIAGNOSTIC_DIR" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          if [ "$PHASE" = "app" ]; then
+            APP_DIR="$RUNNER_TEMP/notarized-app"
+            mkdir -p "$APP_DIR"
+            ditto -x -k "$INPUT_DIR/$(jq -r '.app_archive' "$REQUEST")" \
+              "$APP_DIR"
+
+            xcrun stapler staple "$APP_DIR/Wisp.app"
+            xcrun stapler validate "$APP_DIR/Wisp.app"
+            spctl --assess --type execute --verbose=4 "$APP_DIR/Wisp.app"
+
+            SHORT_SHA="${SOURCE_SHA::7}"
+            if [ "$ARTIFACT_ONLY" = "true" ]; then
+              DMG_NAME="wisp-test-$SHORT_SHA-aarch64-apple-darwin.dmg"
+              ZIP_NAME="wisp-test-$SHORT_SHA-aarch64-apple-darwin.zip"
+            else
+              VERSION="$(jq -r '.version' "$REQUEST")"
+              DMG_NAME="wisp-$VERSION-aarch64-apple-darwin.dmg"
+              ZIP_NAME=""
+            fi
+
+            NEXT_DIR="$RUNNER_TEMP/wisp-notary-next"
+            mkdir -p "$NEXT_DIR"
+            if [ -n "$ZIP_NAME" ]; then
+              ditto -c -k --sequesterRsrc --keepParent \
+                "$APP_DIR/Wisp.app" "$NEXT_DIR/$ZIP_NAME"
+            fi
+
+            STAGE="$RUNNER_TEMP/dmg-stage"
+            mkdir -p "$STAGE"
+            ditto "$APP_DIR/Wisp.app" "$STAGE/Wisp.app"
+            ln -s /Applications "$STAGE/Applications"
+            hdiutil create \
+              -volname "Wisp" \
+              -srcfolder "$STAGE" \
+              -ov -format UDZO \
+              "$NEXT_DIR/$DMG_NAME"
+
+            SUBMIT_JSON="$RUNNER_TEMP/dmg-submit.json"
+            xcrun notarytool submit "$NEXT_DIR/$DMG_NAME" \
+              --key "$KEY_PATH" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER_ID" \
+              --no-progress \
+              --output-format json > "$SUBMIT_JSON"
+            DMG_SUBMISSION_ID="$(jq -r '.id' "$SUBMIT_JSON")"
+
+            jq \
+              --arg phase "dmg" \
+              --arg submission_id "$DMG_SUBMISSION_ID" \
+              --arg dmg_name "$DMG_NAME" \
+              --arg zip_name "$ZIP_NAME" \
+              '.phase = $phase
+               | .submission_id = $submission_id
+               | .dmg_name = $dmg_name
+               | .zip_name = $zip_name' \
+              "$REQUEST" > "$NEXT_DIR/request.json"
+
+            echo "result=app-accepted" >> "$GITHUB_OUTPUT"
+            echo "next_state_dir=$NEXT_DIR" >> "$GITHUB_OUTPUT"
+            echo "Submitted DMG for notarization: $DMG_SUBMISSION_ID"
+            exit 0
+          fi
+
+          DMG_NAME="$(jq -r '.dmg_name' "$REQUEST")"
+          DMG_PATH="$INPUT_DIR/$DMG_NAME"
+          xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
+
+          FINAL_DIR="$RUNNER_TEMP/wisp-final"
+          DONE_DIR="$RUNNER_TEMP/wisp-notary-done"
+          mkdir -p "$FINAL_DIR" "$DONE_DIR"
+          cp "$DMG_PATH" "$FINAL_DIR/"
+          ZIP_NAME="$(jq -r '.zip_name' "$REQUEST")"
+          if [ -n "$ZIP_NAME" ]; then
+            cp "$INPUT_DIR/$ZIP_NAME" "$FINAL_DIR/"
+          fi
+          jq \
+            --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '. + {completed_at: $completed_at}' \
+            "$REQUEST" > "$DONE_DIR/request.json"
+
+          {
+            echo "result=dmg-accepted"
+            echo "final_dir=$FINAL_DIR"
+            echo "dmg_path=$FINAL_DIR/$DMG_NAME"
+            echo "done_dir=$DONE_DIR"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Save pending DMG notarization
+        if: ${{ steps.process.outputs.result == 'app-accepted' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wisp-notary-dmg-${{ needs.find-pending.outputs.token }}
+          path: ${{ steps.process.outputs.next_state_dir }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload notarized test app
+        if: ${{ steps.process.outputs.result == 'dmg-accepted' && steps.process.outputs.artifact_only == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wisp-macos-app-${{ steps.process.outputs.source_sha }}
+          path: ${{ steps.process.outputs.final_dir }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish notarized release
+        if: ${{ steps.process.outputs.result == 'dmg-accepted' && steps.process.outputs.artifact_only != 'true' }}
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ steps.process.outputs.tag }}
+          name: ${{ steps.process.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: ${{ steps.process.outputs.dmg_path }}
+
+      - name: Mark notarization complete
+        if: ${{ steps.process.outputs.result == 'dmg-accepted' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wisp-notary-done-${{ needs.find-pending.outputs.token }}
+          path: ${{ steps.process.outputs.done_dir }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload notarization diagnostics
+        if: ${{ steps.process.outputs.result == 'failed' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wisp-notary-failure-${{ needs.find-pending.outputs.token }}
+          path: ${{ steps.process.outputs.diagnostic_dir }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Fail rejected notarization
+        if: ${{ steps.process.outputs.result == 'failed' }}
+        run: |
+          echo "::error::Apple rejected or invalidated the notarization request."
+          exit 1

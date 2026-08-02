@@ -29,6 +29,11 @@
           appleSwift = pkgs.writeShellScriptBin "swift" ''
             exec /usr/bin/xcrun swift "$@"
           '';
+          appleXcrun = pkgs.writeShellScriptBin "xcrun" ''
+            export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+            unset SDKROOT
+            exec /usr/bin/xcrun "$@"
+          '';
           workspaceRoot = toString ./.;
           swiftPrefix = "native/WispAudioKit";
           sourceFilter =
@@ -56,7 +61,10 @@
               filter = sourceFilter;
             };
             defaults.perCrate.crane.args.nativeBuildInputs = pkgs.lib.mkAfter (
-              pkgs.lib.optionals pkgs.stdenv.isDarwin [ appleSwift ]
+              pkgs.lib.optionals pkgs.stdenv.isDarwin [
+                appleSwift
+                appleXcrun
+              ]
             );
           };
 

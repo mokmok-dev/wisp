@@ -26,6 +26,6 @@ jobs:
           cache-bin: "false"
           cache-workspace-crates: "true"
           cache-on-failure: "true"
-          cmd-format: nix develop .#ci --quiet -c {0}
+          cmd-format: nix develop .#default --quiet -c {0}
       - name: Explore lifecycle interleavings with Shuttle
-        run: nix develop .#ci --quiet --command cargo test -p wisp-lifecycle --test shuttle_lifecycle
+        run: nix develop .#default --quiet --command cargo test -p wisp-lifecycle --test shuttle_lifecycle

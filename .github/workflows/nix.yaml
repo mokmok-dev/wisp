@@ -1,9 +1,6 @@
 name: nix
 on:
   pull_request:
-    paths:
-      - "flake.lock"
-      - "flake.nix"
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-nix
   cancel-in-progress: true
@@ -13,10 +10,22 @@ permissions:
   id-token: write
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            setup:
+          - runs-on: macos-latest
+            setup: |
+              sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+              xcrun swift --version
+              xcrun --find metal
+          - runs-on: windows-latest
+            setup:
+    runs-on: ${ matrix.runs-on }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-nix
-      - uses: DeterminateSystems/flake-checker-action@de924abd783455e8429c858962b9e43062d19da1 # v13
-      - run: nix develop .#ci --quiet --command nixfmt --check flake.nix nix
+      - run: ${ matrix.setup }
       - run: nix flake check --print-build-logs

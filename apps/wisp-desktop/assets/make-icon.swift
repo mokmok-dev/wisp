@@ -14,17 +14,17 @@ import CoreGraphics
 import Foundation
 
 guard CommandLine.arguments.count == 3 else {
-    print("usage: make-icon <source> <output-1024.png>")
-    exit(1)
+  print("usage: make-icon <source> <output-1024.png>")
+  exit(1)
 }
 let srcURL = URL(fileURLWithPath: CommandLine.arguments[1])
 let dstURL = URL(fileURLWithPath: CommandLine.arguments[2])
 
 guard let srcImage = NSImage(contentsOf: srcURL),
-      let srcCG = srcImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
+  let srcCG = srcImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
 else {
-    print("failed to load source image at \(srcURL.path)")
-    exit(1)
+  print("failed to load source image at \(srcURL.path)")
+  exit(1)
 }
 
 let srcW = srcCG.width
@@ -32,14 +32,17 @@ let srcH = srcCG.height
 let side = min(srcW, srcH)
 let cropOriginX = (srcW - side) / 2
 let cropOriginY = (srcH - side) / 2
-guard let cropped = srcCG.cropping(to: CGRect(
-    x: cropOriginX,
-    y: cropOriginY,
-    width: side,
-    height: side
-)) else {
-    print("crop failed")
-    exit(1)
+guard
+  let cropped = srcCG.cropping(
+    to: CGRect(
+      x: cropOriginX,
+      y: cropOriginY,
+      width: side,
+      height: side
+    ))
+else {
+  print("crop failed")
+  exit(1)
 }
 
 let canvas: CGFloat = 1024
@@ -49,33 +52,33 @@ let inset = (canvas - inner) / 2
 let cornerRadius = inner * 0.2237
 
 guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-      let ctx = CGContext(
-          data: nil,
-          width: Int(canvas),
-          height: Int(canvas),
-          bitsPerComponent: 8,
-          bytesPerRow: 0,
-          space: colorSpace,
-          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-      )
+  let ctx = CGContext(
+    data: nil,
+    width: Int(canvas),
+    height: Int(canvas),
+    bitsPerComponent: 8,
+    bytesPerRow: 0,
+    space: colorSpace,
+    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+  )
 else {
-    print("CGContext init failed")
-    exit(1)
+  print("CGContext init failed")
+  exit(1)
 }
 
 // Drop shadow on the squircle itself.
 ctx.setShadow(
-    offset: CGSize(width: 0, height: -8),
-    blur: 24,
-    color: CGColor(red: 0, green: 0, blue: 0, alpha: 0.45)
+  offset: CGSize(width: 0, height: -8),
+  blur: 24,
+  color: CGColor(red: 0, green: 0, blue: 0, alpha: 0.45)
 )
 
 let innerRect = CGRect(x: inset, y: inset, width: inner, height: inner)
 let path = CGPath(
-    roundedRect: innerRect,
-    cornerWidth: cornerRadius,
-    cornerHeight: cornerRadius,
-    transform: nil
+  roundedRect: innerRect,
+  cornerWidth: cornerRadius,
+  cornerHeight: cornerRadius,
+  transform: nil
 )
 
 ctx.saveGState()
@@ -92,31 +95,32 @@ ctx.draw(cropped, in: innerRect)
 ctx.setShadow(offset: .zero, blur: 0, color: nil)
 let centre = CGPoint(x: innerRect.midX, y: innerRect.midY)
 let endRadius = inner * 0.72
-let colors = [
+let colors =
+  [
     CGColor(red: 0, green: 0, blue: 0, alpha: 0.0),
     CGColor(red: 0, green: 0, blue: 0, alpha: 0.0),
     CGColor(red: 0, green: 0, blue: 0, alpha: 0.55),
-] as CFArray
+  ] as CFArray
 let locations: [CGFloat] = [0.0, 0.55, 1.0]
 if let gradient = CGGradient(colorsSpace: colorSpace, colors: colors, locations: locations) {
-    ctx.drawRadialGradient(
-        gradient,
-        startCenter: centre, startRadius: 0,
-        endCenter: centre, endRadius: endRadius,
-        options: []
-    )
+  ctx.drawRadialGradient(
+    gradient,
+    startCenter: centre, startRadius: 0,
+    endCenter: centre, endRadius: endRadius,
+    options: []
+  )
 }
 
 ctx.restoreGState()
 
 guard let outCG = ctx.makeImage() else {
-    print("makeImage failed")
-    exit(1)
+  print("makeImage failed")
+  exit(1)
 }
 let rep = NSBitmapImageRep(cgImage: outCG)
 guard let png = rep.representation(using: .png, properties: [:]) else {
-    print("png encode failed")
-    exit(1)
+  print("png encode failed")
+  exit(1)
 }
 try png.write(to: dstURL)
 print("wrote \(dstURL.path)")

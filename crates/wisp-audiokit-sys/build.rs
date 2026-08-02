@@ -69,16 +69,19 @@ fn main() {
         Ok(v) if !v.starts_with("/nix/store/") => v.into(),
         _ => detect_sdk_root(&developer_dir),
     };
+    let swift_home =
+        PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is always set by cargo build scripts"));
 
     let configure = |cmd: &mut Command| {
         cmd.current_dir(&swift_pkg)
             .env("DEVELOPER_DIR", &developer_dir)
-            .env("SDKROOT", &sdk_root);
+            .env("SDKROOT", &sdk_root)
+            .env("HOME", &swift_home);
     };
 
     // 1) Build the Swift package.
     let mut build_cmd = Command::new("swift");
-    build_cmd.arg("build");
+    build_cmd.args(["build", "--disable-sandbox"]);
     configure(&mut build_cmd);
     if is_release {
         build_cmd.args(["-c", "release"]);
@@ -90,7 +93,7 @@ fn main() {
 
     // 2) Ask SwiftPM where it put the artifacts.
     let mut path_cmd = Command::new("swift");
-    path_cmd.args(["build", "--show-bin-path"]);
+    path_cmd.args(["build", "--disable-sandbox", "--show-bin-path"]);
     configure(&mut path_cmd);
     if is_release {
         path_cmd.args(["-c", "release"]);

@@ -68,10 +68,10 @@ jobs:
           cache-bin: "false"
           cache-workspace-crates: "true"
           cache-on-failure: "true"
-          cmd-format: nix develop .#ci --quiet -c {0}
+          cmd-format: nix develop .#default --quiet -c {0}
 
       - name: Build Wisp binaries (release)
-        run: nix develop .#ci --quiet --command cargo build -p wisp-desktop -p wisp-mcp --release --locked
+        run: nix develop .#default --quiet --command cargo build -p wisp-desktop -p wisp-mcp --release --locked
 
       - name: Assemble Wisp.app bundle
         run: |

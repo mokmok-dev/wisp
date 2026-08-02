@@ -23,16 +23,8 @@ autotests = false
 autobenches = false
 description = "Bindings for the Wasapi API on Windows"
 readme = "README.md"
-keywords = [
-    "audio",
-    "sound",
-    "windows",
-    "wasapi",
-]
-categories = [
-    "multimedia::audio",
-    "os::windows-apis",
-]
+keywords = ["audio", "sound", "windows", "wasapi"]
+categories = ["multimedia::audio", "os::windows-apis"]
 license = "MIT"
 repository = "https://github.com/HEnquist/wasapi-rs"
 
@@ -100,19 +92,19 @@ version = "2.0"
 [dependencies.windows]
 version = "0.62"
 features = [
-    "Foundation",
-    "Win32_Media_Audio",
-    "Win32_Foundation",
-    "Win32_Devices_FunctionDiscovery",
-    "Win32_Devices_Properties",
-    "Win32_UI_Shell_PropertiesSystem",
-    "Win32_System_Com",
-    "Win32_System_Com_StructuredStorage",
-    "Win32_Media_KernelStreaming",
-    "Win32_Media_Multimedia",
-    "Win32_System_Threading",
-    "Win32_System_Variant",
-    "Win32_Security",
+  "Foundation",
+  "Win32_Media_Audio",
+  "Win32_Foundation",
+  "Win32_Devices_FunctionDiscovery",
+  "Win32_Devices_Properties",
+  "Win32_UI_Shell_PropertiesSystem",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_Media_KernelStreaming",
+  "Win32_Media_Multimedia",
+  "Win32_System_Threading",
+  "Win32_System_Variant",
+  "Win32_Security",
 ]
 
 [dependencies.windows-core]

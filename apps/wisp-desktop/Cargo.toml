@@ -1,5 +1,6 @@
 [package]
 name = "wisp-desktop"
+description = ""
 edition.workspace = true
 version.workspace = true
 publish = false

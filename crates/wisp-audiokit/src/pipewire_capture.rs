@@ -844,6 +844,7 @@ fn report_fatal_format(data: &mut StreamData) {
     }
 }
 
+#[cfg(test)]
 fn recording_loop(
     receiver: &CaptureEventReceiver,
     mic: OggOpusRecorder,

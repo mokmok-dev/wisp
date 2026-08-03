@@ -4849,7 +4849,7 @@ mod imp {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use wisp_core::SourceLabel;
+    use wisp_core::{SourceLabel, TrackId, TranscriptEvent};
 
     use crate::error::{Result, SessionError};
     use crate::{
@@ -5056,7 +5056,7 @@ mod imp {
             if let Some(transcripts) = &self.transcripts
                 && let Ok(event) = transcripts.try_recv()
             {
-                return Some(transcript_event(event));
+                return Some(transcript_event(&event));
             }
             if let Ok(event) = self.pending.try_recv() {
                 return Some(event);
@@ -5125,7 +5125,7 @@ mod imp {
         }
     }
 
-    fn transcript_event(event: TranscriptEvent) -> Event {
+    fn transcript_event(event: &TranscriptEvent) -> Event {
         let is_final = event.is_final();
         let segment = event.segment();
         Event::Result(SessionResult {

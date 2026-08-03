@@ -72,7 +72,7 @@
             projectRootFile = "flake.nix";
             programs = {
               nixfmt.enable = true;
-              swift-format.enable = true;
+              swift-format.enable = pkgs.stdenv.isDarwin;
               taplo.enable = true;
             };
           };

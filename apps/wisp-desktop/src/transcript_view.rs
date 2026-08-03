@@ -71,6 +71,16 @@ pub struct TranscriptView {
     pub last_signature: (usize, usize),
 }
 
+struct LiveSessionRender<'a> {
+    state: SessionState,
+    microphone_muted: bool,
+    model: Entity<AppModel>,
+    segment_count: usize,
+    log_count: usize,
+    last_error: Option<&'a AppError>,
+    export_title: Option<&'a str>,
+}
+
 mod theme {
     use gpui::rgb;
     pub fn bg() -> gpui::Rgba {
@@ -149,20 +159,22 @@ impl Render for TranscriptView {
                 let live_export_title = linked_session_id
                     .and_then(|id| library.iter().find(|s| s.id == id).map(|s| s.title.clone()));
                 self.render_live_session(
-                    state,
-                    microphone_muted,
-                    model,
-                    segment_count,
-                    log_count,
-                    last_error.as_ref(),
-                    live_export_title.as_deref(),
+                    LiveSessionRender {
+                        state,
+                        microphone_muted,
+                        model,
+                        segment_count,
+                        log_count,
+                        last_error: last_error.as_ref(),
+                        export_title: live_export_title.as_deref(),
+                    },
                     cx,
                 )
                 .into_any_element()
             },
             View::History { .. } => {
                 self.sync_transcript_list(&view, segment_count, active_idx, active_text_len);
-                self.render_history(viewed_session.as_ref(), model, segment_count, cx)
+                self.render_history(viewed_session.as_ref(), &model, segment_count, cx)
                     .into_any_element()
             },
         }
@@ -229,15 +241,18 @@ impl TranscriptView {
 
     fn render_live_session(
         &self,
-        state: SessionState,
-        microphone_muted: bool,
-        model: Entity<AppModel>,
-        segment_count: usize,
-        log_count: usize,
-        last_error: Option<&AppError>,
-        export_title: Option<&str>,
+        render: LiveSessionRender<'_>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let LiveSessionRender {
+            state,
+            microphone_muted,
+            model,
+            segment_count,
+            log_count,
+            last_error,
+            export_title,
+        } = render;
         let export_name = suggested_export_name(export_title, "transcript");
         div()
             .flex()
@@ -245,16 +260,10 @@ impl TranscriptView {
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text_primary())
-            .child(self.render_live_top_bar(
-                state,
-                microphone_muted,
-                model.clone(),
-                &export_name,
-                cx,
-            ))
+            .child(self.render_live_top_bar(state, microphone_muted, &model, &export_name, cx))
             .child(render_transcript(
                 self.transcript_list.clone(),
-                model,
+                &model,
                 segment_count,
                 self.cursor_visible,
             ))
@@ -270,7 +279,7 @@ impl TranscriptView {
     fn render_history(
         &self,
         session: Option<&StoredSession>,
-        model: Entity<AppModel>,
+        model: &Entity<AppModel>,
         segment_count: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -287,7 +296,7 @@ impl TranscriptView {
             .child(self.render_history_top_bar(
                 &title,
                 subtitle.as_deref(),
-                model.clone(),
+                model,
                 &export_name,
                 cx,
             ))
@@ -342,7 +351,7 @@ impl TranscriptView {
         &self,
         state: SessionState,
         microphone_muted: bool,
-        model: Entity<AppModel>,
+        model: &Entity<AppModel>,
         export_name: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -384,7 +393,7 @@ impl TranscriptView {
         &self,
         title: &str,
         subtitle: Option<&str>,
-        model: Entity<AppModel>,
+        model: &Entity<AppModel>,
         export_name: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -638,13 +647,13 @@ impl TranscriptView {
     ) -> impl IntoElement {
         let (status_text, status_color) = match setup.local_model.clone() {
             LocalModelStatus::Ready { bytes, .. } => (
-                format!("Ready ({:.0} MB)", bytes as f64 / 1024.0 / 1024.0),
+                format!("Ready ({} MB)", rounded_mebibytes(bytes)),
                 theme::mic_accent(),
             ),
             LocalModelStatus::Missing { spec, .. } => (
                 format!(
-                    "Not downloaded ({:.0} MB)",
-                    spec.approx_bytes as f64 / 1024.0 / 1024.0
+                    "Not downloaded ({} MB)",
+                    rounded_mebibytes(spec.approx_bytes)
                 ),
                 if setup.recognizer == RecognizerBackend::LocalModel {
                     theme::record_red()
@@ -916,7 +925,7 @@ fn render_microphone_mute_button(
 
 fn render_transcript(
     list_state: ListState,
-    model: Entity<AppModel>,
+    model: &Entity<AppModel>,
     segment_count: usize,
     cursor_visible: bool,
 ) -> impl IntoElement {
@@ -1077,7 +1086,7 @@ fn render_new_session_button(
 }
 
 fn render_transcript_actions(
-    model: Entity<AppModel>,
+    model: &Entity<AppModel>,
     export_name: &str,
     cx: &App,
 ) -> gpui::AnyElement {
@@ -1106,7 +1115,7 @@ fn render_transcript_actions(
         ))
         .child(render_toolbar_button("transcript-export", "Export", {
             let export_name = export_name.clone();
-            let model = model.clone();
+            let model = (*model).clone();
             move |_window, cx| {
                 let app = model.read(cx);
                 let text = transcript_export::format_transcript_markdown(
@@ -1117,6 +1126,11 @@ fn render_transcript_actions(
             }
         }))
         .into_any_element()
+}
+
+const fn rounded_mebibytes(bytes: u64) -> u64 {
+    const MEBIBYTE: u64 = 1024 * 1024;
+    bytes.saturating_add(MEBIBYTE / 2) / MEBIBYTE
 }
 
 fn render_toolbar_button(

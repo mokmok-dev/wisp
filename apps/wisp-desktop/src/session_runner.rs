@@ -197,8 +197,9 @@ fn worker_loop(
             }) => {
                 run_session(&output_dir, config, session, cmd_rx, update_tx);
             },
-            Ok(Command::SetMicrophoneMuted(_)) => {}, // no-op, nothing running
-            Ok(Command::Stop) => {},                  // no-op, nothing running
+            Ok(Command::SetMicrophoneMuted(_) | Command::Stop) => {
+                // no-op, nothing running
+            },
             Ok(Command::Shutdown) | Err(_) => return,
         }
     }
@@ -319,11 +320,12 @@ fn merge_runtime_failures(
     primary: SessionError,
     cleanup: Option<SessionError>,
 ) -> SessionError {
-    cleanup.map_or(primary.clone(), |cleanup| {
-        SessionError::Start(format!(
+    match cleanup {
+        Some(cleanup) => SessionError::Start(format!(
             "{primary}; cleanup/finalization also failed: {cleanup}"
-        ))
-    })
+        )),
+        None => primary,
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

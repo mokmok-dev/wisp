@@ -170,6 +170,23 @@ struct MainWindowDeps {
     recordings_dir: PathBuf,
 }
 
+fn microphone_mute_handler(
+    runner: Arc<SessionRunner>,
+    model: Entity<AppModel>,
+) -> Arc<dyn Fn(&mut gpui::Window, &mut App)> {
+    Arc::new(move |_window, cx| {
+        let muted = !model.read(cx).microphone_muted;
+        if runner.set_microphone_muted(muted) {
+            model.update(cx, |model, cx| {
+                if matches!(model.state, SessionState::Recording { .. }) {
+                    model.microphone_muted = muted;
+                    cx.notify();
+                }
+            });
+        }
+    })
+}
+
 fn open_main_window(
     cx: &mut App,
     window_options: WindowOptions,
@@ -186,7 +203,6 @@ fn open_main_window(
     cx.open_window(window_options, move |_, cx| {
         cx.new(|cx| {
             let model_for_toggle = model.clone();
-            let model_for_mute = model.clone();
             let model_for_request = model.clone();
             let model_for_select = model.clone();
             let model_for_download = model.clone();
@@ -200,7 +216,6 @@ fn open_main_window(
             let data_for_download = data_dir.clone();
             let recordings_for_toggle = recordings_dir.clone();
             let runner_for_toggle = runner.clone();
-            let runner_for_mute = runner.clone();
             let (transcript_list, follow_transcript) = new_transcript_list_state();
             let view = TranscriptView {
                 app: model.clone(),
@@ -221,17 +236,7 @@ fn open_main_window(
                         cx,
                     );
                 }),
-                on_toggle_microphone_mute: Arc::new(move |_window, cx| {
-                    let muted = !model_for_mute.read(cx).microphone_muted;
-                    if runner_for_mute.set_microphone_muted(muted) {
-                        model_for_mute.update(cx, |model, cx| {
-                            if matches!(model.state, SessionState::Recording { .. }) {
-                                model.microphone_muted = muted;
-                                cx.notify();
-                            }
-                        });
-                    }
-                }),
+                on_toggle_microphone_mute: microphone_mute_handler(runner.clone(), model.clone()),
                 on_request_permission: Arc::new(move |perm, _window, cx| {
                     permissions::request(perm, model_for_request.clone(), cx);
                 }),

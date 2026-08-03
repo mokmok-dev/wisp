@@ -78,7 +78,6 @@ impl SessionState {
 
     #[must_use]
     pub fn with_phase(
-        self,
         phase: Phase,
         recording_started_at: Instant,
     ) -> Self {
@@ -144,12 +143,6 @@ impl Permissions {
             speech: PermissionStatus::Undetermined,
             pending: None,
         }
-    }
-
-    /// True when both required permissions are granted; the UI can show
-    /// the normal Record screen.
-    pub fn all_granted(self) -> bool {
-        self.microphone.is_granted() && self.speech.is_granted()
     }
 
     /// Whether the minimum permissions required by this session policy are

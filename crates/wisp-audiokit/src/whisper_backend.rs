@@ -30,6 +30,13 @@ use crate::{
 pub const WHISPER_BACKEND_ID: &str = "whisper-cpp";
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 const CHUNK_SAMPLES: usize = 16_000 * 12;
+/// Whisper's default threshold for treating a decoded segment as silence.
+///
+/// whisper.cpp exposes this probability on every segment but does not apply
+/// the threshold itself. Filtering here prevents text hallucinated from
+/// silence (for example common outro phrases) from reaching transcript
+/// consumers.
+const NO_SPEECH_PROBABILITY_THRESHOLD: f32 = 0.6;
 
 /// Factory registration for the built-in whisper.cpp provider.
 #[derive(Debug, Default, Clone, Copy)]
@@ -705,6 +712,9 @@ fn transcribe_chunk(
         .map_err(|error| format!("Whisper inference failed: {error}"))?;
     let offset_seconds = *offset_samples as f64 / f64::from(WHISPER_SAMPLE_RATE);
     for segment in state.as_iter() {
+        if is_probable_no_speech(segment.no_speech_probability()) {
+            continue;
+        }
         let text = segment
             .to_str_lossy()
             .map_err(|error| format!("Whisper returned invalid text: {error}"))?
@@ -734,6 +744,10 @@ fn transcribe_chunk(
     Ok(())
 }
 
+fn is_probable_no_speech(probability: f32) -> bool {
+    probability.is_finite() && probability > NO_SPEECH_PROBABILITY_THRESHOLD
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -749,9 +763,26 @@ mod tests {
     };
 
     use super::{
-        StreamingResampler, WHISPER_BACKEND_ID, WhisperTranscriberBackend,
-        WhisperTranscriberFactory, frame_to_mono_samples, model_file_ready, whisper_language,
+        NO_SPEECH_PROBABILITY_THRESHOLD, StreamingResampler, WHISPER_BACKEND_ID,
+        WhisperTranscriberBackend, WhisperTranscriberFactory, frame_to_mono_samples,
+        is_probable_no_speech, model_file_ready, whisper_language,
     };
+
+    #[test]
+    fn high_no_speech_probability_is_filtered_as_hallucination() {
+        assert!(is_probable_no_speech(
+            NO_SPEECH_PROBABILITY_THRESHOLD + f32::EPSILON
+        ));
+        assert!(is_probable_no_speech(1.0));
+    }
+
+    #[test]
+    fn speech_and_invalid_probabilities_are_not_filtered() {
+        assert!(!is_probable_no_speech(NO_SPEECH_PROBABILITY_THRESHOLD));
+        assert!(!is_probable_no_speech(0.0));
+        assert!(!is_probable_no_speech(f32::NAN));
+        assert!(!is_probable_no_speech(f32::INFINITY));
+    }
 
     #[test]
     fn locale_maps_to_whisper_language() {

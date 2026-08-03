@@ -863,13 +863,14 @@ fn recording_loop_with_transcriber(
     let mut mic_timeline = TrackTimeline::default();
     let mut system_timeline = TrackTimeline::default();
     while let Some(event) = receiver.recv() {
-        if let Some(transcriber) = transcriber.as_deref_mut() {
-            if let Err(error) = transcriber.push_capture(&event) {
-                let _ = notifications.try_send(format!(
-                    "Whisper transcription stopped ({error}); audio recording continues"
-                ));
-                transcriber = None;
-            }
+        let transcription_error = transcriber
+            .as_deref_mut()
+            .and_then(|active| active.push_capture(&event).err());
+        if let Some(error) = transcription_error {
+            let _ = notifications.try_send(format!(
+                "Whisper transcription stopped ({error}); audio recording continues"
+            ));
+            transcriber = None;
         }
         match event {
             CaptureEvent::Samples(frame) => {

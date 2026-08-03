@@ -3741,7 +3741,7 @@ mod imp {
     use crate::{
         CallbackEventClass, CallbackEventReceiver, CallbackEventSender, MergedSessionReceive,
         OneShotSessionLifecycle, Permission, PermissionStatus, SessionConfig, SessionOptions,
-        TranscriptionPolicy, WasapiRecording, WhisperTranscriberBackend, WindowsPlatformStart,
+        TranscriptionPolicy, WasapiRecording, WhisperTranscriberFactory, WindowsPlatformStart,
         WindowsPlatformStartError, WindowsRuntimeControlPublisher, WindowsRuntimeNotification,
         WindowsTranscriptionMode, callback_event_channel_with_final_gap,
         recv_callback_session_channels_with_control, select_windows_transcription_mode,

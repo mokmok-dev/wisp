@@ -1041,13 +1041,14 @@ fn recording_loop(
     let mut system_timeline = TrackTimeline::default();
     let processing_result = (|| {
         while let Some(event) = receiver.recv() {
-            if let Some(transcriber) = transcriber.as_deref_mut() {
-                if let Err(error) = transcriber.push_capture(&event) {
-                    let _ = notification_sender.try_send(RecordingNotification::Warning(format!(
-                        "Whisper transcription stopped ({error}); audio recording continues"
-                    )));
-                    transcriber = None;
-                }
+            let transcription_error = transcriber
+                .as_deref_mut()
+                .and_then(|active| active.push_capture(&event).err());
+            if let Some(error) = transcription_error {
+                let _ = notification_sender.try_send(RecordingNotification::Warning(format!(
+                    "Whisper transcription stopped ({error}); audio recording continues"
+                )));
+                transcriber = None;
             }
             match event {
                 CaptureEvent::Samples(frame) => {

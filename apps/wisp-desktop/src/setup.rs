@@ -22,13 +22,6 @@ fn download_is_current(
     setup.local_model_id == id && setup.download_generation == generation
 }
 
-const fn recognizer_for_model(id: LocalModelId) -> RecognizerBackend {
-    match id {
-        LocalModelId::Tiny | LocalModelId::Base => RecognizerBackend::LocalModel,
-        LocalModelId::Nemotron => RecognizerBackend::Nemotron,
-    }
-}
-
 pub fn refresh(
     model: &Entity<AppModel>,
     data_dir: &Path,
@@ -44,48 +37,13 @@ pub fn refresh(
     });
 }
 
-pub fn select_model(
-    id: LocalModelId,
-    model: &Entity<AppModel>,
-    data_dir: &Path,
-    cx: &mut App,
-) {
-    let status = local_model_status_for(data_dir, id);
-    model.update(cx, |m, cx| {
-        m.setup.download_generation = m.setup.download_generation.wrapping_add(1);
-        m.setup.local_model_id = id;
-        m.setup.local_model = status;
-        m.setup.model_download = ModelDownloadState::Idle;
-        m.setup.model_error = None;
-        if m.setup.recognizer != RecognizerBackend::Platform {
-            m.setup.recognizer = recognizer_for_model(id);
-        }
-        cx.notify();
-    });
-    let mut settings = crate::settings::load(data_dir);
-    if let Ok(model) = crate::settings::WhisperModel::try_from(id) {
-        settings.transcription.model = model;
-    }
-    if let Err(error) = crate::settings::save(data_dir, &settings) {
-        eprintln!("wisp: failed to save Whisper model: {error}");
-    }
-}
-
 pub fn select_recognizer(
     recognizer: RecognizerBackend,
     model: &Entity<AppModel>,
     data_dir: &Path,
     cx: &mut App,
 ) {
-    let id = match recognizer {
-        RecognizerBackend::Nemotron => LocalModelId::Nemotron,
-        RecognizerBackend::LocalModel
-            if model.read(cx).setup.local_model_id == LocalModelId::Nemotron =>
-        {
-            LocalModelId::Base
-        },
-        _ => model.read(cx).setup.local_model_id,
-    };
+    let id = LocalModelId::Nemotron;
     let status = local_model_status_for(data_dir, id);
     model.update(cx, |m, cx| {
         m.setup.download_generation = m.setup.download_generation.wrapping_add(1);
@@ -184,10 +142,10 @@ pub fn download_model(
                                     if m.setup.local_model_id != id {
                                         return;
                                     }
-                                    m.setup.recognizer = recognizer_for_model(id);
+                                    m.setup.recognizer = RecognizerBackend::Nemotron;
                                     let mut settings = crate::settings::load(&data_dir);
                                     settings.transcription.provider =
-                                        recognizer_for_model(id).into();
+                                        RecognizerBackend::Nemotron.into();
                                     if let Err(error) =
                                         crate::settings::save(&data_dir, &settings)
                                     {
@@ -225,10 +183,9 @@ mod tests {
     fn model_or_generation_change_invalidates_download_completion() {
         let data_dir = tempfile::tempdir().expect("temp dir");
         let mut setup = crate::app::Setup::new(data_dir.path());
-        setup.local_model_id = LocalModelId::Base;
+        setup.local_model_id = LocalModelId::Nemotron;
         setup.download_generation = 7;
-        assert!(download_is_current(&setup, LocalModelId::Base, 7));
-        assert!(!download_is_current(&setup, LocalModelId::Tiny, 7));
-        assert!(!download_is_current(&setup, LocalModelId::Base, 6));
+        assert!(download_is_current(&setup, LocalModelId::Nemotron, 7));
+        assert!(!download_is_current(&setup, LocalModelId::Nemotron, 6));
     }
 }

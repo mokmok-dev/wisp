@@ -31,18 +31,9 @@ tempfile = { workspace = true }
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 sherpa-onnx = "1.13.4"
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-whisper-rs = "0.16.0"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-# whisper-rs enables no accelerator by default. Build whisper.cpp's Metal
-# backend explicitly so Apple Silicon does not run CPU-only inference.
-whisper-rs = { version = "0.16.0", features = ["metal"] }
-
 [target.'cfg(target_os = "windows")'.dependencies]
-# The upstream static Windows archive is built with /MT, while whisper.cpp
-# and Rust's default MSVC runtime use /MD. Link the DLL build to keep both
-# recognizers in one process without conflicting C runtimes.
+# The upstream static Windows archive is built with /MT, while Rust's default
+# MSVC runtime uses /MD. Use the DLL build to avoid conflicting C runtimes.
 sherpa-onnx = { version = "1.13.4", default-features = false, features = ["shared"] }
 wasapi = "0.23.0"
 windows = { version = "0.62.2", features = [

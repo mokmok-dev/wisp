@@ -31,7 +31,7 @@ use gpui::{
     App, AppContext, Application, AsyncApp, Bounds, Entity, Timer, TitlebarOptions, WindowBounds,
     WindowHandle, WindowOptions, px, size,
 };
-use wisp_audiokit::{LocalModelId, RecognizerBackend, SessionError};
+use wisp_audiokit::{LocalModelId, SessionError};
 use wisp_core::SessionId;
 use wisp_storage::Storage;
 
@@ -84,11 +84,7 @@ fn main() {
         // choice, preserve it across launches instead of forcing the OS
         // default again.
         let configured_recognizer = app_settings.transcription.provider.clone().into();
-        let configured_model = if configured_recognizer == RecognizerBackend::Nemotron {
-            LocalModelId::Nemotron
-        } else {
-            app_settings.transcription.model.into()
-        };
+        let configured_model = LocalModelId::Nemotron;
         let local_mcp = LocalMcpBridge::new(
             app_settings.local_mcp.enabled,
             app_settings.local_mcp.addr.clone(),
@@ -203,7 +199,6 @@ fn open_main_window(
             let model_for_mute = model.clone();
             let model_for_request = model.clone();
             let model_for_select = model.clone();
-            let model_for_model_select = model.clone();
             let model_for_download = model.clone();
             let model_for_new = model.clone();
             let model_for_open_history = model.clone();
@@ -214,7 +209,6 @@ fn open_main_window(
             let data_for_toggle = data_dir.clone();
             let data_for_download = data_dir.clone();
             let data_for_select = data_dir.clone();
-            let data_for_model_select = data_dir.clone();
             let recordings_for_toggle = recordings_dir.clone();
             let runner_for_toggle = runner.clone();
             let runner_for_mute = runner.clone();
@@ -259,9 +253,6 @@ fn open_main_window(
                 }),
                 on_select_recognizer: Arc::new(move |recognizer, _window, cx| {
                     setup::select_recognizer(recognizer, &model_for_select, &data_for_select, cx);
-                }),
-                on_select_local_model: Arc::new(move |id, _window, cx| {
-                    setup::select_model(id, &model_for_model_select, &data_for_model_select, cx);
                 }),
                 on_download_local_model: Arc::new(move |_window, cx| {
                     setup::download_model(

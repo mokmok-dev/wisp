@@ -3,7 +3,7 @@
 //! Shared-mode WASAPI microphone and system-loopback capture.
 //!
 //! Both endpoints are converted by the Windows audio engine to the format
-//! expected by Whisper-family models: 16 kHz, mono, `f32` PCM. COM objects
+//! expected by local ASR models: 16 kHz, mono, `f32` PCM. COM objects
 //! stay on the worker thread that created them.
 
 use std::collections::VecDeque;
@@ -1046,7 +1046,7 @@ fn recording_loop(
                 .and_then(|active| active.push_capture(&event).err());
             if let Some(error) = transcription_error {
                 let _ = notification_sender.try_send(RecordingNotification::Warning(format!(
-                    "Whisper transcription stopped ({error}); audio recording continues"
+                    "Nemotron transcription stopped ({error}); audio recording continues"
                 )));
                 transcriber = None;
             }

@@ -3,14 +3,12 @@
 **A privacy-first recording & transcription desktop app.**
 
 Wisp captures your microphone and system audio (the other side of a call) at
-the same time and can transcribe both locally with Whisper or streaming
-Nemotron.
+the same time and can transcribe both locally with streaming Nemotron.
 
 > macOS 26 (Tahoe) is the primary supported target. Windows support is in
 > preview: WASAPI recording stays local, while the optional
 > `Windows.Media.SpeechRecognition` free-form dictation route uses Microsoft's
-> online service. Whisper and Nemotron provide offline microphone + loopback
-> routes.
+> online service. Nemotron provides the offline microphone + loopback route.
 > Linux recording is in preview: PipeWire captures the default microphone and,
 > when exposed by the session manager, the default sink monitor into separate
 > Ogg/Opus files and fans the same PCM into the selected local recognizer.
@@ -50,8 +48,8 @@ Roughly, data flows like this:
 Core Audio Process Tap ─┐
                         ├─► WispAudioKit ─► wisp-audiokit ─► wisp-desktop (GPUI)
 Microphone input ───────┘        │                              ▲
-                                 ├─► SpeechAnalyzer ────────────┘
-                                 └─► recordings (Ogg/Opus)       │
+                                 ├─► SpeechAnalyzer / Nemotron ─┘
+                                 └─► recordings (Ogg/Opus)      │
                                                                 └─► wisp-storage (SQLite)
 ```
 
@@ -88,9 +86,9 @@ The Rust boundary separates OS capture from transcription:
 
 The same recorder-owned PCM consumer fans accepted frames and overflow gaps
 into `TranscriberBackend` on every OS, so recording and transcription keep one
-ordered timeline. Whisper uses whisper.cpp; Nemotron uses sherpa-onnx with a
-cache-aware streaming transducer. A model artifact can be one file or a
-verified multi-file bundle without changing capture/session orchestration.
+ordered timeline. Nemotron uses sherpa-onnx with a cache-aware streaming
+transducer. Its verified multi-file model bundle is provider-owned, without
+coupling capture/session orchestration to ONNX file layout.
 
 ## Requirements
 
@@ -98,12 +96,12 @@ verified multi-file bundle without changing capture/session orchestration.
 - **Xcode 26** — for the Swift 6.0 / macOS 26 SDK.
 - **Windows 10/11 preview** — records WASAPI mic + loopback audio locally. The
   `Windows.Media.SpeechRecognition` dictation route requires network access
-  and MSIX package identity. Whisper is the offline default.
+  and MSIX package identity. Nemotron is the offline default.
 - **Linux preview** — PipeWire 0.3 development files and `pkg-config` are
   required to build. A running PipeWire session manager must expose a default
   audio source; default-sink monitor capture is optional.
 - **Rust 1.97.1** — pinned in `rust-toolchain.toml`.
-- **CMake and libclang** — required by `whisper-rs` / whisper.cpp on every OS.
+- **libclang and pkg-config on Linux** — required by the PipeWire bindings.
 - **System curl** — `/usr/bin/curl` or `/usr/local/bin/curl` on macOS/Linux,
   and `%SystemRoot%\System32\curl.exe` on Windows, for bounded model downloads.
 - Microphone and system-audio recording permissions. macOS will prompt on first launch.
@@ -115,12 +113,12 @@ needed for capture and on-device transcription. The desktop currently requests
 the `ja-JP` transcription locale for each session.
 
 macOS defaults to Apple SpeechAnalyzer. Windows and Linux default to local
-Whisper. Setup can select Whisper Tiny/Base or Nemotron 3.5 ASR Streaming 0.6B
-INT8, downloads immutable pinned artifacts with progress and SHA-256 integrity
-verification, and transcribes the separate microphone and system-audio tracks
-offline. Nemotron's 560 ms cache-aware stream avoids reprocessing the complete
-preceding window. The provider/model controls remain available from the
-library after onboarding.
+Nemotron. Setup can select Nemotron 3.5 ASR Streaming 0.6B INT8, downloads its
+immutable pinned artifacts with progress and SHA-256 integrity verification,
+and transcribes the separate microphone and system-audio tracks offline.
+Nemotron's 560 ms cache-aware stream avoids reprocessing the complete preceding
+window. The provider control remains available from the library after
+onboarding.
 
 To record and review a session:
 
@@ -260,9 +258,9 @@ question to answer from the current transcript. It also accepts
 
 ## Roadmap
 
-- [x] **Windows local transcription** — WASAPI mic + loopback PCM feeds Whisper while both Ogg/Opus recordings are retained.
-- [x] **Linux local transcription** — PipeWire mic + optional sink-monitor PCM feeds Whisper while both Ogg/Opus recordings are retained.
-- [ ] **Additional local models** — evaluate and implement Nemotron behind `TranscriberBackend`; no Nemotron runtime is bundled today.
+- [x] **Windows local transcription** — WASAPI mic + loopback PCM feeds Nemotron while both Ogg/Opus recordings are retained.
+- [x] **Linux local transcription** — PipeWire mic + optional sink-monitor PCM feeds Nemotron while both Ogg/Opus recordings are retained.
+- [x] **Streaming local model** — Nemotron runs behind the provider-neutral `TranscriberBackend`.
 - [x] Copy transcript to clipboard (plain text) and export as Markdown (`.md`) with a lightweight, CloudEvents-inspired YAML frontmatter envelope (`id`, `type`, `source`, `time`, `subject`, …).
 - [ ] Export to SRT / JSON.
 - [ ] Speaker diarization within a single channel.

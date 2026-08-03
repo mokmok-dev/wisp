@@ -63,7 +63,6 @@ let
   // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
     SHERPA_ONNX_ARCHIVE_DIR = sherpaLinuxArchiveDir;
     nativeBuildInputs = [
-      pkgs.cmake
       pkgs.pkg-config
       pkgs.rustPlatform.bindgenHook
     ];

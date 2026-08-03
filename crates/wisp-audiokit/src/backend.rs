@@ -400,7 +400,7 @@ pub struct TranscriberConfig {
     pub options: BTreeMap<String, String>,
 }
 
-/// Registration boundary for built-in Whisper, ONNX, and plugin providers.
+/// Registration boundary for built-in ONNX and plugin providers.
 pub trait TranscriberFactory: Send + Sync {
     fn backend_id(&self) -> BackendId;
 

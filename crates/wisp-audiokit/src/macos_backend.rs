@@ -24,8 +24,7 @@ use crate::{
     PermissionStatus, RecognitionPrivacy, SessionConfig, SessionError, SessionOptions,
     SessionOrchestrator, ShutdownMode, TranscriberBackend, TranscriberCapabilities,
     TranscriberClass, TranscriberFeature, TranscriberProbe, TranscriptionSelection,
-    UnavailableReason, WHISPER_BACKEND_ID, WhisperTranscriberBackend, WhisperTranscriberFactory,
-    check_permission, select_transcriber,
+    UnavailableReason, check_permission, select_transcriber,
 };
 
 const CAPTURE_BACKEND_ID: &str = "macos-core-audio-process-tap";
@@ -798,7 +797,6 @@ enum MacosLifecycle {
 
 enum MacosProviderKind {
     SpeechAnalyzer,
-    Whisper(std::path::PathBuf),
     Nemotron(std::path::PathBuf),
 }
 
@@ -852,30 +850,6 @@ impl MacosSession {
                     TranscriptionSelection::Backend(backend) => {
                         return Err(SessionError::Start(format!(
                             "unsupported macOS transcription backend selected: {backend}"
-                        )));
-                    },
-                }
-            },
-            crate::RecognizerBackend::LocalModel => {
-                let Some(path) = config.local_model_path.clone() else {
-                    return Err(SessionError::Start(
-                        "Whisper was selected without a local model path".into(),
-                    ));
-                };
-                let probe = WhisperTranscriberBackend::new(&path, &config.locale).probe();
-                match select_transcriber(policy, &[probe]) {
-                    TranscriptionSelection::Backend(backend)
-                        if backend == BackendId::new(WHISPER_BACKEND_ID) =>
-                    {
-                        Some(MacosProviderKind::Whisper(path))
-                    },
-                    TranscriptionSelection::RecordOnly { .. } => None,
-                    TranscriptionSelection::Unavailable { reason } => {
-                        return Err(SessionError::Start(reason));
-                    },
-                    TranscriptionSelection::Backend(backend) => {
-                        return Err(SessionError::Start(format!(
-                            "unsupported local transcription backend selected: {backend}"
                         )));
                     },
                 }
@@ -965,9 +939,6 @@ impl MacosSession {
                 MacosProviderKind::SpeechAnalyzer => {
                     Box::new(MacosTranscriberBackend::new(Arc::clone(&shared)))
                         as Box<dyn TranscriberBackend>
-                },
-                MacosProviderKind::Whisper(path) => {
-                    WhisperTranscriberFactory::from_artifact(path, locale)
                 },
                 MacosProviderKind::Nemotron(path) => {
                     NemotronTranscriberFactory::from_artifact(path, locale)
@@ -1229,14 +1200,11 @@ impl MacosSession {
                 },
                 Err(error)
                     if error.backend == BackendId::new(TRANSCRIBER_BACKEND_ID)
-                        || error.backend == BackendId::new(WHISPER_BACKEND_ID)
                         || error.backend == BackendId::new(NEMOTRON_BACKEND_ID) =>
                 {
                     let failed_backend = error.backend.clone();
                     let speech_permission = { lock_shared(&self.shared).speech_permission };
-                    let candidates = if failed_backend == BackendId::new(WHISPER_BACKEND_ID)
-                        || failed_backend == BackendId::new(NEMOTRON_BACKEND_ID)
-                    {
+                    let candidates = if failed_backend == BackendId::new(NEMOTRON_BACKEND_ID) {
                         Vec::new()
                     } else {
                         vec![macos_transcriber_probe(speech_permission)]

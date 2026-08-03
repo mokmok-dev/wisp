@@ -869,7 +869,7 @@ fn recording_loop_with_transcriber(
             .and_then(|active| active.push_capture(&event).err());
         if let Some(error) = transcription_error {
             let _ = notifications.try_send(format!(
-                "Whisper transcription stopped ({error}); audio recording continues"
+                "Nemotron transcription stopped ({error}); audio recording continues"
             ));
             transcriber = None;
         }

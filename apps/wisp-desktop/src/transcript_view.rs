@@ -18,7 +18,7 @@ use gpui::{
     rgb,
 };
 use wisp_audiokit::{
-    LocalModelId, LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SourceLabel,
+    LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SourceLabel,
 };
 use wisp_core::{Session as StoredSession, SessionId};
 
@@ -43,8 +43,6 @@ pub struct TranscriptView {
     /// Select the transcription backend used for new sessions.
     pub on_select_recognizer:
         std::sync::Arc<dyn Fn(RecognizerBackend, &mut Window, &mut gpui::App) + 'static>,
-    pub on_select_local_model:
-        std::sync::Arc<dyn Fn(LocalModelId, &mut Window, &mut gpui::App) + 'static>,
     /// Download the local transcription model on a background thread.
     pub on_download_local_model: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
     /// Switch from the library screen to the empty recording screen.
@@ -567,8 +565,6 @@ impl TranscriptView {
             selected,
             wisp_audiokit::platform_recognizer_label(),
         );
-        let local_action =
-            self.render_recognizer_option(RecognizerBackend::LocalModel, selected, "Whisper");
         let nemotron_action =
             self.render_recognizer_option(RecognizerBackend::Nemotron, selected, "Nemotron");
         div()
@@ -600,9 +596,9 @@ impl TranscriptView {
                     )
                     .child(div().text_xs().text_color(theme::text_tertiary()).child(
                         if cfg!(target_os = "macos") {
-                            "Choose SpeechAnalyzer, whisper.cpp, or streaming Nemotron."
+                            "Choose SpeechAnalyzer or streaming Nemotron."
                         } else {
-                            "Whisper and Nemotron run locally; this OS has no built-in provider."
+                            "Nemotron runs locally; this OS has no built-in provider."
                         },
                     ))
                     .child(
@@ -620,7 +616,6 @@ impl TranscriptView {
                     .rounded_full()
                     .bg(theme::record_idle())
                     .child(platform_action)
-                    .child(local_action)
                     .child(nemotron_action),
             )
     }
@@ -636,7 +631,6 @@ impl TranscriptView {
         let on_select = self.on_select_recognizer.clone();
         let id = match recognizer {
             RecognizerBackend::Platform => "recognizer-platform",
-            RecognizerBackend::LocalModel => "recognizer-local",
             RecognizerBackend::Nemotron => "recognizer-nemotron",
         };
         let mut button = div()
@@ -675,42 +669,12 @@ impl TranscriptView {
             ),
             LocalModelStatus::Missing { spec, .. } => (
                 format!("Not downloaded ({} MB)", spec.approx_bytes / 1024 / 1024),
-                if matches!(
-                    setup.recognizer,
-                    RecognizerBackend::LocalModel | RecognizerBackend::Nemotron
-                ) {
+                if setup.recognizer == RecognizerBackend::Nemotron {
                     theme::record_red()
                 } else {
                     theme::text_tertiary()
                 },
             ),
-        };
-        let downloading = matches!(setup.model_download, ModelDownloadState::Downloading { .. });
-        let model_options = if setup.recognizer == RecognizerBackend::Nemotron
-            || setup.local_model_id == LocalModelId::Nemotron
-        {
-            div().flex().gap(px(6.0)).child(self.render_model_option(
-                LocalModelId::Nemotron,
-                setup.local_model_id,
-                "0.6B INT8 · 560 ms streaming",
-                downloading,
-            ))
-        } else {
-            div()
-                .flex()
-                .gap(px(6.0))
-                .child(self.render_model_option(
-                    LocalModelId::Tiny,
-                    setup.local_model_id,
-                    "Tiny · faster",
-                    downloading,
-                ))
-                .child(self.render_model_option(
-                    LocalModelId::Base,
-                    setup.local_model_id,
-                    "Base · accurate",
-                    downloading,
-                ))
         };
         let mut info = div()
             .flex()
@@ -724,13 +688,9 @@ impl TranscriptView {
                     .font_weight(FontWeight::MEDIUM)
                     .child("Local transcription model"),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme::text_tertiary())
-                    .child("Downloaded once, stored locally, and used without network access."),
-            )
-            .child(model_options)
+            .child(div().text_xs().text_color(theme::text_tertiary()).child(
+                "Nemotron 3.5 ASR Streaming 0.6B INT8 · 560 ms · downloaded once and used offline.",
+            ))
             .child(div().text_xs().text_color(status_color).child(status_text));
         if let Some(error) = &setup.model_error {
             info = info.child(
@@ -752,42 +712,6 @@ impl TranscriptView {
             .border_color(status_color)
             .child(info)
             .child(self.render_local_model_action(setup))
-    }
-
-    fn render_model_option(
-        &self,
-        id: LocalModelId,
-        selected: LocalModelId,
-        label: &'static str,
-        disabled: bool,
-    ) -> impl IntoElement {
-        let is_selected = id == selected;
-        let on_select = self.on_select_local_model.clone();
-        let element_id = match id {
-            LocalModelId::Tiny => "whisper-model-tiny",
-            LocalModelId::Base => "whisper-model-base",
-            LocalModelId::Nemotron => "nemotron-model-streaming-560ms",
-        };
-        let mut option = div()
-            .id(ElementId::Name(element_id.into()))
-            .px(px(9.0))
-            .py(px(4.0))
-            .rounded_full()
-            .text_xs()
-            .text_color(if is_selected {
-                theme::text_primary()
-            } else {
-                theme::text_secondary()
-            })
-            .child(label);
-        if is_selected {
-            option = option.bg(theme::surface());
-        } else if !disabled {
-            option = option.cursor_pointer().on_click(move |_, window, cx| {
-                on_select(id, window, cx);
-            });
-        }
-        option
     }
 
     fn render_local_model_action(

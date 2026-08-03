@@ -228,12 +228,12 @@ impl LocalMcpBridge {
 
 impl Setup {
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
-        let local_model_id = LocalModelId::Base;
+        let local_model_id = LocalModelId::Nemotron;
         Self {
             recognizer: if cfg!(target_os = "macos") {
                 RecognizerBackend::Platform
             } else {
-                RecognizerBackend::LocalModel
+                RecognizerBackend::Nemotron
             },
             local_model_id,
             local_model: local_model_status_for(data_dir, local_model_id),
@@ -249,9 +249,7 @@ impl Setup {
         }
         match self.recognizer {
             RecognizerBackend::Platform => true,
-            RecognizerBackend::LocalModel | RecognizerBackend::Nemotron => {
-                self.local_model.is_ready()
-            },
+            RecognizerBackend::Nemotron => self.local_model.is_ready(),
         }
     }
 
@@ -262,9 +260,6 @@ impl Setup {
         let locale = locale.into();
         match self.recognizer {
             RecognizerBackend::Platform => SessionConfig::platform_default(locale),
-            RecognizerBackend::LocalModel => {
-                SessionConfig::local_model(locale, self.local_model.path().to_path_buf())
-            },
             RecognizerBackend::Nemotron => {
                 SessionConfig::nemotron(locale, self.local_model.path().to_path_buf())
             },
@@ -278,11 +273,11 @@ impl Default for Setup {
             recognizer: if cfg!(target_os = "macos") {
                 RecognizerBackend::Platform
             } else {
-                RecognizerBackend::LocalModel
+                RecognizerBackend::Nemotron
             },
-            local_model_id: LocalModelId::Base,
+            local_model_id: LocalModelId::Nemotron,
             local_model: LocalModelStatus::Missing {
-                spec: local_model_spec_for(LocalModelId::Base),
+                spec: local_model_spec_for(LocalModelId::Nemotron),
                 path: std::path::PathBuf::new(),
             },
             model_download: ModelDownloadState::Idle,

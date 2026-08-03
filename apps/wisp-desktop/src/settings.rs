@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use wisp_audiokit::{LocalModelId, RecognizerBackend};
+use wisp_audiokit::RecognizerBackend;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -19,10 +19,7 @@ pub struct AppSettings {
 #[non_exhaustive]
 pub enum TranscriptionProvider {
     Platform,
-    Whisper,
     Nemotron,
-    /// Stable provider ID retained for future ONNX or plugin backends.
-    Other(String),
 }
 
 impl Default for TranscriptionProvider {
@@ -30,7 +27,7 @@ impl Default for TranscriptionProvider {
         if cfg!(target_os = "macos") {
             Self::Platform
         } else {
-            Self::Whisper
+            Self::Nemotron
         }
     }
 }
@@ -39,7 +36,6 @@ impl From<TranscriptionProvider> for RecognizerBackend {
     fn from(provider: TranscriptionProvider) -> Self {
         match provider {
             TranscriptionProvider::Platform => Self::Platform,
-            TranscriptionProvider::Whisper | TranscriptionProvider::Other(_) => Self::LocalModel,
             TranscriptionProvider::Nemotron => Self::Nemotron,
         }
     }
@@ -49,7 +45,6 @@ impl From<RecognizerBackend> for TranscriptionProvider {
     fn from(provider: RecognizerBackend) -> Self {
         match provider {
             RecognizerBackend::Platform => Self::Platform,
-            RecognizerBackend::LocalModel => Self::Whisper,
             RecognizerBackend::Nemotron => Self::Nemotron,
         }
     }
@@ -59,37 +54,6 @@ impl From<RecognizerBackend> for TranscriptionProvider {
 pub struct TranscriptionSettings {
     #[serde(default)]
     pub provider: TranscriptionProvider,
-    #[serde(default)]
-    pub model: WhisperModel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WhisperModel {
-    Tiny,
-    #[default]
-    Base,
-}
-
-impl From<WhisperModel> for LocalModelId {
-    fn from(model: WhisperModel) -> Self {
-        match model {
-            WhisperModel::Tiny => Self::Tiny,
-            WhisperModel::Base => Self::Base,
-        }
-    }
-}
-
-impl TryFrom<LocalModelId> for WhisperModel {
-    type Error = ();
-
-    fn try_from(model: LocalModelId) -> Result<Self, Self::Error> {
-        match model {
-            LocalModelId::Tiny => Ok(Self::Tiny),
-            LocalModelId::Base => Ok(Self::Base),
-            LocalModelId::Nemotron => Err(()),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,10 +113,9 @@ mod tests {
             if cfg!(target_os = "macos") {
                 TranscriptionProvider::Platform
             } else {
-                TranscriptionProvider::Whisper
+                TranscriptionProvider::Nemotron
             }
         );
-        assert_eq!(settings.transcription.model, super::WhisperModel::Base);
     }
 
     #[test]
@@ -163,8 +126,7 @@ mod tests {
                 addr: "127.0.0.1:9001".into(),
             },
             transcription: TranscriptionSettings {
-                provider: TranscriptionProvider::Whisper,
-                model: super::WhisperModel::Base,
+                provider: TranscriptionProvider::Nemotron,
             },
         };
         let text = serde_json::to_string(&settings).expect("serialize");
@@ -173,8 +135,7 @@ mod tests {
         assert_eq!(parsed.local_mcp.addr, "127.0.0.1:9001");
         assert_eq!(
             parsed.transcription.provider,
-            TranscriptionProvider::Whisper
+            TranscriptionProvider::Nemotron
         );
-        assert_eq!(parsed.transcription.model, super::WhisperModel::Base);
     }
 }

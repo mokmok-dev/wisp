@@ -18,7 +18,7 @@ use wisp_core::{
     AudioFrame, TrackDescriptor, TrackId, TranscriptEvent, TranscriptSegment, TranscriptSegmentId,
 };
 
-use crate::whisper_backend::{StreamingResampler, pcm_to_mono_samples};
+use crate::pcm::{StreamingResampler, pcm_to_mono_samples};
 use crate::{
     Availability, BackendError, BackendErrorKind, BackendId, BackendResult, RecognitionPrivacy,
     TranscriberBackend, TranscriberCapabilities, TranscriberClass, TranscriberConfig,

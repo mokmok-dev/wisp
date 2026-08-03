@@ -18,7 +18,7 @@ use gpui::{
     rgb,
 };
 use wisp_audiokit::{
-    LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SourceLabel,
+    LocalModelId, LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SourceLabel,
 };
 use wisp_core::{Session as StoredSession, SessionId};
 
@@ -43,6 +43,8 @@ pub struct TranscriptView {
     /// Select the transcription backend used for new sessions.
     pub on_select_recognizer:
         std::sync::Arc<dyn Fn(RecognizerBackend, &mut Window, &mut gpui::App) + 'static>,
+    pub on_select_local_model:
+        std::sync::Arc<dyn Fn(LocalModelId, &mut Window, &mut gpui::App) + 'static>,
     /// Download the local transcription model on a background thread.
     pub on_download_local_model: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
     /// Switch from the library screen to the empty recording screen.
@@ -142,7 +144,9 @@ impl Render for TranscriptView {
         let model = self.app.clone();
 
         match view {
-            View::Library => self.render_library(&library, &local_mcp).into_any_element(),
+            View::Library => self
+                .render_library(&library, &local_mcp, &setup)
+                .into_any_element(),
             View::LiveSession => {
                 self.sync_transcript_list(&view, segment_count, active_idx, active_text_len);
                 self.update_scroll_signature(segment_count, text_len_sum);
@@ -304,6 +308,7 @@ impl TranscriptView {
         &self,
         sessions: &[StoredSession],
         local_mcp: &LocalMcpBridge,
+        setup: &Setup,
     ) -> impl IntoElement {
         let on_new = self.on_new_session.clone();
         let header = div()
@@ -317,12 +322,27 @@ impl TranscriptView {
             .child(render_brand())
             .child(render_new_session_button(on_new));
 
-        let body = render_session_list(
-            sessions,
-            self.on_open_history.clone(),
-            local_mcp,
-            self.on_toggle_local_mcp.clone(),
-        );
+        let body = div()
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .min_h_0()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .px(px(20.0))
+                    .pt(px(16.0))
+                    .child(self.render_recognizer_row(setup))
+                    .child(self.render_local_model_row(setup)),
+            )
+            .child(render_session_list(
+                sessions,
+                self.on_open_history.clone(),
+                local_mcp,
+                self.on_toggle_local_mcp.clone(),
+            ));
 
         div()
             .flex()
@@ -438,11 +458,6 @@ impl TranscriptView {
             permissions.microphone,
             pending == Some(Permission::Microphone),
         );
-        let row_speech = self.render_permission_row(
-            Permission::SpeechRecognition,
-            permissions.speech,
-            pending == Some(Permission::SpeechRecognition),
-        );
 
         let mut card = div()
             .flex()
@@ -466,8 +481,14 @@ impl TranscriptView {
                     .text_color(theme::text_secondary())
                     .child("These run entirely on-device. Wisp doesn't send your audio anywhere."),
             )
-            .child(row_mic)
-            .child(row_speech);
+            .child(row_mic);
+        if setup.recognizer == RecognizerBackend::Platform {
+            card = card.child(self.render_permission_row(
+                Permission::SpeechRecognition,
+                permissions.speech,
+                pending == Some(Permission::SpeechRecognition),
+            ));
+        }
         if wisp_audiokit::requires_recognizer_setup() {
             card = card
                 .child(self.render_recognizer_row(setup))
@@ -541,10 +562,13 @@ impl TranscriptView {
         setup: &Setup,
     ) -> impl IntoElement {
         let selected = setup.recognizer;
-        let platform_action =
-            self.render_recognizer_option(RecognizerBackend::Platform, selected, "Platform");
+        let platform_action = self.render_recognizer_option(
+            RecognizerBackend::Platform,
+            selected,
+            wisp_audiokit::platform_recognizer_label(),
+        );
         let local_action =
-            self.render_recognizer_option(RecognizerBackend::LocalModel, selected, "Local");
+            self.render_recognizer_option(RecognizerBackend::LocalModel, selected, "Whisper");
         div()
             .flex()
             .items_center()
@@ -572,12 +596,13 @@ impl TranscriptView {
                             .font_weight(FontWeight::MEDIUM)
                             .child("Transcription backend"),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme::text_tertiary())
-                            .child("Windows platform dictation is online. Both options record WASAPI mic + system audio locally."),
-                    )
+                    .child(div().text_xs().text_color(theme::text_tertiary()).child(
+                        if cfg!(target_os = "macos") {
+                            "Choose Apple SpeechAnalyzer or a downloaded whisper.cpp model."
+                        } else {
+                            "Whisper runs locally; this OS has no built-in transcription provider."
+                        },
+                    ))
                     .child(
                         div()
                             .text_xs()
@@ -604,6 +629,7 @@ impl TranscriptView {
         label: &'static str,
     ) -> impl IntoElement {
         let is_selected = recognizer == selected;
+        let unavailable = recognizer == RecognizerBackend::Platform && !cfg!(target_os = "macos");
         let on_select = self.on_select_recognizer.clone();
         let id = match recognizer {
             RecognizerBackend::Platform => "recognizer-platform",
@@ -616,7 +642,9 @@ impl TranscriptView {
             .rounded_full()
             .text_xs()
             .font_weight(FontWeight::MEDIUM)
-            .text_color(if is_selected {
+            .text_color(if unavailable {
+                theme::text_tertiary()
+            } else if is_selected {
                 theme::text_primary()
             } else {
                 theme::text_secondary()
@@ -624,7 +652,7 @@ impl TranscriptView {
             .child(label);
         if is_selected {
             button = button.bg(theme::surface());
-        } else {
+        } else if !unavailable {
             button = button.cursor_pointer().on_click(move |_event, window, cx| {
                 on_select(recognizer, window, cx);
             });
@@ -638,14 +666,11 @@ impl TranscriptView {
     ) -> impl IntoElement {
         let (status_text, status_color) = match setup.local_model.clone() {
             LocalModelStatus::Ready { bytes, .. } => (
-                format!("Ready ({:.0} MB)", bytes as f64 / 1024.0 / 1024.0),
+                format!("Ready ({} MB)", bytes / 1024 / 1024),
                 theme::mic_accent(),
             ),
             LocalModelStatus::Missing { spec, .. } => (
-                format!(
-                    "Not downloaded ({:.0} MB)",
-                    spec.approx_bytes as f64 / 1024.0 / 1024.0
-                ),
+                format!("Not downloaded ({} MB)", spec.approx_bytes / 1024 / 1024),
                 if setup.recognizer == RecognizerBackend::LocalModel {
                     theme::record_red()
                 } else {
@@ -671,6 +696,23 @@ impl TranscriptView {
                     .text_color(theme::text_tertiary())
                     .child("Downloaded once, stored locally, and used without network access."),
             )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.0))
+                    .child(self.render_model_option(
+                        LocalModelId::Tiny,
+                        setup.local_model_id,
+                        "Tiny · faster",
+                        matches!(setup.model_download, ModelDownloadState::Downloading { .. }),
+                    ))
+                    .child(self.render_model_option(
+                        LocalModelId::Base,
+                        setup.local_model_id,
+                        "Base · accurate",
+                        matches!(setup.model_download, ModelDownloadState::Downloading { .. }),
+                    )),
+            )
             .child(div().text_xs().text_color(status_color).child(status_text));
         if let Some(error) = &setup.model_error {
             info = info.child(
@@ -694,17 +736,63 @@ impl TranscriptView {
             .child(self.render_local_model_action(setup))
     }
 
+    fn render_model_option(
+        &self,
+        id: LocalModelId,
+        selected: LocalModelId,
+        label: &'static str,
+        disabled: bool,
+    ) -> impl IntoElement {
+        let is_selected = id == selected;
+        let on_select = self.on_select_local_model.clone();
+        let element_id = match id {
+            LocalModelId::Tiny => "whisper-model-tiny",
+            LocalModelId::Base => "whisper-model-base",
+        };
+        let mut option = div()
+            .id(ElementId::Name(element_id.into()))
+            .px(px(9.0))
+            .py(px(4.0))
+            .rounded_full()
+            .text_xs()
+            .text_color(if is_selected {
+                theme::text_primary()
+            } else {
+                theme::text_secondary()
+            })
+            .child(label);
+        if is_selected {
+            option = option.bg(theme::surface());
+        } else if !disabled {
+            option = option.cursor_pointer().on_click(move |_, window, cx| {
+                on_select(id, window, cx);
+            });
+        }
+        option
+    }
+
     fn render_local_model_action(
         &self,
         setup: &Setup,
     ) -> gpui::AnyElement {
-        if setup.model_download == ModelDownloadState::Downloading {
+        if let ModelDownloadState::Downloading {
+            downloaded, total, ..
+        } = setup.model_download
+        {
+            let percent = if total == 0 {
+                0
+            } else {
+                downloaded
+                    .saturating_mul(100)
+                    .checked_div(total)
+                    .unwrap_or(0)
+            };
             return div()
                 .px(px(14.0))
                 .py(px(7.0))
                 .text_sm()
                 .text_color(theme::text_tertiary())
-                .child("Downloading…")
+                .child(format!("Downloading… {percent}%"))
                 .into_any_element();
         }
         if setup.local_model.is_ready() {

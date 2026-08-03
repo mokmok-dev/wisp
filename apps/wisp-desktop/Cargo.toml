@@ -40,3 +40,6 @@ uuid = { workspace = true }
 # GPU-accelerated UI framework by the Zed team. Linux CI excludes this crate;
 # macOS and Windows use their platform-specific workflows.
 gpui = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -2,21 +2,21 @@
 
 **A privacy-first recording & transcription desktop app.**
 
-Wisp captures your microphone and system audio (the other side of a call) at the same time. macOS transcription runs on-device; Windows local transcription is under development.
+Wisp captures your microphone and system audio (the other side of a call) at the same time and can transcribe both locally with Whisper.
 
 > macOS 26 (Tahoe) is the primary supported target. Windows support is in
 > preview: WASAPI recording stays local, while the optional
 > `Windows.Media.SpeechRecognition` free-form dictation route uses Microsoft's
-> online service. Local-model transcription wiring is in progress.
+> online service. Whisper provides the offline microphone + loopback route.
 > Linux recording is in preview: PipeWire captures the default microphone and,
 > when exposed by the session manager, the default sink monitor into separate
-> Ogg/Opus files. Linux transcription is not implemented yet.
+> Ogg/Opus files and fans the same PCM into Whisper.
 
 ---
 
 ## Features
 
-- **Offline-first** — macOS audio and transcripts stay on your device. Windows WASAPI recordings are local; fully local Windows transcription is the next integration step.
+- **Offline-first** — recordings and Whisper transcripts stay on your device.
 - **On-device transcription on macOS** — Uses [`SpeechAnalyzer`](https://developer.apple.com/documentation/speech), the new API in Apple's Speech framework. Windows' optional platform dictation backend is online.
 - **System audio + microphone capture** — Uses macOS 14.2+ [Core Audio Process Taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps). Windows uses WASAPI shared-mode mic + system loopback capture. Linux uses PipeWire microphone + sink-monitor capture where the graph exposes a monitor. Windows and Linux store each source separately as Ogg/Opus.
 - **Built in Rust with a GPU-rendered UI** — The UI is built on [GPUI](https://www.gpui.rs/), the framework that powers the [Zed](https://zed.dev/) editor. Native-feeling responsiveness and smooth scrolling.
@@ -83,10 +83,10 @@ The Rust boundary separates OS capture from transcription:
   compatibility callbacks retain their original ordering. The legacy
   `Session` API remains available but is no longer the macOS desktop path.
 
-This boundary is intentionally a foundation, not a claim that every backend is
-complete. Linux PipeWire recording is implemented, while Linux transcription,
-connecting Windows WASAPI frames to actual local-model inference, and a
-Nemotron transcriber adapter are follow-up work.
+The same recorder-owned PCM consumer fans accepted frames and overflow gaps
+into `TranscriberBackend` on Windows and Linux, so recording and Whisper keep
+one ordered timeline. Additional ONNX-family adapters can use the same boxed
+backend boundary.
 
 ## Requirements
 
@@ -94,12 +94,14 @@ Nemotron transcriber adapter are follow-up work.
 - **Xcode 26** — for the Swift 6.0 / macOS 26 SDK.
 - **Windows 10/11 preview** — records WASAPI mic + loopback audio locally. The
   `Windows.Media.SpeechRecognition` dictation route requires network access
-  and MSIX package identity. Local-model download plumbing exists, but
-  local-model inference is not connected yet.
+  and MSIX package identity. Whisper is the offline default.
 - **Linux preview** — PipeWire 0.3 development files and `pkg-config` are
   required to build. A running PipeWire session manager must expose a default
   audio source; default-sink monitor capture is optional.
 - **Rust 1.97.1** — pinned in `rust-toolchain.toml`.
+- **CMake and libclang** — required by `whisper-rs` / whisper.cpp on every OS.
+- **System curl** — `/usr/bin/curl` or `/usr/local/bin/curl` on macOS/Linux,
+  and `%SystemRoot%\System32\curl.exe` on Windows, for bounded model downloads.
 - Microphone and system-audio recording permissions. macOS will prompt on first launch.
 
 ## Setup and usage
@@ -108,9 +110,11 @@ On macOS, first launch shows the microphone and speech-recognition permissions
 needed for capture and on-device transcription. The desktop currently requests
 the `ja-JP` transcription locale for each session.
 
-Windows defaults to `Windows.Media.SpeechRecognition` online dictation for the
-microphone while WASAPI records microphone and system audio locally. Linux
-skips recognizer setup and runs in record-only mode.
+macOS defaults to Apple SpeechAnalyzer. Windows and Linux default to local
+Whisper: setup lets you choose Tiny or Base, downloads the pinned model with
+progress and integrity verification, and then transcribes the separate
+microphone and system-audio tracks offline. The provider/model controls remain
+available from the library after onboarding.
 
 To record and review a session:
 
@@ -250,8 +254,8 @@ question to answer from the current transcript. It also accepts
 
 ## Roadmap
 
-- [ ] **Windows support** — WASAPI mic + loopback Ogg/Opus recording is in place; connecting the same PCM stream to local-model transcription is the remaining core path.
-- [ ] **Linux transcription** — PipeWire mic + optional sink-monitor Ogg/Opus recording is in preview; pair its PCM stream with a local transcription backend.
+- [x] **Windows local transcription** — WASAPI mic + loopback PCM feeds Whisper while both Ogg/Opus recordings are retained.
+- [x] **Linux local transcription** — PipeWire mic + optional sink-monitor PCM feeds Whisper while both Ogg/Opus recordings are retained.
 - [ ] **Additional local models** — evaluate and implement Nemotron behind `TranscriberBackend`; no Nemotron runtime is bundled today.
 - [x] Copy transcript to clipboard (plain text) and export as Markdown (`.md`) with a lightweight, CloudEvents-inspired YAML frontmatter envelope (`id`, `type`, `source`, `time`, `subject`, …).
 - [ ] Export to SRT / JSON.

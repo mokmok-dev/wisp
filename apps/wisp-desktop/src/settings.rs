@@ -4,11 +4,86 @@ use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use wisp_audiokit::{LocalModelId, RecognizerBackend};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
     pub local_mcp: LocalMcpSettings,
+    #[serde(default)]
+    pub transcription: TranscriptionSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TranscriptionProvider {
+    Platform,
+    Whisper,
+    /// Stable provider ID retained for future ONNX or plugin backends.
+    Other(String),
+}
+
+impl Default for TranscriptionProvider {
+    fn default() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Platform
+        } else {
+            Self::Whisper
+        }
+    }
+}
+
+impl From<TranscriptionProvider> for RecognizerBackend {
+    fn from(provider: TranscriptionProvider) -> Self {
+        match provider {
+            TranscriptionProvider::Platform => Self::Platform,
+            TranscriptionProvider::Whisper | TranscriptionProvider::Other(_) => Self::LocalModel,
+        }
+    }
+}
+
+impl From<RecognizerBackend> for TranscriptionProvider {
+    fn from(provider: RecognizerBackend) -> Self {
+        match provider {
+            RecognizerBackend::Platform => Self::Platform,
+            RecognizerBackend::LocalModel => Self::Whisper,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TranscriptionSettings {
+    #[serde(default)]
+    pub provider: TranscriptionProvider,
+    #[serde(default)]
+    pub model: WhisperModel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhisperModel {
+    Tiny,
+    #[default]
+    Base,
+}
+
+impl From<WhisperModel> for LocalModelId {
+    fn from(model: WhisperModel) -> Self {
+        match model {
+            WhisperModel::Tiny => Self::Tiny,
+            WhisperModel::Base => Self::Base,
+        }
+    }
+}
+
+impl From<LocalModelId> for WhisperModel {
+    fn from(model: LocalModelId) -> Self {
+        match model {
+            LocalModelId::Tiny => Self::Tiny,
+            LocalModelId::Base => Self::Base,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,13 +131,22 @@ fn settings_path(data_dir: &Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppSettings, LocalMcpSettings};
+    use super::{AppSettings, LocalMcpSettings, TranscriptionProvider, TranscriptionSettings};
 
     #[test]
     fn missing_fields_default() {
         let settings = serde_json::from_str::<AppSettings>("{}").expect("parse");
         assert!(!settings.local_mcp.enabled);
         assert_eq!(settings.local_mcp.addr, "127.0.0.1:8765");
+        assert_eq!(
+            settings.transcription.provider,
+            if cfg!(target_os = "macos") {
+                TranscriptionProvider::Platform
+            } else {
+                TranscriptionProvider::Whisper
+            }
+        );
+        assert_eq!(settings.transcription.model, super::WhisperModel::Base);
     }
 
     #[test]
@@ -72,10 +156,19 @@ mod tests {
                 enabled: true,
                 addr: "127.0.0.1:9001".into(),
             },
+            transcription: TranscriptionSettings {
+                provider: TranscriptionProvider::Whisper,
+                model: super::WhisperModel::Base,
+            },
         };
         let text = serde_json::to_string(&settings).expect("serialize");
         let parsed = serde_json::from_str::<AppSettings>(&text).expect("parse");
         assert!(parsed.local_mcp.enabled);
         assert_eq!(parsed.local_mcp.addr, "127.0.0.1:9001");
+        assert_eq!(
+            parsed.transcription.provider,
+            TranscriptionProvider::Whisper
+        );
+        assert_eq!(parsed.transcription.model, super::WhisperModel::Base);
     }
 }

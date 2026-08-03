@@ -15,15 +15,16 @@ mod ogg_opus_recorder;
 mod pipewire_capture;
 #[cfg(target_os = "windows")]
 mod wasapi_capture;
+mod whisper_backend;
 
 pub use backend::{
     Availability, BackendError, BackendErrorKind, BackendId, BackendResult, CaptureBackend,
     CaptureCapabilities, CaptureControlEvent, CaptureEventReceiver, CaptureProbe, ControlEnqueue,
     FrameEnqueue, OrchestratorEvent, PrivacyRequirement, RealtimeCaptureSender, RecognitionPrivacy,
     SessionOrchestrator, ShutdownMode, TranscriberBackend, TranscriberCapabilities,
-    TranscriberClass, TranscriberFeature, TranscriberProbe, TranscriptionPolicy,
-    TranscriptionSelection, UnavailableReason, realtime_capture_channel, select_transcriber,
-    select_transcriber_after_failure,
+    TranscriberClass, TranscriberConfig, TranscriberFactory, TranscriberFeature, TranscriberProbe,
+    TranscriptionPolicy, TranscriptionSelection, UnavailableReason, realtime_capture_channel,
+    select_transcriber, select_transcriber_after_failure,
 };
 pub use error::{Result, SessionError, SetupError, SetupResult};
 #[cfg(target_os = "macos")]
@@ -37,6 +38,9 @@ pub use pipewire_capture::{
 pub use wasapi_capture::{
     WASAPI_CAPTURE_QUEUE_CAPACITY, WASAPI_CHANNELS, WASAPI_SAMPLE_RATE, WasapiCapture,
     WasapiCaptureEvent, WasapiPcmChunk, WasapiRecording,
+};
+pub use whisper_backend::{
+    WHISPER_BACKEND_ID, WhisperTranscriberBackend, WhisperTranscriberFactory,
 };
 pub use wisp_core::{
     AudioFormat, AudioFrame, AudioFrameError, AudioSamples, CaptureEvent, MonotonicTimestamp,
@@ -113,7 +117,7 @@ impl RecognizerBackend {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Platform => platform_recognizer_label(),
-            Self::LocalModel => "Local model",
+            Self::LocalModel => "Whisper (local)",
         }
     }
 }
@@ -1380,6 +1384,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WindowsTranscriptionMode {
     PlatformOnline,
+    LocalModel,
     RecordOnly { reason: String },
 }
 
@@ -1457,6 +1462,10 @@ fn windows_runtime_failure_action(policy: TranscriptionPolicy) -> WindowsRuntime
         },
         Ok(WindowsTranscriptionMode::PlatformOnline) => WindowsRuntimeFailureAction::FailStart {
             reason: "runtime fallback reselected the failed Windows platform recognizer".into(),
+        },
+        Ok(WindowsTranscriptionMode::LocalModel) => WindowsRuntimeFailureAction::FailStart {
+            reason: "runtime fallback cannot initialize a new local model after capture starts"
+                .into(),
         },
         Err(reason) => WindowsRuntimeFailureAction::FailStart { reason },
     }
@@ -2129,9 +2138,7 @@ fn windows_transcriber_probes() -> [TranscriberProbe; 2] {
         TranscriberProbe {
             backend_id: BackendId::new("windows-local-model"),
             class: TranscriberClass::LocalModel,
-            availability: Availability::Unavailable(UnavailableReason::InitializationFailed(
-                "Windows local-model inference is not connected".into(),
-            )),
+            availability: Availability::Available,
             capabilities: TranscriberCapabilities {
                 privacy: RecognitionPrivacy::Offline,
                 features: vec![TranscriberFeature::SegmentTimestamps],
@@ -2148,6 +2155,9 @@ fn windows_mode_from_selection(
         TranscriptionSelection::Backend(id) if id.as_str() == "windows-platform-online" => {
             Ok(WindowsTranscriptionMode::PlatformOnline)
         },
+        TranscriptionSelection::Backend(id) if id.as_str() == "windows-local-model" => {
+            Ok(WindowsTranscriptionMode::LocalModel)
+        },
         TranscriptionSelection::Backend(id) => Err(format!(
             "Windows transcription backend is not connected: {id}"
         )),
@@ -2159,11 +2169,22 @@ fn windows_mode_from_selection(
 }
 
 /// Metadata for the local model offered by the setup screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocalModelId {
+    Tiny,
+    Base,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalModelSpec {
+    pub id: LocalModelId,
     pub name: &'static str,
     pub filename: &'static str,
     pub url: &'static str,
+    /// SHA-256 of the immutable model artifact.
+    pub sha256: &'static str,
+    /// Exact expected artifact size.
+    pub bytes: u64,
     pub approx_bytes: u64,
 }
 
@@ -2195,35 +2216,83 @@ impl LocalModelStatus {
     }
 }
 
-const LOCAL_MODEL_SPEC: LocalModelSpec = LocalModelSpec {
+const TINY_MODEL_SPEC: LocalModelSpec = LocalModelSpec {
+    id: LocalModelId::Tiny,
+    name: "Whisper tiny",
+    filename: "ggml-tiny.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin",
+    sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+    bytes: 77_691_713,
+    approx_bytes: 75 * 1024 * 1024,
+};
+
+const BASE_MODEL_SPEC: LocalModelSpec = LocalModelSpec {
+    id: LocalModelId::Base,
     name: "Whisper base",
     filename: "ggml-base.bin",
-    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",
+    sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+    bytes: 147_951_465,
     approx_bytes: 142 * 1024 * 1024,
 };
 
 #[must_use]
 pub const fn local_model_spec() -> LocalModelSpec {
-    LOCAL_MODEL_SPEC
+    BASE_MODEL_SPEC
+}
+
+#[must_use]
+pub const fn local_model_specs() -> [LocalModelSpec; 2] {
+    [TINY_MODEL_SPEC, BASE_MODEL_SPEC]
+}
+
+#[must_use]
+pub const fn local_model_spec_for(id: LocalModelId) -> LocalModelSpec {
+    match id {
+        LocalModelId::Tiny => TINY_MODEL_SPEC,
+        LocalModelId::Base => BASE_MODEL_SPEC,
+    }
 }
 
 #[must_use]
 pub fn local_model_path(data_dir: impl AsRef<Path>) -> PathBuf {
+    local_model_path_for(data_dir, LocalModelId::Base)
+}
+
+#[must_use]
+pub fn local_model_path_for(
+    data_dir: impl AsRef<Path>,
+    id: LocalModelId,
+) -> PathBuf {
     data_dir
         .as_ref()
         .join("models")
-        .join(local_model_spec().filename)
+        .join(local_model_spec_for(id).filename)
 }
 
 #[must_use]
 pub fn local_model_status(data_dir: impl AsRef<Path>) -> LocalModelStatus {
-    let spec = local_model_spec();
-    let path = local_model_path(data_dir);
+    local_model_status_for(data_dir, LocalModelId::Base)
+}
+
+#[must_use]
+pub fn local_model_status_for(
+    data_dir: impl AsRef<Path>,
+    id: LocalModelId,
+) -> LocalModelStatus {
+    let spec = local_model_spec_for(id);
+    let path = local_model_path_for(data_dir, id);
     match std::fs::metadata(&path) {
-        Ok(meta) if meta.is_file() && meta.len() > 0 => LocalModelStatus::Ready {
-            spec,
-            path,
-            bytes: meta.len(),
+        Ok(meta)
+            if meta.is_file()
+                && meta.len() == spec.bytes
+                && verify_file_sha256(&path, spec.sha256).is_ok() =>
+        {
+            LocalModelStatus::Ready {
+                spec,
+                path,
+                bytes: meta.len(),
+            }
         },
         _ => LocalModelStatus::Missing { spec, path },
     }
@@ -2238,8 +2307,38 @@ pub fn local_model_status(data_dir: impl AsRef<Path>) -> LocalModelStatus {
 /// Returns [`SetupError`] if the model directory cannot be created, the
 /// download command fails, or the temporary file cannot be moved into place.
 pub fn download_local_model(data_dir: impl AsRef<Path>) -> SetupResult<LocalModelStatus> {
-    let data_dir = data_dir.as_ref();
-    let final_path = local_model_path(data_dir);
+    download_local_model_for(data_dir, LocalModelId::Base)
+}
+
+/// Download the selected Whisper model.
+///
+/// # Errors
+/// Returns a setup error when the model cannot be downloaded or installed.
+pub fn download_local_model_for(
+    data_dir: impl AsRef<Path>,
+    id: LocalModelId,
+) -> SetupResult<LocalModelStatus> {
+    download_local_model_for_with_progress(data_dir, id, |_, _| {})
+}
+
+/// Download the selected Whisper model and report installed bytes.
+///
+/// # Errors
+/// Returns a setup error when the model cannot be downloaded or installed.
+pub fn download_local_model_for_with_progress(
+    data_dir: impl AsRef<Path>,
+    id: LocalModelId,
+    progress: impl FnMut(u64, u64),
+) -> SetupResult<LocalModelStatus> {
+    download_model_spec_with_progress(data_dir.as_ref(), local_model_spec_for(id), progress)
+}
+
+fn download_model_spec_with_progress(
+    data_dir: &Path,
+    spec: LocalModelSpec,
+    mut progress: impl FnMut(u64, u64),
+) -> SetupResult<LocalModelStatus> {
+    let final_path = data_dir.join("models").join(spec.filename);
     let Some(model_dir) = final_path.parent() else {
         return Err(SetupError::Install(format!(
             "invalid model path: {}",
@@ -2251,21 +2350,44 @@ pub fn download_local_model(data_dir: impl AsRef<Path>) -> SetupResult<LocalMode
         message: err.to_string(),
     })?;
 
-    let part_path = final_path.with_extension("bin.part");
-    let _ = std::fs::remove_file(&part_path);
-    download_url(local_model_spec().url, &part_path)?;
-    std::fs::rename(&part_path, &final_path)
-        .or_else(|_| {
-            std::fs::copy(&part_path, &final_path)?;
-            std::fs::remove_file(&part_path)
-        })
-        .map_err(|err| SetupError::Install(err.to_string()))?;
-    Ok(local_model_status(data_dir))
+    let mut part = tempfile::Builder::new()
+        .prefix(&format!(".{}.", spec.filename))
+        .suffix(".part")
+        .tempfile_in(model_dir)
+        .map_err(|error| SetupError::Install(error.to_string()))?;
+    let install = (|| {
+        download_url_with_progress(spec.url, part.as_file_mut(), spec.bytes, |bytes| {
+            progress(bytes, spec.bytes);
+        })?;
+        part.as_file()
+            .sync_all()
+            .map_err(|error| SetupError::Install(error.to_string()))?;
+        verify_file_sha256(part.path(), spec.sha256)?;
+        if let Ok(metadata) = std::fs::symlink_metadata(&final_path) {
+            if !metadata.file_type().is_file() {
+                return Err(SetupError::Install(format!(
+                    "refusing to replace non-regular model path: {}",
+                    final_path.display()
+                )));
+            }
+            std::fs::remove_file(&final_path)
+                .map_err(|error| SetupError::Install(error.to_string()))?;
+        }
+        part.persist(&final_path)
+            .map(|_| ())
+            .map_err(|error| SetupError::Install(error.error.to_string()))
+    })();
+    install?;
+    Ok(LocalModelStatus::Ready {
+        spec,
+        path: final_path,
+        bytes: spec.bytes,
+    })
 }
 
 #[must_use]
 pub const fn requires_recognizer_setup() -> bool {
-    cfg!(target_os = "windows")
+    true
 }
 
 #[must_use]
@@ -2279,46 +2401,225 @@ pub const fn platform_recognizer_label() -> &'static str {
     }
 }
 
-fn download_url(
+#[cfg(test)]
+mod local_model_tests {
+    use super::{
+        LocalModelId, LocalModelSpec, LocalModelStatus, download_model_spec_with_progress,
+        local_model_path_for, local_model_specs, local_model_status_for, verify_file_sha256,
+    };
+
+    #[test]
+    fn model_inventory_has_distinct_stable_paths() {
+        let data_dir = tempfile::tempdir().expect("temp dir");
+        let specs = local_model_specs();
+        assert_eq!(specs[0].id, LocalModelId::Tiny);
+        assert_eq!(specs[1].id, LocalModelId::Base);
+        assert_ne!(
+            local_model_path_for(data_dir.path(), LocalModelId::Tiny),
+            local_model_path_for(data_dir.path(), LocalModelId::Base)
+        );
+        assert!(matches!(
+            local_model_status_for(data_dir.path(), LocalModelId::Tiny),
+            LocalModelStatus::Missing { .. }
+        ));
+    }
+
+    #[test]
+    fn integrity_check_rejects_corrupt_model() {
+        use sha2::{Digest, Sha256};
+
+        let data_dir = tempfile::tempdir().expect("temp dir");
+        let path = data_dir.path().join("model.bin");
+        std::fs::write(&path, b"known model bytes").expect("write model");
+        let expected = format!("{:x}", Sha256::digest(b"known model bytes"));
+        assert!(verify_file_sha256(&path, &expected).is_ok());
+        std::fs::write(&path, b"tampered").expect("tamper model");
+        assert!(verify_file_sha256(&path, &expected).is_err());
+    }
+
+    #[test]
+    fn file_download_reports_progress_installs_and_cleans_part_on_failure() {
+        use sha2::{Digest, Sha256};
+
+        let source_dir = tempfile::tempdir().expect("source dir");
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let source = source_dir.path().join("model.bin");
+        let bytes = b"test model";
+        std::fs::write(&source, bytes).expect("write source");
+        let url: &'static str = Box::leak(format!("file://{}", source.display()).into_boxed_str());
+        let hash: &'static str = Box::leak(format!("{:x}", Sha256::digest(bytes)).into_boxed_str());
+        let spec = LocalModelSpec {
+            id: LocalModelId::Tiny,
+            name: "test",
+            filename: "test.bin",
+            url,
+            sha256: hash,
+            bytes: bytes.len() as u64,
+            approx_bytes: bytes.len() as u64,
+        };
+        let mut progress = Vec::new();
+        let status = download_model_spec_with_progress(data_dir.path(), spec, |done, total| {
+            progress.push((done, total));
+        })
+        .expect("install model");
+        assert!(status.is_ready());
+        assert_eq!(std::fs::read(status.path()).unwrap(), bytes);
+        assert_eq!(
+            progress.last(),
+            Some(&(bytes.len() as u64, bytes.len() as u64))
+        );
+        assert!(!status.path().with_extension("bin.part").exists());
+
+        let bad_spec = LocalModelSpec {
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            ..spec
+        };
+        assert!(download_model_spec_with_progress(data_dir.path(), bad_spec, |_, _| {}).is_err());
+        assert!(!status.path().with_extension("bin.part").exists());
+        assert!(
+            download_model_spec_with_progress(data_dir.path(), spec, |_, _| {})
+                .expect("retry valid download")
+                .is_ready()
+        );
+    }
+}
+
+fn download_url_with_progress(
     url: &str,
-    destination: &Path,
+    destination: &mut std::fs::File,
+    max_bytes: u64,
+    mut progress: impl FnMut(u64),
 ) -> SetupResult<()> {
     if let Some(path) = url.strip_prefix("file://") {
-        std::fs::copy(path, destination)
-            .map(|_| ())
-            .map_err(|err| SetupError::Download(err.to_string()))?;
+        let mut source =
+            std::fs::File::open(path).map_err(|error| SetupError::Download(error.to_string()))?;
+        copy_download_stream(&mut source, destination, max_bytes, &mut progress)?;
         return Ok(());
     }
-    #[cfg(target_os = "windows")]
+    let curl = trusted_curl_path()?;
     let mut cmd = {
-        let mut cmd = std::process::Command::new("powershell.exe");
+        let mut cmd = std::process::Command::new(curl);
         cmd.args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri $args[0] -OutFile $args[1]",
-            url,
+            "-q",
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "1800",
+            "--max-filesize",
+            &max_bytes.to_string(),
         ]);
-        cmd.arg(destination);
+        cmd.arg(url);
+        cmd.stdout(std::process::Stdio::piped());
         cmd
+    };
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| SetupError::Download(err.to_string()))?;
+    let copy_result = child.stdout.take().map_or_else(
+        || Err(SetupError::Download("curl stdout was not captured".into())),
+        |mut stdout| copy_download_stream(&mut stdout, destination, max_bytes, &mut progress),
+    );
+    if copy_result.is_err() {
+        let _ = child.kill();
+    }
+    let status = child
+        .wait()
+        .map_err(|error| SetupError::Download(error.to_string()))?;
+    copy_result?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(SetupError::Download(format!(
+            "download process exited with {status}"
+        )))
+    }
+}
+
+fn copy_download_stream(
+    source: &mut impl std::io::Read,
+    destination: &mut impl std::io::Write,
+    max_bytes: u64,
+    progress: &mut impl FnMut(u64),
+) -> SetupResult<u64> {
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = source
+            .read(&mut buffer)
+            .map_err(|error| SetupError::Download(error.to_string()))?;
+        if read == 0 {
+            return Ok(total);
+        }
+        total = total.saturating_add(read as u64);
+        if total > max_bytes {
+            return Err(SetupError::Download(format!(
+                "download exceeded maximum size of {max_bytes} bytes"
+            )));
+        }
+        destination
+            .write_all(&buffer[..read])
+            .map_err(|error| SetupError::Download(error.to_string()))?;
+        progress(total);
+    }
+}
+
+fn trusted_curl_path() -> SetupResult<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let candidates = {
+        let windows = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        vec![windows.join("System32").join("curl.exe")]
     };
     #[cfg(not(target_os = "windows"))]
-    let mut cmd = {
-        let mut cmd = std::process::Command::new("curl");
-        cmd.args(["--fail", "--location", "--show-error", "--output"]);
-        cmd.arg(destination);
-        cmd.arg(url);
-        cmd
-    };
-    let output = cmd
-        .output()
-        .map_err(|err| SetupError::Download(err.to_string()))?;
-    if output.status.success() {
-        return Ok(());
+    let candidates = vec![
+        PathBuf::from("/usr/bin/curl"),
+        PathBuf::from("/usr/local/bin/curl"),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            SetupError::Download(
+                "trusted curl executable was not found; install curl in the system location".into(),
+            )
+        })
+}
+
+fn verify_file_sha256(
+    path: &Path,
+    expected: &str,
+) -> SetupResult<()> {
+    use std::io::Read;
+
+    use sha2::{Digest, Sha256};
+
+    let mut file =
+        std::fs::File::open(path).map_err(|error| SetupError::Download(error.to_string()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| SetupError::Download(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(SetupError::Download(stderr.trim().to_string()))
+    let actual = format!("{:x}", digest.finalize());
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(SetupError::Download(format!(
+            "model SHA-256 mismatch: expected {expected}, got {actual}"
+        )))
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -3433,18 +3734,18 @@ mod imp {
         SpeechRecognizer,
     };
     use windows::core::HSTRING;
-    use wisp_core::SourceLabel;
+    use wisp_core::{SourceLabel, TrackId, TranscriptEvent};
 
     use crate::error::{Result, SessionError};
     use crate::wasapi_capture::RecordingNotification;
     use crate::{
         CallbackEventClass, CallbackEventReceiver, CallbackEventSender, MergedSessionReceive,
         OneShotSessionLifecycle, Permission, PermissionStatus, SessionConfig, SessionOptions,
-        TranscriptionPolicy, WasapiRecording, WindowsPlatformStart, WindowsPlatformStartError,
-        WindowsRuntimeControlPublisher, WindowsRuntimeNotification, WindowsTranscriptionMode,
-        callback_event_channel_with_final_gap, recv_callback_session_channels_with_control,
-        select_windows_transcription_mode, start_windows_platform,
-        try_recv_callback_session_channels_with_control,
+        TranscriptionPolicy, WasapiRecording, WhisperTranscriberBackend, WindowsPlatformStart,
+        WindowsPlatformStartError, WindowsRuntimeControlPublisher, WindowsRuntimeNotification,
+        WindowsTranscriptionMode, callback_event_channel_with_final_gap,
+        recv_callback_session_channels_with_control, select_windows_transcription_mode,
+        start_windows_platform, try_recv_callback_session_channels_with_control,
     };
 
     /// `WispAudioKit` library version.
@@ -3485,6 +3786,25 @@ mod imp {
     pub enum Event {
         Result(SessionResult),
         Log(String),
+    }
+
+    fn transcript_compatibility_event(event: TranscriptEvent) -> Event {
+        let is_final = event.is_final();
+        let segment = event.segment();
+        Event::Result(SessionResult {
+            source: if segment.track_id == TrackId::MICROPHONE {
+                SourceLabel::Mic
+            } else {
+                SourceLabel::System
+            },
+            segment_id: segment.segment_id.get(),
+            is_final,
+            text: segment.text.clone(),
+            start_seconds: segment.start_seconds,
+            end_seconds: segment.end_seconds,
+            confidence_mean: segment.confidence_mean,
+            confidence_min: segment.confidence_min,
+        })
     }
 
     fn final_gap_event(dropped_finals: u64) -> Event {
@@ -3819,13 +4139,17 @@ mod imp {
             recording: Arc<WasapiRecording>,
             notice: String,
         },
+        LocalModel {
+            recording: Arc<WasapiRecording>,
+            transcripts: crossbeam_channel::Receiver<wisp_core::TranscriptEvent>,
+        },
     }
 
     /// Windows capture and transcription session.
     ///
     /// Both paths record WASAPI mic + loopback streams as Ogg/Opus. The
     /// platform path additionally uses Windows' online microphone dictation;
-    /// the local-model path is ready for offline transcription to be wired.
+    /// the local-model path runs offline Whisper over both recorded tracks.
     pub struct Session {
         output_dir: std::path::PathBuf,
         config: SessionConfig,
@@ -3834,6 +4158,7 @@ mod imp {
         sender: CallbackEventSender<Event, EventKey>,
         speech: Option<Arc<WindowsSpeechSession>>,
         recording: Option<Arc<WasapiRecording>>,
+        transcript_publisher: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
         started_at: Option<Instant>,
         lifecycle: Arc<OneShotSessionLifecycle>,
         runtime_control_receiver: crossbeam_channel::Receiver<WindowsRuntimeNotification>,
@@ -3894,6 +4219,7 @@ mod imp {
                 sender,
                 speech: None,
                 recording: None,
+                transcript_publisher: std::sync::Mutex::new(None),
                 started_at: None,
                 lifecycle: Arc::new(OneShotSessionLifecycle::new()),
                 runtime_control_receiver,
@@ -3929,6 +4255,7 @@ mod imp {
             .map_err(SessionError::Start)
             .and_then(|mode| match mode {
                 WindowsTranscriptionMode::PlatformOnline => self.prepare_windows_speech(),
+                WindowsTranscriptionMode::LocalModel => self.prepare_local_model(),
                 WindowsTranscriptionMode::RecordOnly { reason } => {
                     self.prepare_record_only(&reason)
                 },
@@ -3992,14 +4319,38 @@ mod imp {
                 || self.cleanup.request_all(),
                 |generation| self.cleanup.wait_for_all(generation),
             );
-            let error = (claimed || started_retry)
+            let cleanup_error = (claimed || started_retry)
                 .then(|| report.and_then(|report| report.error))
                 .flatten()
                 .map(SessionError::Start);
+            // The recording worker owns the final transcript sender. Once its
+            // cleanup has completed the relay can drain every final and exit.
+            let relay_error = self.join_transcript_publisher();
+            let error = match (cleanup_error, relay_error) {
+                (Some(cleanup), Some(relay)) => Some(SessionError::Start(format!(
+                    "{cleanup}; transcript relay cleanup also failed: {relay}"
+                ))),
+                (Some(error), None) | (None, Some(error)) => Some(error),
+                (None, None) => None,
+            };
             if let Some(err) = &error {
                 enqueue_event(&self.sender, Event::Log(format!("[WIN] {err}")));
             }
             error
+        }
+
+        fn join_transcript_publisher(&self) -> Option<SessionError> {
+            let publisher = self
+                .transcript_publisher
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            publisher.and_then(|publisher| {
+                publisher
+                    .join()
+                    .err()
+                    .map(|_| SessionError::Start("Whisper transcript relay thread panicked".into()))
+            })
         }
 
         /// Take a terminal capture/writer/finalization failure, if one has
@@ -4152,6 +4503,19 @@ mod imp {
             })
         }
 
+        fn prepare_local_model(&self) -> Result<PendingWindowsStart> {
+            let path = self.config.local_model_path.clone().ok_or_else(|| {
+                SessionError::Start("Whisper was selected without a local model path".into())
+            })?;
+            let backend = WhisperTranscriberFactory::from_artifact(path, &self.config.locale);
+            let (recording, transcripts) =
+                WasapiRecording::start_with_transcriber(&self.output_dir, backend)?;
+            Ok(PendingWindowsStart::LocalModel {
+                recording: Arc::new(recording),
+                transcripts,
+            })
+        }
+
         fn stage_cleanup_ownership(
             &self,
             pending: &PendingWindowsStart,
@@ -4162,6 +4526,9 @@ mod imp {
                         .install(Some(Arc::clone(speech)), Arc::clone(recording));
                 },
                 PendingWindowsStart::RecordOnly { recording, .. } => {
+                    self.cleanup.install(None, Arc::clone(recording));
+                },
+                PendingWindowsStart::LocalModel { recording, .. } => {
                     self.cleanup.install(None, Arc::clone(recording));
                 },
             }
@@ -4178,6 +4545,33 @@ mod imp {
                     "[WIN] Windows.Media.SpeechRecognition online dictation started for microphone input".into(),
                 ),
                 PendingWindowsStart::RecordOnly { recording, notice } => {
+                    (recording, None, notice)
+                },
+                PendingWindowsStart::LocalModel {
+                    recording,
+                    transcripts,
+                } => {
+                    let sender = self.sender.clone();
+                    let publisher = std::thread::Builder::new()
+                        .name("wisp-windows-transcripts".into())
+                        .spawn(move || {
+                            while let Ok(event) = transcripts.recv() {
+                                enqueue_event(&sender, transcript_compatibility_event(event));
+                            }
+                        });
+                    let notice = match publisher {
+                        Ok(publisher) => {
+                            *self
+                                .transcript_publisher
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(publisher);
+                            "[WIN] Whisper local transcription started".into()
+                        },
+                        Err(error) => {
+                            format!("[WIN] Whisper transcript publisher failed to start: {error}")
+                        },
+                    };
                     (recording, None, notice)
                 },
             };
@@ -4461,7 +4855,10 @@ mod imp {
     use wisp_core::SourceLabel;
 
     use crate::error::{Result, SessionError};
-    use crate::{Permission, PermissionStatus, PipewireRecording, SessionConfig, SessionOptions};
+    use crate::{
+        Permission, PermissionStatus, PipewireRecording, RecognizerBackend, SessionConfig,
+        SessionOptions, WhisperTranscriberFactory,
+    };
 
     /// Version label for the Linux `PipeWire` recording backend.
     #[must_use]
@@ -4482,7 +4879,7 @@ mod imp {
         PermissionStatus::Granted
     }
 
-    /// Linux transcription is not implemented in this recording milestone.
+    /// Transcript result emitted by the Linux Whisper adapter.
     #[derive(Debug, Clone, PartialEq)]
     pub struct SessionResult {
         pub source: SourceLabel,
@@ -4495,25 +4892,26 @@ mod imp {
         pub confidence_min: Option<f64>,
     }
 
-    /// Linux sessions currently emit recording lifecycle and warning logs.
+    /// Linux recording, transcript, and warning events.
     #[derive(Debug, Clone, PartialEq)]
     pub enum Event {
         Result(SessionResult),
         Log(String),
     }
 
-    /// Record-only Linux session backed by `PipeWire` and Ogg/Opus.
+    /// Linux `PipeWire` recording session with optional local Whisper.
     pub struct Session {
         output_dir: std::path::PathBuf,
         options: SessionOptions,
         recording: Option<Arc<PipewireRecording>>,
         pending: crossbeam_channel::Receiver<Event>,
         publisher: crossbeam_channel::Sender<Event>,
+        transcripts: Option<crossbeam_channel::Receiver<TranscriptEvent>>,
         started: bool,
     }
 
     impl Session {
-        /// Construct a record-only Linux session.
+        /// Construct a Linux session using the platform/default policy.
         ///
         /// # Errors
         /// Returns [`SessionError::InvalidLocale`] for a locale containing NUL
@@ -4528,8 +4926,8 @@ mod imp {
 
         /// Construct a session with an explicit recognizer configuration.
         ///
-        /// Linux still records only; the recognizer selection is retained for
-        /// future local-transcriber integration.
+        /// `LocalModel` connects `PipeWire` PCM to Whisper; `Platform` uses
+        /// record-only fallback when policy permits it.
         ///
         /// # Errors
         /// Returns the same construction errors as [`Self::new`].
@@ -4560,31 +4958,56 @@ mod imp {
                 recording: None,
                 pending,
                 publisher,
+                transcripts: None,
                 started: false,
             })
         }
 
         /// Start `PipeWire` capture and Ogg/Opus recording.
         ///
-        /// Linux transcription remains unavailable. Startup succeeds in
-        /// record-only mode only when the configured policy permits it.
-        ///
         /// # Errors
         /// Returns [`SessionError::Start`] for repeated starts, a policy that
-        /// forbids record-only fallback, or `PipeWire`/recording setup failure.
+        /// forbids record-only fallback, lacks a selected model, or encounters
+        /// a `PipeWire`/recording/transcriber setup failure.
         pub fn start(&mut self) -> Result<()> {
             if self.started {
                 return Err(SessionError::Start(
                     "Linux session has already been started and cannot be restarted".into(),
                 ));
             }
-            if !self.options.transcription_policy().allow_record_only {
-                return Err(SessionError::Start(
-                    "Linux transcription is unavailable and session policy forbids record-only fallback"
-                        .into(),
-                ));
-            }
-            let recording = Arc::new(PipewireRecording::start(&self.output_dir)?);
+            let (recording, transcripts) = match self.options.config().recognizer {
+                RecognizerBackend::LocalModel => {
+                    let path = self
+                        .options
+                        .config()
+                        .local_model_path
+                        .clone()
+                        .ok_or_else(|| {
+                            SessionError::Start(
+                                "Whisper was selected without a local model path".into(),
+                            )
+                        })?;
+                    let backend = WhisperTranscriberFactory::from_artifact(
+                        path,
+                        &self.options.config().locale,
+                    );
+                    let (recording, transcripts) =
+                        PipewireRecording::start_with_transcriber(&self.output_dir, backend)?;
+                    (recording, Some(transcripts))
+                },
+                RecognizerBackend::Platform
+                    if self.options.transcription_policy().allow_record_only =>
+                {
+                    (PipewireRecording::start(&self.output_dir)?, None)
+                },
+                RecognizerBackend::Platform => {
+                    return Err(SessionError::Start(
+                        "Linux has no platform recognizer and record-only fallback is disabled"
+                            .into(),
+                    ));
+                },
+            };
+            let recording = Arc::new(recording);
             let mic_path = recording.mic_path().display();
             let system_path = recording.system_path().display();
             let _ = self.publisher.try_send(Event::Log(format!(
@@ -4593,10 +5016,14 @@ mod imp {
             let _ = self.publisher.try_send(Event::Log(format!(
                 "[LINUX] recording PipeWire sink monitor to {system_path}"
             )));
-            let _ = self.publisher.try_send(Event::Log(
-                "[LINUX] transcription is unavailable; continuing in record-only mode".into(),
-            ));
+            if transcripts.is_none() {
+                let _ = self.publisher.try_send(Event::Log(
+                    "[LINUX] platform transcription is unavailable; continuing in record-only mode"
+                        .into(),
+                ));
+            }
             self.recording = Some(recording);
+            self.transcripts = transcripts;
             self.started = true;
             Ok(())
         }
@@ -4629,6 +5056,11 @@ mod imp {
 
         #[must_use]
         pub fn try_recv(&self) -> Option<Event> {
+            if let Some(transcripts) = &self.transcripts
+                && let Ok(event) = transcripts.try_recv()
+            {
+                return Some(transcript_event(event));
+            }
             if let Ok(event) = self.pending.try_recv() {
                 return Some(event);
             }
@@ -4696,6 +5128,25 @@ mod imp {
         }
     }
 
+    fn transcript_event(event: TranscriptEvent) -> Event {
+        let is_final = event.is_final();
+        let segment = event.segment();
+        Event::Result(SessionResult {
+            source: if segment.track_id == TrackId::MICROPHONE {
+                SourceLabel::Mic
+            } else {
+                SourceLabel::System
+            },
+            segment_id: segment.segment_id.get(),
+            is_final,
+            text: segment.text.clone(),
+            start_seconds: segment.start_seconds,
+            end_seconds: segment.end_seconds,
+            confidence_mean: segment.confidence_mean,
+            confidence_min: segment.confidence_min,
+        })
+    }
+
     impl Drop for Session {
         fn drop(&mut self) {
             self.stop();
@@ -4715,8 +5166,8 @@ mod imp {
         fn construction_and_record_only_policy_checks_do_not_touch_hardware() {
             let directory = tempfile::tempdir().unwrap();
             let policy = TranscriptionPolicy {
-                privacy: PrivacyRequirement::OfflineRequired,
-                preferred: TranscriberClass::LocalModel,
+                privacy: PrivacyRequirement::OnlineAllowed,
+                preferred: TranscriberClass::Platform,
                 allow_backend_fallback: false,
                 allow_record_only: false,
             };
@@ -4725,7 +5176,11 @@ mod imp {
 
             assert!(!session.has_started_capture());
             let error = session.start().unwrap_err();
-            assert!(error.to_string().contains("forbids record-only fallback"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("Linux has no platform recognizer")
+            );
             assert!(!session.has_started_capture());
         }
 
@@ -5573,7 +6028,7 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn offline_windows_policy_never_selects_online_platform() {
+    fn offline_windows_policy_falls_back_to_local_model() {
         let policy = TranscriptionPolicy {
             privacy: PrivacyRequirement::OfflineRequired,
             preferred: TranscriberClass::Platform,
@@ -5583,7 +6038,7 @@ mod compatibility_tests {
 
         assert!(matches!(
             select_windows_transcription_mode(RecognizerBackend::Platform, policy).unwrap(),
-            WindowsTranscriptionMode::RecordOnly { .. }
+            WindowsTranscriptionMode::LocalModel
         ));
     }
 
@@ -5600,7 +6055,7 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn configured_local_model_is_record_only_until_adapter_is_connected() {
+    fn configured_local_model_selects_connected_adapter() {
         let options: super::SessionOptions =
             SessionConfig::local_model("en-US", "/models/ggml-base.bin").into();
 
@@ -5610,7 +6065,7 @@ mod compatibility_tests {
                 options.transcription_policy(),
             )
             .unwrap(),
-            WindowsTranscriptionMode::RecordOnly { .. }
+            WindowsTranscriptionMode::LocalModel
         ));
     }
 
@@ -5632,26 +6087,28 @@ mod compatibility_tests {
             allow_backend_fallback: true,
             ..TranscriptionPolicy::platform_default()
         };
-        assert!(matches!(
+        assert_eq!(
             select_windows_transcription_after_failure(record_only_policy, &failed).unwrap(),
-            WindowsTranscriptionMode::RecordOnly { .. }
-        ));
+            WindowsTranscriptionMode::LocalModel
+        );
         assert!(matches!(
             windows_runtime_failure_action(record_only_policy),
-            WindowsRuntimeFailureAction::ContinueRecording { .. }
+            WindowsRuntimeFailureAction::FailStart { .. }
         ));
         assert!(matches!(
             windows_runtime_completion_notification(record_only_policy, "NetworkFailure"),
-            WindowsRuntimeNotification::ContinueRecording(message)
+            WindowsRuntimeNotification::Fatal(message)
                 if message.contains("NetworkFailure")
-                    && message.contains("continuing with local WASAPI recording")
         ));
         let fail_policy = TranscriptionPolicy {
             allow_backend_fallback: true,
             allow_record_only: false,
             ..TranscriptionPolicy::platform_default()
         };
-        assert!(select_windows_transcription_after_failure(fail_policy, &failed).is_err());
+        assert_eq!(
+            select_windows_transcription_after_failure(fail_policy, &failed).unwrap(),
+            WindowsTranscriptionMode::LocalModel
+        );
         assert!(matches!(
             windows_runtime_failure_action(fail_policy),
             WindowsRuntimeFailureAction::FailStart { .. }

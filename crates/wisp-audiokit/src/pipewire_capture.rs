@@ -23,12 +23,16 @@ use pw::spa;
 use spa::param::format::{MediaSubtype, MediaType};
 use spa::param::format_utils;
 use spa::pod::Pod;
-use wisp_core::{AudioFrame, CaptureEvent, MonotonicTimestamp, SourceKind, TrackId};
+use wisp_core::{
+    AudioFrame, CaptureEvent, MonotonicTimestamp, SourceKind, TrackDescriptor, TrackId,
+    TranscriptEvent,
+};
 
 use crate::backend::{
     Availability, BackendError, BackendErrorKind, BackendId, BackendResult, CaptureBackend,
     CaptureCapabilities, CaptureControlEvent, CaptureEventReceiver, CaptureProbe,
-    RealtimeCaptureSender, ShutdownMode, realtime_capture_channel,
+    RealtimeCaptureSender, RecordingTranscriber, ShutdownMode, TranscriberBackend,
+    realtime_capture_channel,
 };
 use crate::ogg_opus_recorder::OggOpusRecorder;
 use crate::{Result, SessionError};
@@ -361,6 +365,38 @@ impl PipewireRecording {
     /// # Errors
     /// Returns [`SessionError::Start`] for capture, file, or writer failures.
     pub fn start(output_dir: impl AsRef<Path>) -> Result<Self> {
+        Self::start_inner(output_dir, None)
+    }
+
+    /// Start recording and fan the same ordered PCM stream into a transcriber.
+    ///
+    /// # Errors
+    /// Returns a startup error when the transcriber or capture cannot start.
+    pub fn start_with_transcriber(
+        output_dir: impl AsRef<Path>,
+        backend: Box<dyn TranscriberBackend>,
+    ) -> Result<(Self, channel::Receiver<TranscriptEvent>)> {
+        let tracks = [
+            TrackDescriptor {
+                id: TrackId::MICROPHONE,
+                source: SourceKind::Microphone,
+                name: "Microphone".into(),
+            },
+            TrackDescriptor {
+                id: TrackId::SYSTEM,
+                source: SourceKind::SystemAudio,
+                name: "System audio".into(),
+            },
+        ];
+        let (transcriber, events) = RecordingTranscriber::start(backend, &tracks)
+            .map_err(|error| SessionError::Start(error.to_string()))?;
+        Self::start_inner(output_dir, Some(transcriber)).map(|recording| (recording, events))
+    }
+
+    fn start_inner(
+        output_dir: impl AsRef<Path>,
+        mut transcriber: Option<RecordingTranscriber>,
+    ) -> Result<Self> {
         let output_dir = output_dir.as_ref();
         fs::create_dir_all(output_dir).map_err(|error| {
             SessionError::Start(format!(
@@ -399,7 +435,13 @@ impl PipewireRecording {
                             OggOpusRecorder,
                             OggOpusRecorder,
                         )| {
-                            recording_loop(&receiver, mic, system, &notification_sender)
+                            recording_loop_with_transcriber(
+                                &receiver,
+                                mic,
+                                system,
+                                &notification_sender,
+                                transcriber.as_mut(),
+                            )
                         },
                     );
                 if let Err(error) = &result {
@@ -804,13 +846,31 @@ fn report_fatal_format(data: &mut StreamData) {
 
 fn recording_loop(
     receiver: &CaptureEventReceiver,
+    mic: OggOpusRecorder,
+    system: OggOpusRecorder,
+    notifications: &channel::Sender<String>,
+) -> io::Result<()> {
+    recording_loop_with_transcriber(receiver, mic, system, notifications, None)
+}
+
+fn recording_loop_with_transcriber(
+    receiver: &CaptureEventReceiver,
     mut mic: OggOpusRecorder,
     mut system: OggOpusRecorder,
     notifications: &channel::Sender<String>,
+    mut transcriber: Option<&mut RecordingTranscriber>,
 ) -> io::Result<()> {
     let mut mic_timeline = TrackTimeline::default();
     let mut system_timeline = TrackTimeline::default();
     while let Some(event) = receiver.recv() {
+        if let Some(transcriber) = transcriber.as_deref_mut() {
+            if let Err(error) = transcriber.push_capture(&event) {
+                let _ = notifications.try_send(format!(
+                    "Whisper transcription stopped ({error}); audio recording continues"
+                ));
+                transcriber = None;
+            }
+        }
         match event {
             CaptureEvent::Samples(frame) => {
                 let samples = frame
@@ -890,7 +950,13 @@ fn recording_loop(
         final_cursor.saturating_sub(system_timeline.encoded),
     )?;
     mic.finish()?;
-    system.finish()
+    system.finish()?;
+    if let Some(transcriber) = transcriber {
+        transcriber
+            .finish()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+    }
+    Ok(())
 }
 
 #[derive(Default)]

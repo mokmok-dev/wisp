@@ -45,6 +45,7 @@ let
   }
   // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
     nativeBuildInputs = [
+      pkgs.cmake
       pkgs.pkg-config
       pkgs.rustPlatform.bindgenHook
     ];

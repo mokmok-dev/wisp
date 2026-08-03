@@ -179,7 +179,7 @@ cargo build -p wisp-desktop --release
 On Debian/Ubuntu Linux, install the PipeWire build dependency before building:
 
 ```bash
-sudo apt install clang libclang-dev libpipewire-0.3-dev pkg-config
+sudo apt install clang cmake libclang-dev libpipewire-0.3-dev pkg-config
 cargo build -p wisp-audiokit
 ```
 

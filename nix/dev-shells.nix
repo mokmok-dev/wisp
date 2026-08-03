@@ -52,6 +52,7 @@ in
       ++ pkgs.lib.optionals pkgs.stdenv.isLinux (
         with pkgs;
         [
+          cmake
           pipewire
           pkg-config
           rustPlatform.bindgenHook

@@ -7,6 +7,23 @@ let
   crane = craneLib.overrideToolchain rustToolchain;
   src = crane.cleanCargoSource ../.;
   isWindows = pkgs.stdenv.hostPlatform.isWindows;
+  sherpaLinuxArchiveName =
+    if pkgs.stdenv.hostPlatform.isAarch64 then
+      "sherpa-onnx-v1.13.4-linux-aarch64-static-lib.tar.bz2"
+    else
+      "sherpa-onnx-v1.13.4-linux-x64-static-lib.tar.bz2";
+  sherpaLinuxArchive = pkgs.fetchurl {
+    url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/${sherpaLinuxArchiveName}";
+    hash =
+      if pkgs.stdenv.hostPlatform.isAarch64 then
+        "sha256-I7M2Fnh8yUnVsUOOl5RVD4BeIIoBTFwiRUgyB8WLvA8="
+      else
+        "sha256-mLDjGZZCb254JE284ZVVSPLGTo8BxL51uFr3zaoujVw=";
+  };
+  sherpaLinuxArchiveDir = pkgs.runCommand "sherpa-onnx-archives" { } ''
+    mkdir -p "$out"
+    ln -s ${sherpaLinuxArchive} "$out/${sherpaLinuxArchiveName}"
+  '';
 
   wispMcpArgs = {
     inherit src;
@@ -44,6 +61,7 @@ let
     strictDeps = true;
   }
   // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+    SHERPA_ONNX_ARCHIVE_DIR = sherpaLinuxArchiveDir;
     nativeBuildInputs = [
       pkgs.pkg-config
       pkgs.rustPlatform.bindgenHook

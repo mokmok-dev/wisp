@@ -9,8 +9,10 @@ mod backend;
 mod error;
 #[cfg(target_os = "macos")]
 mod macos_backend;
+mod nemotron_backend;
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
 mod ogg_opus_recorder;
+mod pcm;
 #[cfg(target_os = "linux")]
 mod pipewire_capture;
 #[cfg(target_os = "windows")]
@@ -21,13 +23,16 @@ pub use backend::{
     CaptureCapabilities, CaptureControlEvent, CaptureEventReceiver, CaptureProbe, ControlEnqueue,
     FrameEnqueue, OrchestratorEvent, PrivacyRequirement, RealtimeCaptureSender, RecognitionPrivacy,
     SessionOrchestrator, ShutdownMode, TranscriberBackend, TranscriberCapabilities,
-    TranscriberClass, TranscriberFeature, TranscriberProbe, TranscriptionPolicy,
-    TranscriptionSelection, UnavailableReason, realtime_capture_channel, select_transcriber,
-    select_transcriber_after_failure,
+    TranscriberClass, TranscriberConfig, TranscriberFactory, TranscriberFeature, TranscriberProbe,
+    TranscriptionPolicy, TranscriptionSelection, UnavailableReason, realtime_capture_channel,
+    select_transcriber, select_transcriber_after_failure,
 };
 pub use error::{Result, SessionError, SetupError, SetupResult};
 #[cfg(target_os = "macos")]
 pub use macos_backend::{MacosCaptureBackend, MacosSession, MacosTranscriberBackend};
+pub use nemotron_backend::{
+    NEMOTRON_BACKEND_ID, NemotronTranscriberBackend, NemotronTranscriberFactory,
+};
 #[cfg(target_os = "linux")]
 pub use pipewire_capture::{
     PIPEWIRE_CAPTURE_QUEUE_CAPACITY, PIPEWIRE_CHANNELS, PIPEWIRE_SAMPLE_RATE, PipewireCapture,
@@ -102,10 +107,8 @@ pub enum RecognizerBackend {
     /// dictation grammar in `Windows.Media.SpeechRecognition`, which uses the
     /// OS microphone path while WASAPI records both local audio sources.
     Platform,
-    /// Use a downloaded local model. On Windows this is the path intended
-    /// for WASAPI mic + loopback PCM so both sides of the call can be
-    /// transcribed by the same offline engine.
-    LocalModel,
+    /// Use the cache-aware Nemotron streaming model through sherpa-onnx.
+    Nemotron,
 }
 
 impl RecognizerBackend {
@@ -113,7 +116,7 @@ impl RecognizerBackend {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Platform => platform_recognizer_label(),
-            Self::LocalModel => "Local model",
+            Self::Nemotron => "Nemotron (local, streaming)",
         }
     }
 }
@@ -137,13 +140,13 @@ impl SessionConfig {
     }
 
     #[must_use]
-    pub fn local_model(
+    pub fn nemotron(
         locale: impl Into<String>,
         path: impl Into<PathBuf>,
     ) -> Self {
         Self {
             locale: locale.into(),
-            recognizer: RecognizerBackend::LocalModel,
+            recognizer: RecognizerBackend::Nemotron,
             local_model_path: Some(path.into()),
         }
     }
@@ -155,7 +158,7 @@ impl SessionConfig {
     ) -> SessionOptions {
         self.recognizer = match policy.preferred {
             TranscriberClass::Platform => RecognizerBackend::Platform,
-            TranscriberClass::LocalModel => RecognizerBackend::LocalModel,
+            TranscriberClass::LocalModel => RecognizerBackend::Nemotron,
         };
         SessionOptions::new(self, policy)
     }
@@ -203,7 +206,7 @@ impl From<SessionConfig> for SessionOptions {
     fn from(config: SessionConfig) -> Self {
         let policy = match config.recognizer {
             RecognizerBackend::Platform => TranscriptionPolicy::platform_default(),
-            RecognizerBackend::LocalModel => TranscriptionPolicy::offline_local_model(),
+            RecognizerBackend::Nemotron => TranscriptionPolicy::offline_local_model(),
         };
         Self::new(config, policy)
     }
@@ -1380,6 +1383,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WindowsTranscriptionMode {
     PlatformOnline,
+    LocalModel,
     RecordOnly { reason: String },
 }
 
@@ -1425,7 +1429,7 @@ fn select_windows_transcription_mode(
 ) -> std::result::Result<WindowsTranscriptionMode, String> {
     let recognizer_class = match recognizer {
         RecognizerBackend::Platform => TranscriberClass::Platform,
-        RecognizerBackend::LocalModel => TranscriberClass::LocalModel,
+        RecognizerBackend::Nemotron => TranscriberClass::LocalModel,
     };
     if recognizer_class != policy.preferred {
         return Err(format!(
@@ -1457,6 +1461,10 @@ fn windows_runtime_failure_action(policy: TranscriptionPolicy) -> WindowsRuntime
         },
         Ok(WindowsTranscriptionMode::PlatformOnline) => WindowsRuntimeFailureAction::FailStart {
             reason: "runtime fallback reselected the failed Windows platform recognizer".into(),
+        },
+        Ok(WindowsTranscriptionMode::LocalModel) => WindowsRuntimeFailureAction::FailStart {
+            reason: "runtime fallback cannot initialize a new local model after capture starts"
+                .into(),
         },
         Err(reason) => WindowsRuntimeFailureAction::FailStart { reason },
     }
@@ -2129,9 +2137,7 @@ fn windows_transcriber_probes() -> [TranscriberProbe; 2] {
         TranscriberProbe {
             backend_id: BackendId::new("windows-local-model"),
             class: TranscriberClass::LocalModel,
-            availability: Availability::Unavailable(UnavailableReason::InitializationFailed(
-                "Windows local-model inference is not connected".into(),
-            )),
+            availability: Availability::Available,
             capabilities: TranscriberCapabilities {
                 privacy: RecognitionPrivacy::Offline,
                 features: vec![TranscriberFeature::SegmentTimestamps],
@@ -2148,6 +2154,9 @@ fn windows_mode_from_selection(
         TranscriptionSelection::Backend(id) if id.as_str() == "windows-platform-online" => {
             Ok(WindowsTranscriptionMode::PlatformOnline)
         },
+        TranscriptionSelection::Backend(id) if id.as_str() == "windows-local-model" => {
+            Ok(WindowsTranscriptionMode::LocalModel)
+        },
         TranscriptionSelection::Backend(id) => Err(format!(
             "Windows transcription backend is not connected: {id}"
         )),
@@ -2159,12 +2168,29 @@ fn windows_mode_from_selection(
 }
 
 /// Metadata for the local model offered by the setup screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocalModelId {
+    Nemotron,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LocalModelSpec {
-    pub name: &'static str,
+pub struct LocalModelArtifactSpec {
     pub filename: &'static str,
     pub url: &'static str,
+    pub sha256: &'static str,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalModelSpec {
+    pub id: LocalModelId,
+    pub name: &'static str,
+    pub filename: &'static str,
+    /// Exact expected size of all artifacts in the bundle.
+    pub bytes: u64,
     pub approx_bytes: u64,
+    /// Model files installed below the directory named by `filename`.
+    pub artifacts: &'static [LocalModelArtifactSpec],
 }
 
 /// Current filesystem state for the local model.
@@ -2195,37 +2221,103 @@ impl LocalModelStatus {
     }
 }
 
-const LOCAL_MODEL_SPEC: LocalModelSpec = LocalModelSpec {
-    name: "Whisper base",
-    filename: "ggml-base.bin",
-    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-    approx_bytes: 142 * 1024 * 1024,
+const NEMOTRON_ARTIFACTS: &[LocalModelArtifactSpec] = &[
+    LocalModelArtifactSpec {
+        filename: "encoder.int8.onnx",
+        url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11/resolve/ab43d895f5985b1bbab8b6eac8607fcdc05343f3/encoder.int8.onnx",
+        sha256: "012e9321373af99021415e0b0eb3ec827b4be3153be6f30d9b448fe65e896e68",
+        bytes: 657_601_403,
+    },
+    LocalModelArtifactSpec {
+        filename: "decoder.int8.onnx",
+        url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11/resolve/ab43d895f5985b1bbab8b6eac8607fcdc05343f3/decoder.int8.onnx",
+        sha256: "19f9c98fc6d0a2c33a65a43b36fdb2e914c26c0aa9764be3aebc502a1e982fb0",
+        bytes: 14_978_075,
+    },
+    LocalModelArtifactSpec {
+        filename: "joiner.int8.onnx",
+        url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11/resolve/ab43d895f5985b1bbab8b6eac8607fcdc05343f3/joiner.int8.onnx",
+        sha256: "4101c7c679a0bc30483794b27a059e34e79232aa2068d78d51231a22c8b0d7ce",
+        bytes: 9_504_438,
+    },
+    LocalModelArtifactSpec {
+        filename: "tokens.txt",
+        url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11/resolve/ab43d895f5985b1bbab8b6eac8607fcdc05343f3/tokens.txt",
+        sha256: "729cc103155bafa785f9cd45746cd41cabe97eab7182fc04d594129587958f8a",
+        bytes: 131_440,
+    },
+];
+
+const NEMOTRON_MODEL_SPEC: LocalModelSpec = LocalModelSpec {
+    id: LocalModelId::Nemotron,
+    name: "Nemotron 3.5 ASR Streaming 0.6B (INT8)",
+    filename: "nemotron-3.5-asr-streaming-0.6b-560ms-int8",
+    bytes: 682_215_356,
+    approx_bytes: 651 * 1024 * 1024,
+    artifacts: NEMOTRON_ARTIFACTS,
 };
 
 #[must_use]
 pub const fn local_model_spec() -> LocalModelSpec {
-    LOCAL_MODEL_SPEC
+    NEMOTRON_MODEL_SPEC
+}
+
+#[must_use]
+pub const fn local_model_specs() -> [LocalModelSpec; 1] {
+    [NEMOTRON_MODEL_SPEC]
+}
+
+#[must_use]
+pub const fn local_model_spec_for(id: LocalModelId) -> LocalModelSpec {
+    match id {
+        LocalModelId::Nemotron => NEMOTRON_MODEL_SPEC,
+    }
 }
 
 #[must_use]
 pub fn local_model_path(data_dir: impl AsRef<Path>) -> PathBuf {
+    local_model_path_for(data_dir, LocalModelId::Nemotron)
+}
+
+#[must_use]
+pub fn local_model_path_for(
+    data_dir: impl AsRef<Path>,
+    id: LocalModelId,
+) -> PathBuf {
     data_dir
         .as_ref()
         .join("models")
-        .join(local_model_spec().filename)
+        .join(local_model_spec_for(id).filename)
 }
 
 #[must_use]
 pub fn local_model_status(data_dir: impl AsRef<Path>) -> LocalModelStatus {
-    let spec = local_model_spec();
-    let path = local_model_path(data_dir);
-    match std::fs::metadata(&path) {
-        Ok(meta) if meta.is_file() && meta.len() > 0 => LocalModelStatus::Ready {
+    local_model_status_for(data_dir, LocalModelId::Nemotron)
+}
+
+#[must_use]
+pub fn local_model_status_for(
+    data_dir: impl AsRef<Path>,
+    id: LocalModelId,
+) -> LocalModelStatus {
+    let spec = local_model_spec_for(id);
+    let path = local_model_path_for(data_dir, id);
+    let ready = spec.artifacts.iter().all(|artifact| {
+        let artifact_path = path.join(artifact.filename);
+        std::fs::metadata(&artifact_path).is_ok_and(|meta| {
+            meta.is_file()
+                && meta.len() == artifact.bytes
+                && verify_file_sha256(&artifact_path, artifact.sha256).is_ok()
+        })
+    });
+    if ready {
+        LocalModelStatus::Ready {
             spec,
             path,
-            bytes: meta.len(),
-        },
-        _ => LocalModelStatus::Missing { spec, path },
+            bytes: spec.bytes,
+        }
+    } else {
+        LocalModelStatus::Missing { spec, path }
     }
 }
 
@@ -2238,34 +2330,95 @@ pub fn local_model_status(data_dir: impl AsRef<Path>) -> LocalModelStatus {
 /// Returns [`SetupError`] if the model directory cannot be created, the
 /// download command fails, or the temporary file cannot be moved into place.
 pub fn download_local_model(data_dir: impl AsRef<Path>) -> SetupResult<LocalModelStatus> {
-    let data_dir = data_dir.as_ref();
-    let final_path = local_model_path(data_dir);
-    let Some(model_dir) = final_path.parent() else {
-        return Err(SetupError::Install(format!(
-            "invalid model path: {}",
-            final_path.display()
-        )));
-    };
-    std::fs::create_dir_all(model_dir).map_err(|err| SetupError::CreateModelDirectory {
-        path: model_dir.to_path_buf(),
-        message: err.to_string(),
-    })?;
+    download_local_model_for(data_dir, LocalModelId::Nemotron)
+}
 
-    let part_path = final_path.with_extension("bin.part");
-    let _ = std::fs::remove_file(&part_path);
-    download_url(local_model_spec().url, &part_path)?;
-    std::fs::rename(&part_path, &final_path)
-        .or_else(|_| {
-            std::fs::copy(&part_path, &final_path)?;
-            std::fs::remove_file(&part_path)
-        })
-        .map_err(|err| SetupError::Install(err.to_string()))?;
-    Ok(local_model_status(data_dir))
+/// Download the selected local model bundle.
+///
+/// # Errors
+/// Returns a setup error when the model cannot be downloaded or installed.
+pub fn download_local_model_for(
+    data_dir: impl AsRef<Path>,
+    id: LocalModelId,
+) -> SetupResult<LocalModelStatus> {
+    download_local_model_for_with_progress(data_dir, id, |_, _| {})
+}
+
+/// Download the selected local model bundle and report installed bytes.
+///
+/// # Errors
+/// Returns a setup error when the model cannot be downloaded or installed.
+pub fn download_local_model_for_with_progress(
+    data_dir: impl AsRef<Path>,
+    id: LocalModelId,
+    progress: impl FnMut(u64, u64),
+) -> SetupResult<LocalModelStatus> {
+    let spec = local_model_spec_for(id);
+    download_model_bundle_with_progress(data_dir.as_ref(), spec, progress)
+}
+
+fn download_model_bundle_with_progress(
+    data_dir: &Path,
+    spec: LocalModelSpec,
+    mut progress: impl FnMut(u64, u64),
+) -> SetupResult<LocalModelStatus> {
+    let bundle_path = data_dir.join("models").join(spec.filename);
+    std::fs::create_dir_all(&bundle_path).map_err(|error| SetupError::CreateModelDirectory {
+        path: bundle_path.clone(),
+        message: error.to_string(),
+    })?;
+    let mut installed = 0_u64;
+    for artifact in spec.artifacts {
+        let final_path = bundle_path.join(artifact.filename);
+        if std::fs::metadata(&final_path).is_ok_and(|metadata| {
+            metadata.is_file()
+                && metadata.len() == artifact.bytes
+                && verify_file_sha256(&final_path, artifact.sha256).is_ok()
+        }) {
+            installed = installed.saturating_add(artifact.bytes);
+            progress(installed, spec.bytes);
+            continue;
+        }
+        let mut part = tempfile::Builder::new()
+            .prefix(&format!(".{}.", artifact.filename))
+            .suffix(".part")
+            .tempfile_in(&bundle_path)
+            .map_err(|error| SetupError::Install(error.to_string()))?;
+        download_url_with_progress(
+            artifact.url,
+            part.as_file_mut(),
+            artifact.bytes,
+            |downloaded| progress(installed.saturating_add(downloaded), spec.bytes),
+        )?;
+        part.as_file()
+            .sync_all()
+            .map_err(|error| SetupError::Install(error.to_string()))?;
+        verify_file_sha256(part.path(), artifact.sha256)?;
+        if let Ok(metadata) = std::fs::symlink_metadata(&final_path) {
+            if !metadata.file_type().is_file() {
+                return Err(SetupError::Install(format!(
+                    "refusing to replace non-regular model path: {}",
+                    final_path.display()
+                )));
+            }
+            std::fs::remove_file(&final_path)
+                .map_err(|error| SetupError::Install(error.to_string()))?;
+        }
+        part.persist(&final_path)
+            .map_err(|error| SetupError::Install(error.error.to_string()))?;
+        installed = installed.saturating_add(artifact.bytes);
+        progress(installed, spec.bytes);
+    }
+    Ok(LocalModelStatus::Ready {
+        spec,
+        path: bundle_path,
+        bytes: spec.bytes,
+    })
 }
 
 #[must_use]
 pub const fn requires_recognizer_setup() -> bool {
-    cfg!(target_os = "windows")
+    true
 }
 
 #[must_use]
@@ -2279,46 +2432,223 @@ pub const fn platform_recognizer_label() -> &'static str {
     }
 }
 
-fn download_url(
+#[cfg(test)]
+mod local_model_tests {
+    use super::{
+        LocalModelArtifactSpec, LocalModelId, LocalModelSpec, LocalModelStatus,
+        download_model_bundle_with_progress, local_model_spec, local_model_specs,
+        local_model_status_for, verify_file_sha256,
+    };
+
+    #[test]
+    fn model_inventory_contains_only_nemotron() {
+        let data_dir = tempfile::tempdir().expect("temp dir");
+        let specs = local_model_specs();
+        assert_eq!(specs, [local_model_spec()]);
+        assert_eq!(specs[0].id, LocalModelId::Nemotron);
+        assert!(matches!(
+            local_model_status_for(data_dir.path(), LocalModelId::Nemotron),
+            LocalModelStatus::Missing { .. }
+        ));
+    }
+
+    #[test]
+    fn integrity_check_rejects_corrupt_model() {
+        use sha2::{Digest, Sha256};
+
+        let data_dir = tempfile::tempdir().expect("temp dir");
+        let path = data_dir.path().join("model.bin");
+        std::fs::write(&path, b"known model bytes").expect("write model");
+        let expected = format!("{:x}", Sha256::digest(b"known model bytes"));
+        assert!(verify_file_sha256(&path, &expected).is_ok());
+        std::fs::write(&path, b"tampered").expect("tamper model");
+        assert!(verify_file_sha256(&path, &expected).is_err());
+    }
+
+    #[test]
+    fn bundle_download_verifies_and_installs_every_artifact() {
+        use sha2::{Digest, Sha256};
+
+        let source_dir = tempfile::tempdir().expect("source dir");
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let mut artifacts = Vec::new();
+        let mut total = 0_u64;
+        for (filename, contents) in [
+            ("encoder.onnx", b"encoder".as_slice()),
+            ("tokens.txt", b"tokens".as_slice()),
+        ] {
+            let source = source_dir.path().join(filename);
+            std::fs::write(&source, contents).expect("write source");
+            total += contents.len() as u64;
+            artifacts.push(LocalModelArtifactSpec {
+                filename,
+                url: Box::leak(format!("file://{}", source.display()).into_boxed_str()),
+                sha256: Box::leak(format!("{:x}", Sha256::digest(contents)).into_boxed_str()),
+                bytes: contents.len() as u64,
+            });
+        }
+        let artifacts = Box::leak(artifacts.into_boxed_slice());
+        let spec = LocalModelSpec {
+            id: LocalModelId::Nemotron,
+            name: "test bundle",
+            filename: "bundle",
+            bytes: total,
+            approx_bytes: total,
+            artifacts,
+        };
+        let mut progress = Vec::new();
+        let status = download_model_bundle_with_progress(data_dir.path(), spec, |done, total| {
+            progress.push((done, total));
+        })
+        .expect("install bundle");
+        assert!(status.is_ready());
+        assert_eq!(
+            std::fs::read(status.path().join("encoder.onnx")).unwrap(),
+            b"encoder"
+        );
+        assert_eq!(
+            std::fs::read(status.path().join("tokens.txt")).unwrap(),
+            b"tokens"
+        );
+        assert_eq!(progress.last(), Some(&(total, total)));
+    }
+}
+
+fn download_url_with_progress(
     url: &str,
-    destination: &Path,
+    destination: &mut std::fs::File,
+    max_bytes: u64,
+    mut progress: impl FnMut(u64),
 ) -> SetupResult<()> {
     if let Some(path) = url.strip_prefix("file://") {
-        std::fs::copy(path, destination)
-            .map(|_| ())
-            .map_err(|err| SetupError::Download(err.to_string()))?;
+        let mut source =
+            std::fs::File::open(path).map_err(|error| SetupError::Download(error.to_string()))?;
+        copy_download_stream(&mut source, destination, max_bytes, &mut progress)?;
         return Ok(());
     }
-    #[cfg(target_os = "windows")]
+    let curl = trusted_curl_path()?;
     let mut cmd = {
-        let mut cmd = std::process::Command::new("powershell.exe");
+        let mut cmd = std::process::Command::new(curl);
         cmd.args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri $args[0] -OutFile $args[1]",
-            url,
+            "-q",
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "1800",
+            "--max-filesize",
+            &max_bytes.to_string(),
         ]);
-        cmd.arg(destination);
+        cmd.arg(url);
+        cmd.stdout(std::process::Stdio::piped());
         cmd
+    };
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| SetupError::Download(err.to_string()))?;
+    let copy_result = child.stdout.take().map_or_else(
+        || Err(SetupError::Download("curl stdout was not captured".into())),
+        |mut stdout| copy_download_stream(&mut stdout, destination, max_bytes, &mut progress),
+    );
+    if copy_result.is_err() {
+        let _ = child.kill();
+    }
+    let status = child
+        .wait()
+        .map_err(|error| SetupError::Download(error.to_string()))?;
+    copy_result?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(SetupError::Download(format!(
+            "download process exited with {status}"
+        )))
+    }
+}
+
+fn copy_download_stream(
+    source: &mut impl std::io::Read,
+    destination: &mut impl std::io::Write,
+    max_bytes: u64,
+    progress: &mut impl FnMut(u64),
+) -> SetupResult<u64> {
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = source
+            .read(&mut buffer)
+            .map_err(|error| SetupError::Download(error.to_string()))?;
+        if read == 0 {
+            return Ok(total);
+        }
+        total = total.saturating_add(read as u64);
+        if total > max_bytes {
+            return Err(SetupError::Download(format!(
+                "download exceeded maximum size of {max_bytes} bytes"
+            )));
+        }
+        destination
+            .write_all(&buffer[..read])
+            .map_err(|error| SetupError::Download(error.to_string()))?;
+        progress(total);
+    }
+}
+
+fn trusted_curl_path() -> SetupResult<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let candidates = {
+        let windows = std::env::var_os("SystemRoot")
+            .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+        vec![windows.join("System32").join("curl.exe")]
     };
     #[cfg(not(target_os = "windows"))]
-    let mut cmd = {
-        let mut cmd = std::process::Command::new("curl");
-        cmd.args(["--fail", "--location", "--show-error", "--output"]);
-        cmd.arg(destination);
-        cmd.arg(url);
-        cmd
-    };
-    let output = cmd
-        .output()
-        .map_err(|err| SetupError::Download(err.to_string()))?;
-    if output.status.success() {
-        return Ok(());
+    let candidates = vec![
+        PathBuf::from("/usr/bin/curl"),
+        PathBuf::from("/usr/local/bin/curl"),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            SetupError::Download(
+                "trusted curl executable was not found; install curl in the system location".into(),
+            )
+        })
+}
+
+fn verify_file_sha256(
+    path: &Path,
+    expected: &str,
+) -> SetupResult<()> {
+    use std::io::Read;
+
+    use sha2::{Digest, Sha256};
+
+    let mut file =
+        std::fs::File::open(path).map_err(|error| SetupError::Download(error.to_string()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| SetupError::Download(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(SetupError::Download(stderr.trim().to_string()))
+    let actual = format!("{:x}", digest.finalize());
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(SetupError::Download(format!(
+            "model SHA-256 mismatch: expected {expected}, got {actual}"
+        )))
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -3433,15 +3763,16 @@ mod imp {
         SpeechRecognizer,
     };
     use windows::core::HSTRING;
-    use wisp_core::SourceLabel;
+    use wisp_core::{SourceLabel, TrackId, TranscriptEvent};
 
     use crate::error::{Result, SessionError};
     use crate::wasapi_capture::RecordingNotification;
     use crate::{
         CallbackEventClass, CallbackEventReceiver, CallbackEventSender, MergedSessionReceive,
-        OneShotSessionLifecycle, Permission, PermissionStatus, SessionConfig, SessionOptions,
-        TranscriptionPolicy, WasapiRecording, WindowsPlatformStart, WindowsPlatformStartError,
-        WindowsRuntimeControlPublisher, WindowsRuntimeNotification, WindowsTranscriptionMode,
+        NemotronTranscriberFactory, OneShotSessionLifecycle, Permission, PermissionStatus,
+        RecognizerBackend, SessionConfig, SessionOptions, TranscriptionPolicy, WasapiRecording,
+        WindowsPlatformStart, WindowsPlatformStartError, WindowsRuntimeControlPublisher,
+        WindowsRuntimeNotification, WindowsTranscriptionMode,
         callback_event_channel_with_final_gap, recv_callback_session_channels_with_control,
         select_windows_transcription_mode, start_windows_platform,
         try_recv_callback_session_channels_with_control,
@@ -3485,6 +3816,25 @@ mod imp {
     pub enum Event {
         Result(SessionResult),
         Log(String),
+    }
+
+    fn transcript_compatibility_event(event: &TranscriptEvent) -> Event {
+        let is_final = event.is_final();
+        let segment = event.segment();
+        Event::Result(SessionResult {
+            source: if segment.track_id == TrackId::MICROPHONE {
+                SourceLabel::Mic
+            } else {
+                SourceLabel::System
+            },
+            segment_id: segment.segment_id.get(),
+            is_final,
+            text: segment.text.clone(),
+            start_seconds: segment.start_seconds,
+            end_seconds: segment.end_seconds,
+            confidence_mean: segment.confidence_mean,
+            confidence_min: segment.confidence_min,
+        })
     }
 
     fn final_gap_event(dropped_finals: u64) -> Event {
@@ -3819,13 +4169,17 @@ mod imp {
             recording: Arc<WasapiRecording>,
             notice: String,
         },
+        LocalModel {
+            recording: Arc<WasapiRecording>,
+            transcripts: crossbeam_channel::Receiver<wisp_core::TranscriptEvent>,
+        },
     }
 
     /// Windows capture and transcription session.
     ///
     /// Both paths record WASAPI mic + loopback streams as Ogg/Opus. The
     /// platform path additionally uses Windows' online microphone dictation;
-    /// the local-model path is ready for offline transcription to be wired.
+    /// the local-model path runs offline Nemotron over both recorded tracks.
     pub struct Session {
         output_dir: std::path::PathBuf,
         config: SessionConfig,
@@ -3834,6 +4188,7 @@ mod imp {
         sender: CallbackEventSender<Event, EventKey>,
         speech: Option<Arc<WindowsSpeechSession>>,
         recording: Option<Arc<WasapiRecording>>,
+        transcript_publisher: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
         started_at: Option<Instant>,
         lifecycle: Arc<OneShotSessionLifecycle>,
         runtime_control_receiver: crossbeam_channel::Receiver<WindowsRuntimeNotification>,
@@ -3894,6 +4249,7 @@ mod imp {
                 sender,
                 speech: None,
                 recording: None,
+                transcript_publisher: std::sync::Mutex::new(None),
                 started_at: None,
                 lifecycle: Arc::new(OneShotSessionLifecycle::new()),
                 runtime_control_receiver,
@@ -3929,6 +4285,7 @@ mod imp {
             .map_err(SessionError::Start)
             .and_then(|mode| match mode {
                 WindowsTranscriptionMode::PlatformOnline => self.prepare_windows_speech(),
+                WindowsTranscriptionMode::LocalModel => self.prepare_local_model(),
                 WindowsTranscriptionMode::RecordOnly { reason } => {
                     self.prepare_record_only(&reason)
                 },
@@ -3992,14 +4349,37 @@ mod imp {
                 || self.cleanup.request_all(),
                 |generation| self.cleanup.wait_for_all(generation),
             );
-            let error = (claimed || started_retry)
+            let cleanup_error = (claimed || started_retry)
                 .then(|| report.and_then(|report| report.error))
                 .flatten()
                 .map(SessionError::Start);
+            // The recording worker owns the final transcript sender. Once its
+            // cleanup has completed the relay can drain every final and exit.
+            let relay_error = self.join_transcript_publisher();
+            let error = match (cleanup_error, relay_error) {
+                (Some(cleanup), Some(relay)) => Some(SessionError::Start(format!(
+                    "{cleanup}; transcript relay cleanup also failed: {relay}"
+                ))),
+                (Some(error), None) | (None, Some(error)) => Some(error),
+                (None, None) => None,
+            };
             if let Some(err) = &error {
                 enqueue_event(&self.sender, Event::Log(format!("[WIN] {err}")));
             }
             error
+        }
+
+        fn join_transcript_publisher(&self) -> Option<SessionError> {
+            let publisher = self
+                .transcript_publisher
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            publisher.and_then(|publisher| {
+                publisher.join().err().map(|_| {
+                    SessionError::Start("Nemotron transcript relay thread panicked".into())
+                })
+            })
         }
 
         /// Take a terminal capture/writer/finalization failure, if one has
@@ -4152,6 +4532,28 @@ mod imp {
             })
         }
 
+        fn prepare_local_model(&self) -> Result<PendingWindowsStart> {
+            let path = self.config.local_model_path.clone().ok_or_else(|| {
+                SessionError::Start("a local recognizer was selected without a model path".into())
+            })?;
+            let backend = match self.config.recognizer {
+                RecognizerBackend::Nemotron => {
+                    NemotronTranscriberFactory::from_artifact(path, &self.config.locale)
+                },
+                RecognizerBackend::Platform => {
+                    return Err(SessionError::Start(
+                        "platform recognizer routed to local model startup".into(),
+                    ));
+                },
+            };
+            let (recording, transcripts) =
+                WasapiRecording::start_with_transcriber(&self.output_dir, backend)?;
+            Ok(PendingWindowsStart::LocalModel {
+                recording: Arc::new(recording),
+                transcripts,
+            })
+        }
+
         fn stage_cleanup_ownership(
             &self,
             pending: &PendingWindowsStart,
@@ -4161,7 +4563,8 @@ mod imp {
                     self.cleanup
                         .install(Some(Arc::clone(speech)), Arc::clone(recording));
                 },
-                PendingWindowsStart::RecordOnly { recording, .. } => {
+                PendingWindowsStart::RecordOnly { recording, .. }
+                | PendingWindowsStart::LocalModel { recording, .. } => {
                     self.cleanup.install(None, Arc::clone(recording));
                 },
             }
@@ -4178,6 +4581,33 @@ mod imp {
                     "[WIN] Windows.Media.SpeechRecognition online dictation started for microphone input".into(),
                 ),
                 PendingWindowsStart::RecordOnly { recording, notice } => {
+                    (recording, None, notice)
+                },
+                PendingWindowsStart::LocalModel {
+                    recording,
+                    transcripts,
+                } => {
+                    let sender = self.sender.clone();
+                    let publisher = std::thread::Builder::new()
+                        .name("wisp-windows-transcripts".into())
+                        .spawn(move || {
+                            while let Ok(event) = transcripts.recv() {
+                                enqueue_event(&sender, transcript_compatibility_event(&event));
+                            }
+                        });
+                    let notice = match publisher {
+                        Ok(publisher) => {
+                            *self
+                                .transcript_publisher
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(publisher);
+                            "[WIN] Nemotron local transcription started".into()
+                        },
+                        Err(error) => {
+                            format!("[WIN] Nemotron transcript publisher failed to start: {error}")
+                        },
+                    };
                     (recording, None, notice)
                 },
             };
@@ -4458,10 +4888,13 @@ mod imp {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use wisp_core::SourceLabel;
+    use wisp_core::{SourceLabel, TrackId, TranscriptEvent};
 
     use crate::error::{Result, SessionError};
-    use crate::{Permission, PermissionStatus, PipewireRecording, SessionConfig, SessionOptions};
+    use crate::{
+        NemotronTranscriberFactory, Permission, PermissionStatus, PipewireRecording,
+        RecognizerBackend, SessionConfig, SessionOptions,
+    };
 
     /// Version label for the Linux `PipeWire` recording backend.
     #[must_use]
@@ -4482,7 +4915,7 @@ mod imp {
         PermissionStatus::Granted
     }
 
-    /// Linux transcription is not implemented in this recording milestone.
+    /// Transcript result emitted by the Linux Nemotron adapter.
     #[derive(Debug, Clone, PartialEq)]
     pub struct SessionResult {
         pub source: SourceLabel,
@@ -4495,25 +4928,26 @@ mod imp {
         pub confidence_min: Option<f64>,
     }
 
-    /// Linux sessions currently emit recording lifecycle and warning logs.
+    /// Linux recording, transcript, and warning events.
     #[derive(Debug, Clone, PartialEq)]
     pub enum Event {
         Result(SessionResult),
         Log(String),
     }
 
-    /// Record-only Linux session backed by `PipeWire` and Ogg/Opus.
+    /// Linux `PipeWire` recording session with optional local Nemotron.
     pub struct Session {
         output_dir: std::path::PathBuf,
         options: SessionOptions,
         recording: Option<Arc<PipewireRecording>>,
         pending: crossbeam_channel::Receiver<Event>,
         publisher: crossbeam_channel::Sender<Event>,
+        transcripts: Option<crossbeam_channel::Receiver<TranscriptEvent>>,
         started: bool,
     }
 
     impl Session {
-        /// Construct a record-only Linux session.
+        /// Construct a Linux session using the platform/default policy.
         ///
         /// # Errors
         /// Returns [`SessionError::InvalidLocale`] for a locale containing NUL
@@ -4528,8 +4962,8 @@ mod imp {
 
         /// Construct a session with an explicit recognizer configuration.
         ///
-        /// Linux still records only; the recognizer selection is retained for
-        /// future local-transcriber integration.
+        /// `Nemotron` connects `PipeWire` PCM to local transcription;
+        /// `Platform` uses record-only fallback when policy permits it.
         ///
         /// # Errors
         /// Returns the same construction errors as [`Self::new`].
@@ -4560,31 +4994,56 @@ mod imp {
                 recording: None,
                 pending,
                 publisher,
+                transcripts: None,
                 started: false,
             })
         }
 
         /// Start `PipeWire` capture and Ogg/Opus recording.
         ///
-        /// Linux transcription remains unavailable. Startup succeeds in
-        /// record-only mode only when the configured policy permits it.
-        ///
         /// # Errors
         /// Returns [`SessionError::Start`] for repeated starts, a policy that
-        /// forbids record-only fallback, or `PipeWire`/recording setup failure.
+        /// forbids record-only fallback, lacks a selected model, or encounters
+        /// a `PipeWire`/recording/transcriber setup failure.
         pub fn start(&mut self) -> Result<()> {
             if self.started {
                 return Err(SessionError::Start(
                     "Linux session has already been started and cannot be restarted".into(),
                 ));
             }
-            if !self.options.transcription_policy().allow_record_only {
-                return Err(SessionError::Start(
-                    "Linux transcription is unavailable and session policy forbids record-only fallback"
-                        .into(),
-                ));
-            }
-            let recording = Arc::new(PipewireRecording::start(&self.output_dir)?);
+            let (recording, transcripts) = match self.options.config().recognizer {
+                RecognizerBackend::Nemotron => {
+                    let path = self
+                        .options
+                        .config()
+                        .local_model_path
+                        .clone()
+                        .ok_or_else(|| {
+                            SessionError::Start(
+                                "Nemotron was selected without a local model bundle".into(),
+                            )
+                        })?;
+                    let backend = NemotronTranscriberFactory::from_artifact(
+                        path,
+                        &self.options.config().locale,
+                    );
+                    let (recording, transcripts) =
+                        PipewireRecording::start_with_transcriber(&self.output_dir, backend)?;
+                    (recording, Some(transcripts))
+                },
+                RecognizerBackend::Platform
+                    if self.options.transcription_policy().allow_record_only =>
+                {
+                    (PipewireRecording::start(&self.output_dir)?, None)
+                },
+                RecognizerBackend::Platform => {
+                    return Err(SessionError::Start(
+                        "Linux has no platform recognizer and record-only fallback is disabled"
+                            .into(),
+                    ));
+                },
+            };
+            let recording = Arc::new(recording);
             let mic_path = recording.mic_path().display();
             let system_path = recording.system_path().display();
             let _ = self.publisher.try_send(Event::Log(format!(
@@ -4593,10 +5052,14 @@ mod imp {
             let _ = self.publisher.try_send(Event::Log(format!(
                 "[LINUX] recording PipeWire sink monitor to {system_path}"
             )));
-            let _ = self.publisher.try_send(Event::Log(
-                "[LINUX] transcription is unavailable; continuing in record-only mode".into(),
-            ));
+            if transcripts.is_none() {
+                let _ = self.publisher.try_send(Event::Log(
+                    "[LINUX] platform transcription is unavailable; continuing in record-only mode"
+                        .into(),
+                ));
+            }
             self.recording = Some(recording);
+            self.transcripts = transcripts;
             self.started = true;
             Ok(())
         }
@@ -4629,6 +5092,11 @@ mod imp {
 
         #[must_use]
         pub fn try_recv(&self) -> Option<Event> {
+            if let Some(transcripts) = &self.transcripts
+                && let Ok(event) = transcripts.try_recv()
+            {
+                return Some(transcript_event(&event));
+            }
             if let Ok(event) = self.pending.try_recv() {
                 return Some(event);
             }
@@ -4696,6 +5164,25 @@ mod imp {
         }
     }
 
+    fn transcript_event(event: &TranscriptEvent) -> Event {
+        let is_final = event.is_final();
+        let segment = event.segment();
+        Event::Result(SessionResult {
+            source: if segment.track_id == TrackId::MICROPHONE {
+                SourceLabel::Mic
+            } else {
+                SourceLabel::System
+            },
+            segment_id: segment.segment_id.get(),
+            is_final,
+            text: segment.text.clone(),
+            start_seconds: segment.start_seconds,
+            end_seconds: segment.end_seconds,
+            confidence_mean: segment.confidence_mean,
+            confidence_min: segment.confidence_min,
+        })
+    }
+
     impl Drop for Session {
         fn drop(&mut self) {
             self.stop();
@@ -4715,8 +5202,8 @@ mod imp {
         fn construction_and_record_only_policy_checks_do_not_touch_hardware() {
             let directory = tempfile::tempdir().unwrap();
             let policy = TranscriptionPolicy {
-                privacy: PrivacyRequirement::OfflineRequired,
-                preferred: TranscriberClass::LocalModel,
+                privacy: PrivacyRequirement::OnlineAllowed,
+                preferred: TranscriberClass::Platform,
                 allow_backend_fallback: false,
                 allow_record_only: false,
             };
@@ -4725,7 +5212,11 @@ mod imp {
 
             assert!(!session.has_started_capture());
             let error = session.start().unwrap_err();
-            assert!(error.to_string().contains("forbids record-only fallback"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("Linux has no platform recognizer")
+            );
             assert!(!session.has_started_capture());
         }
 
@@ -5573,7 +6064,7 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn offline_windows_policy_never_selects_online_platform() {
+    fn offline_windows_policy_falls_back_to_local_model() {
         let policy = TranscriptionPolicy {
             privacy: PrivacyRequirement::OfflineRequired,
             preferred: TranscriberClass::Platform,
@@ -5583,7 +6074,7 @@ mod compatibility_tests {
 
         assert!(matches!(
             select_windows_transcription_mode(RecognizerBackend::Platform, policy).unwrap(),
-            WindowsTranscriptionMode::RecordOnly { .. }
+            WindowsTranscriptionMode::LocalModel
         ));
     }
 
@@ -5600,9 +6091,9 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn configured_local_model_is_record_only_until_adapter_is_connected() {
+    fn configured_local_model_selects_connected_adapter() {
         let options: super::SessionOptions =
-            SessionConfig::local_model("en-US", "/models/ggml-base.bin").into();
+            SessionConfig::nemotron("en-US", "/models/nemotron").into();
 
         assert!(matches!(
             select_windows_transcription_mode(
@@ -5610,7 +6101,7 @@ mod compatibility_tests {
                 options.transcription_policy(),
             )
             .unwrap(),
-            WindowsTranscriptionMode::RecordOnly { .. }
+            WindowsTranscriptionMode::LocalModel
         ));
     }
 
@@ -5632,26 +6123,28 @@ mod compatibility_tests {
             allow_backend_fallback: true,
             ..TranscriptionPolicy::platform_default()
         };
-        assert!(matches!(
+        assert_eq!(
             select_windows_transcription_after_failure(record_only_policy, &failed).unwrap(),
-            WindowsTranscriptionMode::RecordOnly { .. }
-        ));
+            WindowsTranscriptionMode::LocalModel
+        );
         assert!(matches!(
             windows_runtime_failure_action(record_only_policy),
-            WindowsRuntimeFailureAction::ContinueRecording { .. }
+            WindowsRuntimeFailureAction::FailStart { .. }
         ));
         assert!(matches!(
             windows_runtime_completion_notification(record_only_policy, "NetworkFailure"),
-            WindowsRuntimeNotification::ContinueRecording(message)
+            WindowsRuntimeNotification::Fatal(message)
                 if message.contains("NetworkFailure")
-                    && message.contains("continuing with local WASAPI recording")
         ));
         let fail_policy = TranscriptionPolicy {
             allow_backend_fallback: true,
             allow_record_only: false,
             ..TranscriptionPolicy::platform_default()
         };
-        assert!(select_windows_transcription_after_failure(fail_policy, &failed).is_err());
+        assert_eq!(
+            select_windows_transcription_after_failure(fail_policy, &failed).unwrap(),
+            WindowsTranscriptionMode::LocalModel
+        );
         assert!(matches!(
             windows_runtime_failure_action(fail_policy),
             WindowsRuntimeFailureAction::FailStart { .. }
@@ -7351,7 +7844,7 @@ mod compatibility_tests {
         let options = SessionConfig::platform_default("en-US")
             .with_transcription_policy(TranscriptionPolicy::offline_local_model());
 
-        assert_eq!(options.config().recognizer, RecognizerBackend::LocalModel);
+        assert_eq!(options.config().recognizer, RecognizerBackend::Nemotron);
     }
 
     #[test]

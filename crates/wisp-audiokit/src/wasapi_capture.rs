@@ -3,7 +3,7 @@
 //! Shared-mode WASAPI microphone and system-loopback capture.
 //!
 //! Both endpoints are converted by the Windows audio engine to the format
-//! expected by Whisper-family models: 16 kHz, mono, `f32` PCM. COM objects
+//! expected by local ASR models: 16 kHz, mono, `f32` PCM. COM objects
 //! stay on the worker thread that created them.
 
 use std::collections::VecDeque;
@@ -26,11 +26,15 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::core::PCWSTR;
-use wisp_core::{AudioFrame, AudioSamples, CaptureEvent, MonotonicTimestamp, SourceLabel, TrackId};
+use wisp_core::{
+    AudioFrame, AudioSamples, CaptureEvent, MonotonicTimestamp, SourceKind, SourceLabel,
+    TrackDescriptor, TrackId, TranscriptEvent,
+};
 
 use crate::backend::{
-    CaptureControlEvent, CaptureEventReceiver, RealtimeCaptureSender, StartupCoordinator,
-    WorkerFailureRoute, WorkerStartupPhase, publish_ready_and_wait, realtime_capture_channel,
+    CaptureControlEvent, CaptureEventReceiver, RealtimeCaptureSender, RecordingTranscriber,
+    StartupCoordinator, TranscriberBackend, WorkerFailureRoute, WorkerStartupPhase,
+    publish_ready_and_wait, realtime_capture_channel,
 };
 use crate::ogg_opus_recorder::OggOpusRecorder;
 use crate::{Result, SessionError};
@@ -753,6 +757,38 @@ impl WasapiRecording {
     /// Returns [`SessionError::Start`] if capture, file creation, or the
     /// recording worker cannot be started.
     pub fn start(output_dir: impl AsRef<Path>) -> Result<Self> {
+        Self::start_inner(output_dir, None)
+    }
+
+    /// Start recording and fan the ordered WASAPI PCM into a transcriber.
+    ///
+    /// # Errors
+    /// Returns a startup error when transcription or capture cannot start.
+    pub fn start_with_transcriber(
+        output_dir: impl AsRef<Path>,
+        backend: Box<dyn TranscriberBackend>,
+    ) -> Result<(Self, channel::Receiver<TranscriptEvent>)> {
+        let tracks = [
+            TrackDescriptor {
+                id: TrackId::MICROPHONE,
+                source: SourceKind::Microphone,
+                name: "Microphone".into(),
+            },
+            TrackDescriptor {
+                id: TrackId::SYSTEM,
+                source: SourceKind::SystemAudio,
+                name: "System audio".into(),
+            },
+        ];
+        let (transcriber, events) = RecordingTranscriber::start(backend, &tracks)
+            .map_err(|error| SessionError::Start(error.to_string()))?;
+        Self::start_inner(output_dir, Some(transcriber)).map(|recording| (recording, events))
+    }
+
+    fn start_inner(
+        output_dir: impl AsRef<Path>,
+        mut transcriber: Option<RecordingTranscriber>,
+    ) -> Result<Self> {
         let output_dir = output_dir.as_ref();
         std::fs::create_dir_all(output_dir).map_err(|err| {
             SessionError::Start(format!(
@@ -795,6 +831,7 @@ impl WasapiRecording {
                     &notifications,
                     &producer_stop,
                     &worker_abort,
+                    transcriber.as_mut(),
                 )
             })
             .map_err(|err| {
@@ -971,6 +1008,7 @@ fn run_recording_worker(
     notifications: &RecordingNotificationSenders,
     producer_stop: &AtomicBool,
     abort_requested: &AtomicBool,
+    transcriber: Option<&mut RecordingTranscriber>,
 ) -> io::Result<()> {
     let result = recording_loop(
         receiver,
@@ -978,6 +1016,7 @@ fn run_recording_worker(
         system,
         &notifications.warning,
         abort_requested,
+        transcriber,
     );
     if let Err(error) = &result {
         producer_stop.store(true, Ordering::SeqCst);
@@ -996,11 +1035,21 @@ fn recording_loop(
     mut system: OggOpusRecorder,
     notification_sender: &channel::Sender<RecordingNotification>,
     abort_requested: &AtomicBool,
+    mut transcriber: Option<&mut RecordingTranscriber>,
 ) -> io::Result<()> {
     let mut mic_timeline = TrackTimeline::default();
     let mut system_timeline = TrackTimeline::default();
     let processing_result = (|| {
         while let Some(event) = receiver.recv() {
+            let transcription_error = transcriber
+                .as_deref_mut()
+                .and_then(|active| active.push_capture(&event).err());
+            if let Some(error) = transcription_error {
+                let _ = notification_sender.try_send(RecordingNotification::Warning(format!(
+                    "Nemotron transcription stopped ({error}); audio recording continues"
+                )));
+                transcriber = None;
+            }
             match event {
                 CaptureEvent::Samples(frame) => {
                     if frame.format().sample_rate != WASAPI_SAMPLE_RATE
@@ -1106,7 +1155,15 @@ fn recording_loop(
         .map(|_| ())
     })();
     let finish_result = finish_both_recorders(&mut mic, &mut system);
-    aggregate_io_results(processing_result, finish_result)
+    let result = aggregate_io_results(processing_result, finish_result);
+    if result.is_ok()
+        && let Some(transcriber) = transcriber
+    {
+        transcriber
+            .finish()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+    }
+    result
 }
 
 fn finish_both_recorders(
@@ -2288,6 +2345,7 @@ mod tests {
                 &notifications,
                 &producer_stop,
                 &abort_requested,
+                None,
             )
             .is_err()
         );
@@ -2339,7 +2397,15 @@ mod tests {
         let (warning_sender, _warning_receiver) = crossbeam_channel::bounded(1);
         let abort_requested = AtomicBool::new(false);
 
-        recording_loop(&receiver, mic, system, &warning_sender, &abort_requested).unwrap();
+        recording_loop(
+            &receiver,
+            mic,
+            system,
+            &warning_sender,
+            &abort_requested,
+            None,
+        )
+        .unwrap();
         assert_eq!(ogg_audio_frames(&mic_path), 320);
         assert_eq!(ogg_audio_frames(&system_path), 320);
     }

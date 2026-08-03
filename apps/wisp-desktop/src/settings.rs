@@ -4,11 +4,56 @@ use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use wisp_audiokit::RecognizerBackend;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
     pub local_mcp: LocalMcpSettings,
+    #[serde(default)]
+    pub transcription: TranscriptionSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TranscriptionProvider {
+    Platform,
+    Nemotron,
+}
+
+impl Default for TranscriptionProvider {
+    fn default() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Platform
+        } else {
+            Self::Nemotron
+        }
+    }
+}
+
+impl From<TranscriptionProvider> for RecognizerBackend {
+    fn from(provider: TranscriptionProvider) -> Self {
+        match provider {
+            TranscriptionProvider::Platform => Self::Platform,
+            TranscriptionProvider::Nemotron => Self::Nemotron,
+        }
+    }
+}
+
+impl From<RecognizerBackend> for TranscriptionProvider {
+    fn from(provider: RecognizerBackend) -> Self {
+        match provider {
+            RecognizerBackend::Platform => Self::Platform,
+            RecognizerBackend::Nemotron => Self::Nemotron,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TranscriptionSettings {
+    #[serde(default)]
+    pub provider: TranscriptionProvider,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,13 +101,21 @@ fn settings_path(data_dir: &Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppSettings, LocalMcpSettings};
+    use super::{AppSettings, LocalMcpSettings, TranscriptionProvider, TranscriptionSettings};
 
     #[test]
     fn missing_fields_default() {
         let settings = serde_json::from_str::<AppSettings>("{}").expect("parse");
         assert!(!settings.local_mcp.enabled);
         assert_eq!(settings.local_mcp.addr, "127.0.0.1:8765");
+        assert_eq!(
+            settings.transcription.provider,
+            if cfg!(target_os = "macos") {
+                TranscriptionProvider::Platform
+            } else {
+                TranscriptionProvider::Nemotron
+            }
+        );
     }
 
     #[test]
@@ -72,10 +125,17 @@ mod tests {
                 enabled: true,
                 addr: "127.0.0.1:9001".into(),
             },
+            transcription: TranscriptionSettings {
+                provider: TranscriptionProvider::Nemotron,
+            },
         };
         let text = serde_json::to_string(&settings).expect("serialize");
         let parsed = serde_json::from_str::<AppSettings>(&text).expect("parse");
         assert!(parsed.local_mcp.enabled);
         assert_eq!(parsed.local_mcp.addr, "127.0.0.1:9001");
+        assert_eq!(
+            parsed.transcription.provider,
+            TranscriptionProvider::Nemotron
+        );
     }
 }

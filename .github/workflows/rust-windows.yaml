@@ -43,6 +43,7 @@ jobs:
           New-Item -ItemType Directory -Force dist/wisp-windows | Out-Null
           Copy-Item target/release/wisp-desktop.exe dist/wisp-windows/
           Copy-Item target/release/wisp-mcp.exe dist/wisp-windows/
+          Copy-Item target/release/*.dll dist/wisp-windows/
           Copy-Item README.md dist/wisp-windows/
 
       - name: Upload Windows artifact

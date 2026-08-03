@@ -31,7 +31,7 @@ use gpui::{
     App, AppContext, Application, AsyncApp, Bounds, Entity, Timer, TitlebarOptions, WindowBounds,
     WindowHandle, WindowOptions, px, size,
 };
-use wisp_audiokit::SessionError;
+use wisp_audiokit::{LocalModelId, SessionError};
 use wisp_core::SessionId;
 use wisp_storage::Storage;
 
@@ -80,6 +80,11 @@ fn main() {
         if ipc_server::env_enabled() {
             app_settings.local_mcp.enabled = true;
         }
+        // The serde default is OS-specific. Once a user has made an explicit
+        // choice, preserve it across launches instead of forcing the OS
+        // default again.
+        let configured_recognizer = app_settings.transcription.provider.clone().into();
+        let configured_model = LocalModelId::Nemotron;
         let local_mcp = LocalMcpBridge::new(
             app_settings.local_mcp.enabled,
             app_settings.local_mcp.addr.clone(),
@@ -87,6 +92,10 @@ fn main() {
         );
         let model = cx.new(|_| {
             let mut model = AppModel::new_with_data_dir_and_local_mcp(&data_dir, local_mcp);
+            model.setup.recognizer = configured_recognizer;
+            model.setup.local_model_id = configured_model;
+            model.setup.local_model =
+                wisp_audiokit::local_model_status_for(&data_dir, configured_model);
             session_updates::recover_pending_sessions(&mut model, &storage, &recordings_dir);
             model
         });
@@ -170,6 +179,7 @@ struct MainWindowDeps {
     recordings_dir: PathBuf,
 }
 
+#[allow(clippy::too_many_lines)]
 fn open_main_window(
     cx: &mut App,
     window_options: WindowOptions,
@@ -198,6 +208,7 @@ fn open_main_window(
             let storage_for_open_history = storage.clone();
             let data_for_toggle = data_dir.clone();
             let data_for_download = data_dir.clone();
+            let data_for_select = data_dir.clone();
             let recordings_for_toggle = recordings_dir.clone();
             let runner_for_toggle = runner.clone();
             let runner_for_mute = runner.clone();
@@ -241,7 +252,7 @@ fn open_main_window(
                     // toggle once the user flips it in System Settings.
                 }),
                 on_select_recognizer: Arc::new(move |recognizer, _window, cx| {
-                    setup::select_recognizer(recognizer, &model_for_select, cx);
+                    setup::select_recognizer(recognizer, &model_for_select, &data_for_select, cx);
                 }),
                 on_download_local_model: Arc::new(move |_window, cx| {
                     setup::download_model(
@@ -473,11 +484,10 @@ fn save_local_mcp_settings(
     cx: &App,
 ) {
     let local_mcp = model.read(cx).local_mcp.clone();
-    let app_settings = settings::AppSettings {
-        local_mcp: settings::LocalMcpSettings {
-            enabled: local_mcp.enabled,
-            addr: local_mcp.addr,
-        },
+    let mut app_settings = settings::load(data_dir);
+    app_settings.local_mcp = settings::LocalMcpSettings {
+        enabled: local_mcp.enabled,
+        addr: local_mcp.addr,
     };
     if let Err(err) = settings::save(data_dir, &app_settings) {
         eprintln!("wisp: failed to save settings: {err}");

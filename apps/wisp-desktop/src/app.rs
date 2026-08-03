@@ -14,9 +14,9 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use wisp_audiokit::{
-    Event, LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SessionConfig,
-    SessionError, SessionOptions, SessionResult, SourceLabel, TranscriptionPolicy,
-    local_model_spec, local_model_status,
+    Event, LocalModelId, LocalModelStatus, Permission, PermissionStatus, RecognizerBackend,
+    SessionConfig, SessionError, SessionOptions, SessionResult, SourceLabel, TranscriptionPolicy,
+    local_model_spec_for, local_model_status_for,
 };
 use wisp_core::{Session as StoredSession, SessionId};
 use wisp_lifecycle::{Phase, UpdateContext, ViewOwner, WorkerUpdate, can_replace_transcript};
@@ -146,12 +146,6 @@ impl Permissions {
         }
     }
 
-    /// True when both required permissions are granted; the UI can show
-    /// the normal Record screen.
-    pub fn all_granted(self) -> bool {
-        self.microphone.is_granted() && self.speech.is_granted()
-    }
-
     /// Whether the minimum permissions required by this session policy are
     /// available. macOS may record after Speech Recognition is explicitly
     /// denied/restricted only when policy permits record-only fallback.
@@ -165,12 +159,13 @@ impl Permissions {
         if self.speech.is_granted() {
             return true;
         }
-        cfg!(target_os = "macos")
-            && policy.allow_record_only
-            && matches!(
-                self.speech,
-                PermissionStatus::Denied | PermissionStatus::Restricted
-            )
+        policy.preferred == wisp_audiokit::TranscriberClass::LocalModel
+            || cfg!(target_os = "macos")
+                && policy.allow_record_only
+                && matches!(
+                    self.speech,
+                    PermissionStatus::Denied | PermissionStatus::Restricted
+                )
     }
 
     pub fn set_status(
@@ -188,14 +183,21 @@ impl Permissions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelDownloadState {
     Idle,
-    Downloading,
+    Downloading {
+        model: LocalModelId,
+        generation: u64,
+        downloaded: u64,
+        total: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Setup {
     pub recognizer: RecognizerBackend,
+    pub local_model_id: LocalModelId,
     pub local_model: LocalModelStatus,
     pub model_download: ModelDownloadState,
+    pub download_generation: u64,
     pub model_error: Option<String>,
 }
 
@@ -226,10 +228,17 @@ impl LocalMcpBridge {
 
 impl Setup {
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
+        let local_model_id = LocalModelId::Nemotron;
         Self {
-            recognizer: RecognizerBackend::Platform,
-            local_model: local_model_status(data_dir),
+            recognizer: if cfg!(target_os = "macos") {
+                RecognizerBackend::Platform
+            } else {
+                RecognizerBackend::Nemotron
+            },
+            local_model_id,
+            local_model: local_model_status_for(data_dir, local_model_id),
             model_download: ModelDownloadState::Idle,
+            download_generation: 0,
             model_error: None,
         }
     }
@@ -240,7 +249,7 @@ impl Setup {
         }
         match self.recognizer {
             RecognizerBackend::Platform => true,
-            RecognizerBackend::LocalModel => self.local_model.is_ready(),
+            RecognizerBackend::Nemotron => self.local_model.is_ready(),
         }
     }
 
@@ -251,8 +260,8 @@ impl Setup {
         let locale = locale.into();
         match self.recognizer {
             RecognizerBackend::Platform => SessionConfig::platform_default(locale),
-            RecognizerBackend::LocalModel => {
-                SessionConfig::local_model(locale, self.local_model.path().to_path_buf())
+            RecognizerBackend::Nemotron => {
+                SessionConfig::nemotron(locale, self.local_model.path().to_path_buf())
             },
         }
     }
@@ -261,12 +270,18 @@ impl Setup {
 impl Default for Setup {
     fn default() -> Self {
         Self {
-            recognizer: RecognizerBackend::Platform,
+            recognizer: if cfg!(target_os = "macos") {
+                RecognizerBackend::Platform
+            } else {
+                RecognizerBackend::Nemotron
+            },
+            local_model_id: LocalModelId::Nemotron,
             local_model: LocalModelStatus::Missing {
-                spec: local_model_spec(),
+                spec: local_model_spec_for(LocalModelId::Nemotron),
                 path: std::path::PathBuf::new(),
             },
             model_download: ModelDownloadState::Idle,
+            download_generation: 0,
             model_error: None,
         }
     }

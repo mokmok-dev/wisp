@@ -19,7 +19,8 @@ use wisp_core::{
 use crate::SessionResult;
 use crate::{
     Availability, BackendError, BackendErrorKind, BackendId, BackendResult, CaptureBackend,
-    CaptureCapabilities, CaptureProbe, Event, NativeSession, OrchestratorEvent, Permission,
+    CaptureCapabilities, CaptureProbe, Event, NEMOTRON_BACKEND_ID, NativeSession,
+    NemotronTranscriberBackend, NemotronTranscriberFactory, OrchestratorEvent, Permission,
     PermissionStatus, RecognitionPrivacy, SessionConfig, SessionError, SessionOptions,
     SessionOrchestrator, ShutdownMode, TranscriberBackend, TranscriberCapabilities,
     TranscriberClass, TranscriberFeature, TranscriberProbe, TranscriptionSelection,
@@ -777,7 +778,7 @@ impl TranscriberBackend for MacosTranscriberBackend {
 /// desktop's persistence, UI, exports, and MCP observers do not need a second
 /// migration to retain their current behavior.
 pub struct MacosSession {
-    orchestrator: SessionOrchestrator<MacosCaptureBackend, MacosTranscriberBackend>,
+    orchestrator: SessionOrchestrator<MacosCaptureBackend, Box<dyn TranscriberBackend>>,
     shared: Shared,
     startup_events: VecDeque<Event>,
     policy: crate::TranscriptionPolicy,
@@ -792,6 +793,11 @@ enum MacosLifecycle {
     Running,
     CleanupPending,
     Stopped,
+}
+
+enum MacosProviderKind {
+    SpeechAnalyzer,
+    Nemotron(std::path::PathBuf),
 }
 
 impl MacosSession {
@@ -829,38 +835,70 @@ impl MacosSession {
         let (config, policy) = options.into_parts();
         let microphone_permission = check_permission(Permission::Microphone);
         let speech_permission = check_permission(Permission::SpeechRecognition);
-        let transcription_enabled = match select_macos_transcriber(policy, speech_permission) {
-            TranscriptionSelection::Backend(backend)
-                if backend == BackendId::new(TRANSCRIBER_BACKEND_ID) =>
-            {
-                true
+        let provider = match config.recognizer {
+            crate::RecognizerBackend::Platform => {
+                match select_macos_transcriber(policy, speech_permission) {
+                    TranscriptionSelection::Backend(backend)
+                        if backend == BackendId::new(TRANSCRIBER_BACKEND_ID) =>
+                    {
+                        Some(MacosProviderKind::SpeechAnalyzer)
+                    },
+                    TranscriptionSelection::RecordOnly { .. } => None,
+                    TranscriptionSelection::Unavailable { reason } => {
+                        return Err(SessionError::Start(reason));
+                    },
+                    TranscriptionSelection::Backend(backend) => {
+                        return Err(SessionError::Start(format!(
+                            "unsupported macOS transcription backend selected: {backend}"
+                        )));
+                    },
+                }
             },
-            TranscriptionSelection::RecordOnly { .. } => false,
-            TranscriptionSelection::Unavailable { reason } => {
-                return Err(SessionError::Start(reason));
-            },
-            TranscriptionSelection::Backend(backend) => {
-                return Err(SessionError::Start(format!(
-                    "unsupported macOS transcription backend selected: {backend}"
-                )));
+            crate::RecognizerBackend::Nemotron => {
+                let Some(path) = config.local_model_path.clone() else {
+                    return Err(SessionError::Start(
+                        "Nemotron was selected without a local model bundle".into(),
+                    ));
+                };
+                let probe = NemotronTranscriberBackend::new(&path, &config.locale).probe();
+                match select_transcriber(policy, &[probe]) {
+                    TranscriptionSelection::Backend(backend)
+                        if backend == BackendId::new(NEMOTRON_BACKEND_ID) =>
+                    {
+                        Some(MacosProviderKind::Nemotron(path))
+                    },
+                    TranscriptionSelection::RecordOnly { .. } => None,
+                    TranscriptionSelection::Unavailable { reason } => {
+                        return Err(SessionError::Start(reason));
+                    },
+                    TranscriptionSelection::Backend(backend) => {
+                        return Err(SessionError::Start(format!(
+                            "unsupported local transcription backend selected: {backend}"
+                        )));
+                    },
+                }
             },
         };
+        let speech_enabled_in_bridge = matches!(provider, Some(MacosProviderKind::SpeechAnalyzer));
+        let locale = config.locale.clone();
         let bridge = NativeSession::new_for_backend(
             output_dir,
             config,
-            transcription_enabled,
+            speech_enabled_in_bridge,
             true,
             policy.allow_record_only,
         )?;
-        Ok(Self::from_bridge(
+        Ok(Self::from_bridge_with_provider(
             Box::new(bridge),
             microphone_permission,
             speech_permission,
-            transcription_enabled,
+            provider,
+            &locale,
             policy,
         ))
     }
 
+    #[cfg(test)]
     fn from_bridge(
         bridge: Box<dyn SwiftSessionBridge>,
         microphone_permission: PermissionStatus,
@@ -868,21 +906,50 @@ impl MacosSession {
         transcription_enabled: bool,
         policy: crate::TranscriptionPolicy,
     ) -> Self {
+        let provider = transcription_enabled.then_some(MacosProviderKind::SpeechAnalyzer);
+        Self::from_bridge_with_provider(
+            bridge,
+            microphone_permission,
+            speech_permission,
+            provider,
+            "en-US",
+            policy,
+        )
+    }
+
+    fn from_bridge_with_provider(
+        bridge: Box<dyn SwiftSessionBridge>,
+        microphone_permission: PermissionStatus,
+        speech_permission: PermissionStatus,
+        provider: Option<MacosProviderKind>,
+        locale: &str,
+        policy: crate::TranscriptionPolicy,
+    ) -> Self {
+        let speech_enabled_in_bridge = matches!(provider, Some(MacosProviderKind::SpeechAnalyzer));
         let shared = make_shared_state(
             bridge,
             microphone_permission,
             speech_permission,
-            transcription_enabled,
+            speech_enabled_in_bridge,
         );
         let capture = MacosCaptureBackend::new(Arc::clone(&shared));
-        let transcriber =
-            transcription_enabled.then(|| MacosTranscriberBackend::new(Arc::clone(&shared)));
+        let record_only = provider.is_none();
+        let transcriber: Option<Box<dyn TranscriberBackend>> =
+            provider.map(|provider| match provider {
+                MacosProviderKind::SpeechAnalyzer => {
+                    Box::new(MacosTranscriberBackend::new(Arc::clone(&shared)))
+                        as Box<dyn TranscriberBackend>
+                },
+                MacosProviderKind::Nemotron(path) => {
+                    NemotronTranscriberFactory::from_artifact(path, locale)
+                },
+            });
         Self {
             orchestrator: SessionOrchestrator::new(capture, transcriber),
             shared,
             startup_events: VecDeque::new(),
             policy,
-            record_only: !transcription_enabled,
+            record_only,
             lifecycle: MacosLifecycle::Ready,
             runtime_failure: None,
         }
@@ -1105,7 +1172,7 @@ impl MacosSession {
                     }
                     return Some(output);
                 },
-                Ok(Some(OrchestratorEvent::Transcript(_))) => {
+                Ok(Some(OrchestratorEvent::Transcript(event))) => {
                     // The exact Swift callback is the compatibility facade's
                     // authoritative event. The correlated neutral transcript
                     // has already passed through the orchestrator and must not
@@ -1114,6 +1181,12 @@ impl MacosSession {
                         lock_shared(&self.shared).compatibility_events.pop_front()
                     {
                         return Some(compatibility);
+                    }
+                    if !matches!(
+                        lock_shared(&self.shared).bridge_transcription,
+                        BridgeTranscription::Enabled
+                    ) {
+                        return Some(transcript_event_to_compat(&event));
                     }
                 },
                 Ok(None) => {
@@ -1125,12 +1198,20 @@ impl MacosSession {
                 {
                     return None;
                 },
-                Err(error) if error.backend == BackendId::new(TRANSCRIBER_BACKEND_ID) => {
-                    let failed_backend = BackendId::new(TRANSCRIBER_BACKEND_ID);
+                Err(error)
+                    if error.backend == BackendId::new(TRANSCRIBER_BACKEND_ID)
+                        || error.backend == BackendId::new(NEMOTRON_BACKEND_ID) =>
+                {
+                    let failed_backend = error.backend.clone();
                     let speech_permission = { lock_shared(&self.shared).speech_permission };
+                    let candidates = if failed_backend == BackendId::new(NEMOTRON_BACKEND_ID) {
+                        Vec::new()
+                    } else {
+                        vec![macos_transcriber_probe(speech_permission)]
+                    };
                     let selection = crate::select_transcriber_after_failure(
                         self.policy,
-                        &[macos_transcriber_probe(speech_permission)],
+                        &candidates,
                         &failed_backend,
                     );
                     match selection {
@@ -1282,6 +1363,25 @@ fn capture_event_to_compat(event: CaptureEvent) -> Event {
         },
         _ => Event::Log("[AUDIO] unsupported capture event".into()),
     }
+}
+
+fn transcript_event_to_compat(event: &TranscriptEvent) -> Event {
+    let is_final = event.is_final();
+    let segment = event.segment();
+    let source = match segment.track_id {
+        TrackId::SYSTEM => SourceLabel::System,
+        _ => SourceLabel::Mic,
+    };
+    Event::Result(crate::SessionResult {
+        source,
+        segment_id: segment.segment_id.get(),
+        is_final,
+        text: segment.text.clone(),
+        start_seconds: segment.start_seconds,
+        end_seconds: segment.end_seconds,
+        confidence_mean: segment.confidence_mean,
+        confidence_min: segment.confidence_min,
+    })
 }
 
 #[cfg(test)]

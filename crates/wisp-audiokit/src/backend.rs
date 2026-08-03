@@ -4,7 +4,9 @@
 //! boundary between capture, recording, transcription, and the desktop shell.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -384,6 +386,135 @@ pub trait TranscriberBackend: Send {
     /// # Errors
     /// Returns an error when the native recognizer could not be disabled.
     fn abort(&mut self) -> BackendResult<()>;
+}
+
+/// Provider-neutral construction input for local, platform, or plugin
+/// transcribers. `model_artifact` may identify either one model file or a
+/// provider-owned bundle directory. Provider-specific runtimes may consume
+/// named options without changing capture or session orchestration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriberConfig {
+    pub backend_id: BackendId,
+    pub locale: String,
+    pub model_artifact: Option<PathBuf>,
+    pub options: BTreeMap<String, String>,
+}
+
+/// Registration boundary for built-in ONNX and plugin providers.
+pub trait TranscriberFactory: Send + Sync {
+    fn backend_id(&self) -> BackendId;
+
+    /// Construct an unstarted provider.
+    ///
+    /// # Errors
+    /// Returns an error when required provider configuration is absent.
+    fn create(
+        &self,
+        config: &TranscriberConfig,
+    ) -> BackendResult<Box<dyn TranscriberBackend>>;
+}
+
+impl<T> TranscriberBackend for Box<T>
+where
+    T: TranscriberBackend + ?Sized,
+{
+    fn probe(&self) -> TranscriberProbe {
+        (**self).probe()
+    }
+
+    fn start(
+        &mut self,
+        tracks: &[TrackDescriptor],
+    ) -> BackendResult<()> {
+        (**self).start(tracks)
+    }
+
+    fn push(
+        &mut self,
+        frame: &AudioFrame,
+    ) -> BackendResult<()> {
+        (**self).push(frame)
+    }
+
+    fn push_gap(
+        &mut self,
+        track_id: TrackId,
+        dropped_frames: u64,
+    ) -> BackendResult<()> {
+        (**self).push_gap(track_id, dropped_frames)
+    }
+
+    fn next_event(
+        &mut self,
+        timeout: Duration,
+    ) -> BackendResult<Option<TranscriptEvent>> {
+        (**self).next_event(timeout)
+    }
+
+    fn finish(&mut self) -> BackendResult<()> {
+        (**self).finish()
+    }
+
+    fn abort(&mut self) -> BackendResult<()> {
+        (**self).abort()
+    }
+}
+
+/// Fan-out adapter used by platform recorders that already own the capture
+/// consumer. It keeps recording and transcription on the same ordered PCM
+/// stream while publishing backend-neutral transcript events independently.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+pub(crate) struct RecordingTranscriber {
+    backend: Box<dyn TranscriberBackend>,
+    events: channel::Sender<TranscriptEvent>,
+}
+
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+impl RecordingTranscriber {
+    pub(crate) fn start(
+        mut backend: Box<dyn TranscriberBackend>,
+        tracks: &[TrackDescriptor],
+    ) -> BackendResult<(Self, channel::Receiver<TranscriptEvent>)> {
+        backend.start(tracks)?;
+        // Transcript finals are not replaceable telemetry. Keep this handoff
+        // lossless; capture-side backpressure is handled by each backend's
+        // bounded PCM queue instead.
+        let (events, receiver) = channel::unbounded();
+        Ok((Self { backend, events }, receiver))
+    }
+
+    pub(crate) fn push_capture(
+        &mut self,
+        event: &CaptureEvent,
+    ) -> BackendResult<()> {
+        match event {
+            CaptureEvent::Samples(frame) => self.backend.push(frame)?,
+            CaptureEvent::Overflow {
+                track_id,
+                dropped_frames,
+            } => self.backend.push_gap(*track_id, *dropped_frames)?,
+            _ => {},
+        }
+        self.drain()
+    }
+
+    pub(crate) fn finish(&mut self) -> BackendResult<()> {
+        self.backend.finish()?;
+        self.drain()
+    }
+
+    fn drain(&mut self) -> BackendResult<()> {
+        while let Some(event) = self.backend.next_event(Duration::ZERO)? {
+            self.events.send(event).map_err(|_| {
+                BackendError::new(
+                    BackendId::new("recording-transcriber"),
+                    BackendErrorKind::Internal,
+                    "transcript event receiver disconnected",
+                )
+            })?;
+        }
+        Ok(())
+    }
 }
 
 /// Unified event surfaced by [`SessionOrchestrator`].
@@ -1545,10 +1676,10 @@ mod tests {
         Availability, BackendError, BackendErrorKind, BackendId, BackendResult, CaptureBackend,
         CaptureCapabilities, CaptureControlEvent, CaptureEventReceiver, CaptureProbe,
         ControlEnqueue, FrameEnqueue, OrchestratorEvent, PrivacyRequirement, RecognitionPrivacy,
-        SessionOrchestrator, ShutdownMode, StartupCoordinator, TranscriberBackend,
-        TranscriberCapabilities, TranscriberClass, TranscriberFeature, TranscriberProbe,
-        TranscriptionPolicy, TranscriptionSelection, WorkerFailureRoute, WorkerStartupPhase,
-        publish_ready_and_wait, realtime_capture_channel, select_transcriber,
+        RecordingTranscriber, SessionOrchestrator, ShutdownMode, StartupCoordinator,
+        TranscriberBackend, TranscriberCapabilities, TranscriberClass, TranscriberFeature,
+        TranscriberProbe, TranscriptionPolicy, TranscriptionSelection, WorkerFailureRoute,
+        WorkerStartupPhase, publish_ready_and_wait, realtime_capture_channel, select_transcriber,
         select_transcriber_after_failure,
     };
 
@@ -2386,6 +2517,15 @@ mod tests {
             }
         }
 
+        fn push_gap(
+            &mut self,
+            _track_id: TrackId,
+            _dropped_frames: u64,
+        ) -> BackendResult<()> {
+            self.calls.lock().unwrap().push("transcriber-gap");
+            Ok(())
+        }
+
         fn next_event(
             &mut self,
             _timeout: Duration,
@@ -2412,6 +2552,90 @@ mod tests {
             self.calls.lock().unwrap().push("transcriber-abort");
             Ok(())
         }
+    }
+
+    #[test]
+    fn recording_transcriber_fans_out_pcm_gap_events_and_finish() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let segment = TranscriptSegment {
+            track_id: TrackId::MICROPHONE,
+            segment_id: TranscriptSegmentId::new(4),
+            text: "final".into(),
+            start_seconds: 0.0,
+            end_seconds: 1.0,
+            confidence_mean: None,
+            confidence_min: None,
+        };
+        let backend = FakeTranscriber {
+            events: VecDeque::new(),
+            finish_events: VecDeque::from([TranscriptEvent::Final(segment.clone())]),
+            push_errors_remaining: 0,
+            next_event_errors_remaining: 0,
+            calls: Arc::clone(&calls),
+        };
+        let tracks = [wisp_core::SourceLabel::Mic.track_descriptor()];
+        let (mut tap, events) = RecordingTranscriber::start(Box::new(backend), &tracks).unwrap();
+        let frame = AudioFrame::from_f32(
+            TrackId::MICROPHONE,
+            SourceKind::Microphone,
+            0,
+            MonotonicTimestamp::default(),
+            16_000,
+            1,
+            vec![0.0; 160],
+        )
+        .unwrap();
+        tap.push_capture(&CaptureEvent::Samples(frame)).unwrap();
+        tap.push_capture(&CaptureEvent::Overflow {
+            track_id: TrackId::MICROPHONE,
+            dropped_frames: 80,
+        })
+        .unwrap();
+        tap.finish().unwrap();
+        assert_eq!(events.recv().unwrap(), TranscriptEvent::Final(segment));
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [
+                "transcriber-start",
+                "transcriber-push",
+                "transcriber-gap",
+                "transcriber-finish"
+            ]
+        );
+    }
+
+    #[test]
+    fn recording_transcriber_preserves_final_bursts_larger_than_old_queue_capacity() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let events = (0..256)
+            .map(|id| {
+                TranscriptEvent::Final(TranscriptSegment {
+                    track_id: TrackId::MICROPHONE,
+                    segment_id: TranscriptSegmentId::new(id),
+                    text: format!("final {id}"),
+                    start_seconds: 0.0,
+                    end_seconds: 0.5,
+                    confidence_mean: None,
+                    confidence_min: None,
+                })
+            })
+            .collect();
+        let backend = FakeTranscriber {
+            events,
+            finish_events: VecDeque::new(),
+            push_errors_remaining: 0,
+            next_event_errors_remaining: 0,
+            calls,
+        };
+        let tracks = [wisp_core::SourceLabel::Mic.track_descriptor()];
+        let (mut tap, receiver) = RecordingTranscriber::start(Box::new(backend), &tracks).unwrap();
+        tap.push_capture(&CaptureEvent::Error {
+            track_id: None,
+            message: "test notification".into(),
+            recoverable: true,
+        })
+        .unwrap();
+        assert_eq!(receiver.try_iter().count(), 256);
     }
 
     fn fake_orchestrator(

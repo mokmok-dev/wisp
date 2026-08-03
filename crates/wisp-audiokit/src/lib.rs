@@ -2571,8 +2571,7 @@ fn trusted_curl_path() -> SetupResult<PathBuf> {
     #[cfg(target_os = "windows")]
     let candidates = {
         let windows = std::env::var_os("SystemRoot")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+            .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
         vec![windows.join("System32").join("curl.exe")]
     };
     #[cfg(not(target_os = "windows"))]
@@ -3788,7 +3787,7 @@ mod imp {
         Log(String),
     }
 
-    fn transcript_compatibility_event(event: TranscriptEvent) -> Event {
+    fn transcript_compatibility_event(event: &TranscriptEvent) -> Event {
         let is_final = event.is_final();
         let segment = event.segment();
         Event::Result(SessionResult {
@@ -4525,10 +4524,8 @@ mod imp {
                     self.cleanup
                         .install(Some(Arc::clone(speech)), Arc::clone(recording));
                 },
-                PendingWindowsStart::RecordOnly { recording, .. } => {
-                    self.cleanup.install(None, Arc::clone(recording));
-                },
-                PendingWindowsStart::LocalModel { recording, .. } => {
+                PendingWindowsStart::RecordOnly { recording, .. }
+                | PendingWindowsStart::LocalModel { recording, .. } => {
                     self.cleanup.install(None, Arc::clone(recording));
                 },
             }
@@ -4556,7 +4553,7 @@ mod imp {
                         .name("wisp-windows-transcripts".into())
                         .spawn(move || {
                             while let Ok(event) = transcripts.recv() {
-                                enqueue_event(&sender, transcript_compatibility_event(event));
+                                enqueue_event(&sender, transcript_compatibility_event(&event));
                             }
                         });
                     let notice = match publisher {

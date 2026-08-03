@@ -2,21 +2,24 @@
 
 **A privacy-first recording & transcription desktop app.**
 
-Wisp captures your microphone and system audio (the other side of a call) at the same time and can transcribe both locally with Whisper.
+Wisp captures your microphone and system audio (the other side of a call) at
+the same time and can transcribe both locally with Whisper or streaming
+Nemotron.
 
 > macOS 26 (Tahoe) is the primary supported target. Windows support is in
 > preview: WASAPI recording stays local, while the optional
 > `Windows.Media.SpeechRecognition` free-form dictation route uses Microsoft's
-> online service. Whisper provides the offline microphone + loopback route.
+> online service. Whisper and Nemotron provide offline microphone + loopback
+> routes.
 > Linux recording is in preview: PipeWire captures the default microphone and,
 > when exposed by the session manager, the default sink monitor into separate
-> Ogg/Opus files and fans the same PCM into Whisper.
+> Ogg/Opus files and fans the same PCM into the selected local recognizer.
 
 ---
 
 ## Features
 
-- **Offline-first** — recordings and Whisper transcripts stay on your device.
+- **Offline-first** — recordings and local-model transcripts stay on your device.
 - **On-device transcription on macOS** — Uses [`SpeechAnalyzer`](https://developer.apple.com/documentation/speech), the new API in Apple's Speech framework. Windows' optional platform dictation backend is online.
 - **System audio + microphone capture** — Uses macOS 14.2+ [Core Audio Process Taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps). Windows uses WASAPI shared-mode mic + system loopback capture. Linux uses PipeWire microphone + sink-monitor capture where the graph exposes a monitor. Windows and Linux store each source separately as Ogg/Opus.
 - **Built in Rust with a GPU-rendered UI** — The UI is built on [GPUI](https://www.gpui.rs/), the framework that powers the [Zed](https://zed.dev/) editor. Native-feeling responsiveness and smooth scrolling.
@@ -84,9 +87,10 @@ The Rust boundary separates OS capture from transcription:
   `Session` API remains available but is no longer the macOS desktop path.
 
 The same recorder-owned PCM consumer fans accepted frames and overflow gaps
-into `TranscriberBackend` on Windows and Linux, so recording and Whisper keep
-one ordered timeline. Additional ONNX-family adapters can use the same boxed
-backend boundary.
+into `TranscriberBackend` on every OS, so recording and transcription keep one
+ordered timeline. Whisper uses whisper.cpp; Nemotron uses sherpa-onnx with a
+cache-aware streaming transducer. A model artifact can be one file or a
+verified multi-file bundle without changing capture/session orchestration.
 
 ## Requirements
 
@@ -111,10 +115,12 @@ needed for capture and on-device transcription. The desktop currently requests
 the `ja-JP` transcription locale for each session.
 
 macOS defaults to Apple SpeechAnalyzer. Windows and Linux default to local
-Whisper: setup lets you choose Tiny or Base, downloads the pinned model with
-progress and integrity verification, and then transcribes the separate
-microphone and system-audio tracks offline. The provider/model controls remain
-available from the library after onboarding.
+Whisper. Setup can select Whisper Tiny/Base or Nemotron 3.5 ASR Streaming 0.6B
+INT8, downloads immutable pinned artifacts with progress and SHA-256 integrity
+verification, and transcribes the separate microphone and system-audio tracks
+offline. Nemotron's 560 ms cache-aware stream avoids reprocessing the complete
+preceding window. The provider/model controls remain available from the
+library after onboarding.
 
 To record and review a session:
 

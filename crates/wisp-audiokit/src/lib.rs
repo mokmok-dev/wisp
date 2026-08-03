@@ -9,6 +9,7 @@ mod backend;
 mod error;
 #[cfg(target_os = "macos")]
 mod macos_backend;
+mod nemotron_backend;
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
 mod ogg_opus_recorder;
 #[cfg(target_os = "linux")]
@@ -29,6 +30,9 @@ pub use backend::{
 pub use error::{Result, SessionError, SetupError, SetupResult};
 #[cfg(target_os = "macos")]
 pub use macos_backend::{MacosCaptureBackend, MacosSession, MacosTranscriberBackend};
+pub use nemotron_backend::{
+    NEMOTRON_BACKEND_ID, NemotronTranscriberBackend, NemotronTranscriberFactory,
+};
 #[cfg(target_os = "linux")]
 pub use pipewire_capture::{
     PIPEWIRE_CAPTURE_QUEUE_CAPACITY, PIPEWIRE_CHANNELS, PIPEWIRE_SAMPLE_RATE, PipewireCapture,
@@ -110,6 +114,8 @@ pub enum RecognizerBackend {
     /// for WASAPI mic + loopback PCM so both sides of the call can be
     /// transcribed by the same offline engine.
     LocalModel,
+    /// Use the cache-aware Nemotron streaming model through sherpa-onnx.
+    Nemotron,
 }
 
 impl RecognizerBackend {
@@ -118,6 +124,7 @@ impl RecognizerBackend {
         match self {
             Self::Platform => platform_recognizer_label(),
             Self::LocalModel => "Whisper (local)",
+            Self::Nemotron => "Nemotron (local, streaming)",
         }
     }
 }
@@ -148,6 +155,18 @@ impl SessionConfig {
         Self {
             locale: locale.into(),
             recognizer: RecognizerBackend::LocalModel,
+            local_model_path: Some(path.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn nemotron(
+        locale: impl Into<String>,
+        path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            locale: locale.into(),
+            recognizer: RecognizerBackend::Nemotron,
             local_model_path: Some(path.into()),
         }
     }
@@ -207,7 +226,9 @@ impl From<SessionConfig> for SessionOptions {
     fn from(config: SessionConfig) -> Self {
         let policy = match config.recognizer {
             RecognizerBackend::Platform => TranscriptionPolicy::platform_default(),
-            RecognizerBackend::LocalModel => TranscriptionPolicy::offline_local_model(),
+            RecognizerBackend::LocalModel | RecognizerBackend::Nemotron => {
+                TranscriptionPolicy::offline_local_model()
+            },
         };
         Self::new(config, policy)
     }
@@ -1430,7 +1451,7 @@ fn select_windows_transcription_mode(
 ) -> std::result::Result<WindowsTranscriptionMode, String> {
     let recognizer_class = match recognizer {
         RecognizerBackend::Platform => TranscriberClass::Platform,
-        RecognizerBackend::LocalModel => TranscriberClass::LocalModel,
+        RecognizerBackend::LocalModel | RecognizerBackend::Nemotron => TranscriberClass::LocalModel,
     };
     if recognizer_class != policy.preferred {
         return Err(format!(
@@ -2173,6 +2194,15 @@ fn windows_mode_from_selection(
 pub enum LocalModelId {
     Tiny,
     Base,
+    Nemotron,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalModelArtifactSpec {
+    pub filename: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2186,6 +2216,9 @@ pub struct LocalModelSpec {
     /// Exact expected artifact size.
     pub bytes: u64,
     pub approx_bytes: u64,
+    /// Empty for legacy single-file Whisper models. Non-empty model bundles
+    /// are installed below the directory named by `filename`.
+    pub artifacts: &'static [LocalModelArtifactSpec],
 }
 
 /// Current filesystem state for the local model.
@@ -2224,6 +2257,7 @@ const TINY_MODEL_SPEC: LocalModelSpec = LocalModelSpec {
     sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
     bytes: 77_691_713,
     approx_bytes: 75 * 1024 * 1024,
+    artifacts: &[],
 };
 
 const BASE_MODEL_SPEC: LocalModelSpec = LocalModelSpec {
@@ -2234,6 +2268,45 @@ const BASE_MODEL_SPEC: LocalModelSpec = LocalModelSpec {
     sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
     bytes: 147_951_465,
     approx_bytes: 142 * 1024 * 1024,
+    artifacts: &[],
+};
+
+const NEMOTRON_ARTIFACTS: &[LocalModelArtifactSpec] = &[
+    LocalModelArtifactSpec {
+        filename: "encoder.int8.onnx",
+        url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11/resolve/ab43d895f5985b1bbab8b6eac8607fcdc05343f3/encoder.int8.onnx",
+        sha256: "012e9321373af99021415e0b0eb3ec827b4be3153be6f30d9b448fe65e896e68",
+        bytes: 657_601_403,
+    },
+    LocalModelArtifactSpec {
+        filename: "decoder.int8.onnx",
+        url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11/resolve/ab43d895f5985b1bbab8b6eac8607fcdc05343f3/decoder.int8.onnx",
+        sha256: "19f9c98fc6d0a2c33a65a43b36fdb2e914c26c0aa9764be3aebc502a1e982fb0",
+        bytes: 14_978_075,
+    },
+    LocalModelArtifactSpec {
+        filename: "joiner.int8.onnx",
+        url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11/resolve/ab43d895f5985b1bbab8b6eac8607fcdc05343f3/joiner.int8.onnx",
+        sha256: "4101c7c679a0bc30483794b27a059e34e79232aa2068d78d51231a22c8b0d7ce",
+        bytes: 9_504_438,
+    },
+    LocalModelArtifactSpec {
+        filename: "tokens.txt",
+        url: "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11/resolve/ab43d895f5985b1bbab8b6eac8607fcdc05343f3/tokens.txt",
+        sha256: "729cc103155bafa785f9cd45746cd41cabe97eab7182fc04d594129587958f8a",
+        bytes: 131_440,
+    },
+];
+
+const NEMOTRON_MODEL_SPEC: LocalModelSpec = LocalModelSpec {
+    id: LocalModelId::Nemotron,
+    name: "Nemotron 3.5 ASR Streaming 0.6B (INT8)",
+    filename: "nemotron-3.5-asr-streaming-0.6b-560ms-int8",
+    url: "",
+    sha256: "",
+    bytes: 682_215_356,
+    approx_bytes: 651 * 1024 * 1024,
+    artifacts: NEMOTRON_ARTIFACTS,
 };
 
 #[must_use]
@@ -2242,8 +2315,8 @@ pub const fn local_model_spec() -> LocalModelSpec {
 }
 
 #[must_use]
-pub const fn local_model_specs() -> [LocalModelSpec; 2] {
-    [TINY_MODEL_SPEC, BASE_MODEL_SPEC]
+pub const fn local_model_specs() -> [LocalModelSpec; 3] {
+    [TINY_MODEL_SPEC, BASE_MODEL_SPEC, NEMOTRON_MODEL_SPEC]
 }
 
 #[must_use]
@@ -2251,6 +2324,7 @@ pub const fn local_model_spec_for(id: LocalModelId) -> LocalModelSpec {
     match id {
         LocalModelId::Tiny => TINY_MODEL_SPEC,
         LocalModelId::Base => BASE_MODEL_SPEC,
+        LocalModelId::Nemotron => NEMOTRON_MODEL_SPEC,
     }
 }
 
@@ -2282,19 +2356,30 @@ pub fn local_model_status_for(
 ) -> LocalModelStatus {
     let spec = local_model_spec_for(id);
     let path = local_model_path_for(data_dir, id);
-    match std::fs::metadata(&path) {
-        Ok(meta)
-            if meta.is_file()
+    let ready = if spec.artifacts.is_empty() {
+        std::fs::metadata(&path).is_ok_and(|meta| {
+            meta.is_file()
                 && meta.len() == spec.bytes
-                && verify_file_sha256(&path, spec.sha256).is_ok() =>
-        {
-            LocalModelStatus::Ready {
-                spec,
-                path,
-                bytes: meta.len(),
-            }
-        },
-        _ => LocalModelStatus::Missing { spec, path },
+                && verify_file_sha256(&path, spec.sha256).is_ok()
+        })
+    } else {
+        spec.artifacts.iter().all(|artifact| {
+            let artifact_path = path.join(artifact.filename);
+            std::fs::metadata(&artifact_path).is_ok_and(|meta| {
+                meta.is_file()
+                    && meta.len() == artifact.bytes
+                    && verify_file_sha256(&artifact_path, artifact.sha256).is_ok()
+            })
+        })
+    };
+    if ready {
+        LocalModelStatus::Ready {
+            spec,
+            path,
+            bytes: spec.bytes,
+        }
+    } else {
+        LocalModelStatus::Missing { spec, path }
     }
 }
 
@@ -2330,7 +2415,70 @@ pub fn download_local_model_for_with_progress(
     id: LocalModelId,
     progress: impl FnMut(u64, u64),
 ) -> SetupResult<LocalModelStatus> {
-    download_model_spec_with_progress(data_dir.as_ref(), local_model_spec_for(id), progress)
+    let spec = local_model_spec_for(id);
+    if !spec.artifacts.is_empty() {
+        return download_model_bundle_with_progress(data_dir.as_ref(), spec, progress);
+    }
+    download_model_spec_with_progress(data_dir.as_ref(), spec, progress)
+}
+
+fn download_model_bundle_with_progress(
+    data_dir: &Path,
+    spec: LocalModelSpec,
+    mut progress: impl FnMut(u64, u64),
+) -> SetupResult<LocalModelStatus> {
+    let bundle_path = data_dir.join("models").join(spec.filename);
+    std::fs::create_dir_all(&bundle_path).map_err(|error| SetupError::CreateModelDirectory {
+        path: bundle_path.clone(),
+        message: error.to_string(),
+    })?;
+    let mut installed = 0_u64;
+    for artifact in spec.artifacts {
+        let final_path = bundle_path.join(artifact.filename);
+        if std::fs::metadata(&final_path).is_ok_and(|metadata| {
+            metadata.is_file()
+                && metadata.len() == artifact.bytes
+                && verify_file_sha256(&final_path, artifact.sha256).is_ok()
+        }) {
+            installed = installed.saturating_add(artifact.bytes);
+            progress(installed, spec.bytes);
+            continue;
+        }
+        let mut part = tempfile::Builder::new()
+            .prefix(&format!(".{}.", artifact.filename))
+            .suffix(".part")
+            .tempfile_in(&bundle_path)
+            .map_err(|error| SetupError::Install(error.to_string()))?;
+        download_url_with_progress(
+            artifact.url,
+            part.as_file_mut(),
+            artifact.bytes,
+            |downloaded| progress(installed.saturating_add(downloaded), spec.bytes),
+        )?;
+        part.as_file()
+            .sync_all()
+            .map_err(|error| SetupError::Install(error.to_string()))?;
+        verify_file_sha256(part.path(), artifact.sha256)?;
+        if let Ok(metadata) = std::fs::symlink_metadata(&final_path) {
+            if !metadata.file_type().is_file() {
+                return Err(SetupError::Install(format!(
+                    "refusing to replace non-regular model path: {}",
+                    final_path.display()
+                )));
+            }
+            std::fs::remove_file(&final_path)
+                .map_err(|error| SetupError::Install(error.to_string()))?;
+        }
+        part.persist(&final_path)
+            .map_err(|error| SetupError::Install(error.error.to_string()))?;
+        installed = installed.saturating_add(artifact.bytes);
+        progress(installed, spec.bytes);
+    }
+    Ok(LocalModelStatus::Ready {
+        spec,
+        path: bundle_path,
+        bytes: spec.bytes,
+    })
 }
 
 fn download_model_spec_with_progress(
@@ -2404,7 +2552,8 @@ pub const fn platform_recognizer_label() -> &'static str {
 #[cfg(test)]
 mod local_model_tests {
     use super::{
-        LocalModelId, LocalModelSpec, LocalModelStatus, download_model_spec_with_progress,
+        LocalModelArtifactSpec, LocalModelId, LocalModelSpec, LocalModelStatus,
+        download_model_bundle_with_progress, download_model_spec_with_progress,
         local_model_path_for, local_model_specs, local_model_status_for, verify_file_sha256,
     };
 
@@ -2414,6 +2563,7 @@ mod local_model_tests {
         let specs = local_model_specs();
         assert_eq!(specs[0].id, LocalModelId::Tiny);
         assert_eq!(specs[1].id, LocalModelId::Base);
+        assert_eq!(specs[2].id, LocalModelId::Nemotron);
         assert_ne!(
             local_model_path_for(data_dir.path(), LocalModelId::Tiny),
             local_model_path_for(data_dir.path(), LocalModelId::Base)
@@ -2456,6 +2606,7 @@ mod local_model_tests {
             sha256: hash,
             bytes: bytes.len() as u64,
             approx_bytes: bytes.len() as u64,
+            artifacts: &[],
         };
         let mut progress = Vec::new();
         let status = download_model_spec_with_progress(data_dir.path(), spec, |done, total| {
@@ -2481,6 +2632,56 @@ mod local_model_tests {
                 .expect("retry valid download")
                 .is_ready()
         );
+    }
+
+    #[test]
+    fn bundle_download_verifies_and_installs_every_artifact() {
+        use sha2::{Digest, Sha256};
+
+        let source_dir = tempfile::tempdir().expect("source dir");
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let mut artifacts = Vec::new();
+        let mut total = 0_u64;
+        for (filename, contents) in [
+            ("encoder.onnx", b"encoder".as_slice()),
+            ("tokens.txt", b"tokens".as_slice()),
+        ] {
+            let source = source_dir.path().join(filename);
+            std::fs::write(&source, contents).expect("write source");
+            total += contents.len() as u64;
+            artifacts.push(LocalModelArtifactSpec {
+                filename,
+                url: Box::leak(format!("file://{}", source.display()).into_boxed_str()),
+                sha256: Box::leak(format!("{:x}", Sha256::digest(contents)).into_boxed_str()),
+                bytes: contents.len() as u64,
+            });
+        }
+        let artifacts = Box::leak(artifacts.into_boxed_slice());
+        let spec = LocalModelSpec {
+            id: LocalModelId::Nemotron,
+            name: "test bundle",
+            filename: "bundle",
+            url: "",
+            sha256: "",
+            bytes: total,
+            approx_bytes: total,
+            artifacts,
+        };
+        let mut progress = Vec::new();
+        let status = download_model_bundle_with_progress(data_dir.path(), spec, |done, total| {
+            progress.push((done, total));
+        })
+        .expect("install bundle");
+        assert!(status.is_ready());
+        assert_eq!(
+            std::fs::read(status.path().join("encoder.onnx")).unwrap(),
+            b"encoder"
+        );
+        assert_eq!(
+            std::fs::read(status.path().join("tokens.txt")).unwrap(),
+            b"tokens"
+        );
+        assert_eq!(progress.last(), Some(&(total, total)));
     }
 }
 
@@ -3739,12 +3940,13 @@ mod imp {
     use crate::wasapi_capture::RecordingNotification;
     use crate::{
         CallbackEventClass, CallbackEventReceiver, CallbackEventSender, MergedSessionReceive,
-        OneShotSessionLifecycle, Permission, PermissionStatus, SessionConfig, SessionOptions,
-        TranscriptionPolicy, WasapiRecording, WhisperTranscriberFactory, WindowsPlatformStart,
-        WindowsPlatformStartError, WindowsRuntimeControlPublisher, WindowsRuntimeNotification,
-        WindowsTranscriptionMode, callback_event_channel_with_final_gap,
-        recv_callback_session_channels_with_control, select_windows_transcription_mode,
-        start_windows_platform, try_recv_callback_session_channels_with_control,
+        NemotronTranscriberFactory, OneShotSessionLifecycle, Permission, PermissionStatus,
+        RecognizerBackend, SessionConfig, SessionOptions, TranscriptionPolicy, WasapiRecording,
+        WhisperTranscriberFactory, WindowsPlatformStart, WindowsPlatformStartError,
+        WindowsRuntimeControlPublisher, WindowsRuntimeNotification, WindowsTranscriptionMode,
+        callback_event_channel_with_final_gap, recv_callback_session_channels_with_control,
+        select_windows_transcription_mode, start_windows_platform,
+        try_recv_callback_session_channels_with_control,
     };
 
     /// `WispAudioKit` library version.
@@ -4504,9 +4706,21 @@ mod imp {
 
         fn prepare_local_model(&self) -> Result<PendingWindowsStart> {
             let path = self.config.local_model_path.clone().ok_or_else(|| {
-                SessionError::Start("Whisper was selected without a local model path".into())
+                SessionError::Start("a local recognizer was selected without a model path".into())
             })?;
-            let backend = WhisperTranscriberFactory::from_artifact(path, &self.config.locale);
+            let backend = match self.config.recognizer {
+                RecognizerBackend::LocalModel => {
+                    WhisperTranscriberFactory::from_artifact(path, &self.config.locale)
+                },
+                RecognizerBackend::Nemotron => {
+                    NemotronTranscriberFactory::from_artifact(path, &self.config.locale)
+                },
+                RecognizerBackend::Platform => {
+                    return Err(SessionError::Start(
+                        "platform recognizer routed to local model startup".into(),
+                    ));
+                },
+            };
             let (recording, transcripts) =
                 WasapiRecording::start_with_transcriber(&self.output_dir, backend)?;
             Ok(PendingWindowsStart::LocalModel {
@@ -4853,8 +5067,8 @@ mod imp {
 
     use crate::error::{Result, SessionError};
     use crate::{
-        Permission, PermissionStatus, PipewireRecording, RecognizerBackend, SessionConfig,
-        SessionOptions, WhisperTranscriberFactory,
+        NemotronTranscriberFactory, Permission, PermissionStatus, PipewireRecording,
+        RecognizerBackend, SessionConfig, SessionOptions, WhisperTranscriberFactory,
     };
 
     /// Version label for the Linux `PipeWire` recording backend.
@@ -4985,6 +5199,25 @@ mod imp {
                             )
                         })?;
                     let backend = WhisperTranscriberFactory::from_artifact(
+                        path,
+                        &self.options.config().locale,
+                    );
+                    let (recording, transcripts) =
+                        PipewireRecording::start_with_transcriber(&self.output_dir, backend)?;
+                    (recording, Some(transcripts))
+                },
+                RecognizerBackend::Nemotron => {
+                    let path = self
+                        .options
+                        .config()
+                        .local_model_path
+                        .clone()
+                        .ok_or_else(|| {
+                            SessionError::Start(
+                                "Nemotron was selected without a local model bundle".into(),
+                            )
+                        })?;
+                    let backend = NemotronTranscriberFactory::from_artifact(
                         path,
                         &self.options.config().locale,
                     );

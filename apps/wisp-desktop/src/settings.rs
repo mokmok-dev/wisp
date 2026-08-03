@@ -20,6 +20,7 @@ pub struct AppSettings {
 pub enum TranscriptionProvider {
     Platform,
     Whisper,
+    Nemotron,
     /// Stable provider ID retained for future ONNX or plugin backends.
     Other(String),
 }
@@ -39,6 +40,7 @@ impl From<TranscriptionProvider> for RecognizerBackend {
         match provider {
             TranscriptionProvider::Platform => Self::Platform,
             TranscriptionProvider::Whisper | TranscriptionProvider::Other(_) => Self::LocalModel,
+            TranscriptionProvider::Nemotron => Self::Nemotron,
         }
     }
 }
@@ -48,6 +50,7 @@ impl From<RecognizerBackend> for TranscriptionProvider {
         match provider {
             RecognizerBackend::Platform => Self::Platform,
             RecognizerBackend::LocalModel => Self::Whisper,
+            RecognizerBackend::Nemotron => Self::Nemotron,
         }
     }
 }
@@ -77,11 +80,14 @@ impl From<WhisperModel> for LocalModelId {
     }
 }
 
-impl From<LocalModelId> for WhisperModel {
-    fn from(model: LocalModelId) -> Self {
+impl TryFrom<LocalModelId> for WhisperModel {
+    type Error = ();
+
+    fn try_from(model: LocalModelId) -> Result<Self, Self::Error> {
         match model {
-            LocalModelId::Tiny => Self::Tiny,
-            LocalModelId::Base => Self::Base,
+            LocalModelId::Tiny => Ok(Self::Tiny),
+            LocalModelId::Base => Ok(Self::Base),
+            LocalModelId::Nemotron => Err(()),
         }
     }
 }

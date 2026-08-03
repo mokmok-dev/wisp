@@ -31,7 +31,7 @@ use gpui::{
     App, AppContext, Application, AsyncApp, Bounds, Entity, Timer, TitlebarOptions, WindowBounds,
     WindowHandle, WindowOptions, px, size,
 };
-use wisp_audiokit::SessionError;
+use wisp_audiokit::{LocalModelId, RecognizerBackend, SessionError};
 use wisp_core::SessionId;
 use wisp_storage::Storage;
 
@@ -84,7 +84,11 @@ fn main() {
         // choice, preserve it across launches instead of forcing the OS
         // default again.
         let configured_recognizer = app_settings.transcription.provider.clone().into();
-        let configured_model = app_settings.transcription.model.into();
+        let configured_model = if configured_recognizer == RecognizerBackend::Nemotron {
+            LocalModelId::Nemotron
+        } else {
+            app_settings.transcription.model.into()
+        };
         let local_mcp = LocalMcpBridge::new(
             app_settings.local_mcp.enabled,
             app_settings.local_mcp.addr.clone(),

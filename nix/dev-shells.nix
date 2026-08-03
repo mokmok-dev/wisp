@@ -36,6 +36,7 @@ in
   ci = pkgs.mkShell {
     packages = with pkgs; [
       rustToolchain
+      cmake
       nixfmt
       swiftformat
     ];
@@ -47,12 +48,12 @@ in
     packages =
       (with pkgs; [
         rustToolchain
+        cmake
         sccache
       ])
       ++ pkgs.lib.optionals pkgs.stdenv.isLinux (
         with pkgs;
         [
-          cmake
           pipewire
           pkg-config
           rustPlatform.bindgenHook

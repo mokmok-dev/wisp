@@ -249,7 +249,9 @@ impl Setup {
         }
         match self.recognizer {
             RecognizerBackend::Platform => true,
-            RecognizerBackend::LocalModel => self.local_model.is_ready(),
+            RecognizerBackend::LocalModel | RecognizerBackend::Nemotron => {
+                self.local_model.is_ready()
+            },
         }
     }
 
@@ -262,6 +264,9 @@ impl Setup {
             RecognizerBackend::Platform => SessionConfig::platform_default(locale),
             RecognizerBackend::LocalModel => {
                 SessionConfig::local_model(locale, self.local_model.path().to_path_buf())
+            },
+            RecognizerBackend::Nemotron => {
+                SessionConfig::nemotron(locale, self.local_model.path().to_path_buf())
             },
         }
     }

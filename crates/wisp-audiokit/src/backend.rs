@@ -389,8 +389,9 @@ pub trait TranscriberBackend: Send {
 }
 
 /// Provider-neutral construction input for local, platform, or plugin
-/// transcribers. Provider-specific runtimes may consume named options without
-/// changing capture or session orchestration.
+/// transcribers. `model_artifact` may identify either one model file or a
+/// provider-owned bundle directory. Provider-specific runtimes may consume
+/// named options without changing capture or session orchestration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriberConfig {
     pub backend_id: BackendId,
@@ -399,7 +400,7 @@ pub struct TranscriberConfig {
     pub options: BTreeMap<String, String>,
 }
 
-/// Registration boundary for built-in Whisper and future ONNX providers.
+/// Registration boundary for built-in Whisper, ONNX, and plugin providers.
 pub trait TranscriberFactory: Send + Sync {
     fn backend_id(&self) -> BackendId;
 

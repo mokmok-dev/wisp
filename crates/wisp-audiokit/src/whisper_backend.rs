@@ -12,7 +12,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel as channel;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -30,6 +30,11 @@ use crate::{
 pub const WHISPER_BACKEND_ID: &str = "whisper-cpp";
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 const CHUNK_SAMPLES: usize = 16_000 * 12;
+const VAD_WINDOW_SAMPLES: usize = 16_000 * 30 / 1_000;
+const VAD_MIN_CONSECUTIVE_WINDOWS: usize = 2;
+/// Roughly -46 dBFS. Consecutive windows avoid treating isolated keyboard
+/// clicks or capture impulses as speech.
+const VAD_RMS_THRESHOLD: f32 = 0.005;
 /// Whisper's default threshold for treating a decoded segment as silence.
 ///
 /// whisper.cpp exposes this probability on every segment but does not apply
@@ -173,6 +178,19 @@ impl WhisperTranscriberBackend {
             let _ = join.join();
         }
         result
+    }
+
+    fn flush_pending_gaps(&mut self) -> BackendResult<()> {
+        let Some(worker) = &self.worker else {
+            return Ok(());
+        };
+        for (track_id, samples) in std::mem::take(&mut self.dropped_samples) {
+            worker
+                .audio
+                .send(AudioCommand::Gap { track_id, samples })
+                .map_err(|_| Self::error(BackendErrorKind::Internal, "Whisper worker stopped"))?;
+        }
+        Ok(())
     }
 }
 
@@ -392,6 +410,7 @@ impl TranscriberBackend for WhisperTranscriberBackend {
     }
 
     fn finish(&mut self) -> BackendResult<()> {
+        self.flush_pending_gaps()?;
         self.stop_worker(ControlCommand::Finish)
     }
 
@@ -429,6 +448,15 @@ fn whisper_language(locale: &str) -> Option<String> {
 }
 
 fn frame_to_mono_samples(frame: &AudioFrame) -> BackendResult<Vec<f32>> {
+    pcm_to_mono_samples(frame).map_err(|format| {
+        WhisperTranscriberBackend::error(
+            BackendErrorKind::UnsupportedFormat,
+            format!("Whisper supports f32/i16 PCM, received {format:?}"),
+        )
+    })
+}
+
+pub(crate) fn pcm_to_mono_samples(frame: &AudioFrame) -> Result<Vec<f32>, wisp_core::SampleFormat> {
     let channels = frame.format().channels;
     let mono = match frame.samples() {
         AudioSamples::F32(samples) => downmix(samples.iter().copied(), channels),
@@ -436,15 +464,7 @@ fn frame_to_mono_samples(frame: &AudioFrame) -> BackendResult<Vec<f32>> {
             samples.iter().map(|sample| f32::from(*sample) / 32_768.0),
             channels,
         ),
-        _ => {
-            return Err(WhisperTranscriberBackend::error(
-                BackendErrorKind::UnsupportedFormat,
-                format!(
-                    "Whisper supports f32/i16 PCM, received {:?}",
-                    frame.format().sample_format
-                ),
-            ));
-        },
+        _ => return Err(frame.format().sample_format.clone()),
     };
     Ok(mono)
 }
@@ -465,15 +485,15 @@ fn downmix(
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
-struct StreamingResampler {
-    source_rate: u32,
+pub(crate) struct StreamingResampler {
+    pub(crate) source_rate: u32,
     target_rate: u32,
     position: f64,
     previous: Option<f32>,
 }
 
 impl StreamingResampler {
-    const fn new(
+    pub(crate) const fn new(
         source_rate: u32,
         target_rate: u32,
     ) -> Self {
@@ -490,7 +510,7 @@ impl StreamingResampler {
         clippy::cast_precision_loss,
         clippy::cast_sign_loss
     )]
-    fn push(
+    pub(crate) fn push(
         &mut self,
         samples: &[f32],
     ) -> Vec<f32> {
@@ -694,6 +714,11 @@ fn transcribe_chunk(
     events: &channel::Sender<WorkerEvent>,
     abort_requested: &Arc<AtomicBool>,
 ) -> Result<(), String> {
+    if !contains_probable_speech(samples) {
+        *offset_samples = offset_samples.saturating_add(samples.len());
+        return Ok(());
+    }
+
     let mut state = context
         .create_state()
         .map_err(|error| format!("could not create Whisper state: {error}"))?;
@@ -707,9 +732,17 @@ fn transcribe_chunk(
     let abort_callback: Box<dyn FnMut() -> bool> =
         Box::new(move || inference_abort.load(Ordering::Acquire));
     params.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(Some(abort_callback));
+    let started_at = Instant::now();
     state
         .full(params, samples)
         .map_err(|error| format!("Whisper inference failed: {error}"))?;
+    let elapsed = started_at.elapsed();
+    let audio_seconds = samples.len() as f64 / f64::from(WHISPER_SAMPLE_RATE);
+    let realtime_factor = elapsed.as_secs_f64() / audio_seconds;
+    eprintln!(
+        "[WHISPER] decoded {audio_seconds:.2}s in {:.2}s (RTF {realtime_factor:.3})",
+        elapsed.as_secs_f64()
+    );
     let offset_seconds = *offset_samples as f64 / f64::from(WHISPER_SAMPLE_RATE);
     for segment in state.as_iter() {
         if is_probable_no_speech(segment.no_speech_probability()) {
@@ -744,6 +777,27 @@ fn transcribe_chunk(
     Ok(())
 }
 
+#[allow(clippy::cast_precision_loss)]
+fn contains_probable_speech(samples: &[f32]) -> bool {
+    let mut consecutive = 0;
+    for window in samples.chunks(VAD_WINDOW_SAMPLES) {
+        if window.len() < VAD_WINDOW_SAMPLES / 2 {
+            continue;
+        }
+        let mean_square =
+            window.iter().map(|sample| sample * sample).sum::<f32>() / window.len() as f32;
+        if mean_square.sqrt() >= VAD_RMS_THRESHOLD {
+            consecutive += 1;
+            if consecutive >= VAD_MIN_CONSECUTIVE_WINDOWS {
+                return true;
+            }
+        } else {
+            consecutive = 0;
+        }
+    }
+    false
+}
+
 fn is_probable_no_speech(probability: f32) -> bool {
     probability.is_finite() && probability > NO_SPEECH_PROBABILITY_THRESHOLD
 }
@@ -763,9 +817,10 @@ mod tests {
     };
 
     use super::{
-        NO_SPEECH_PROBABILITY_THRESHOLD, StreamingResampler, WHISPER_BACKEND_ID,
-        WhisperTranscriberBackend, WhisperTranscriberFactory, frame_to_mono_samples,
-        is_probable_no_speech, model_file_ready, whisper_language,
+        NO_SPEECH_PROBABILITY_THRESHOLD, StreamingResampler, VAD_WINDOW_SAMPLES,
+        WHISPER_BACKEND_ID, WhisperTranscriberBackend, WhisperTranscriberFactory,
+        contains_probable_speech, frame_to_mono_samples, is_probable_no_speech, model_file_ready,
+        whisper_language,
     };
 
     #[test]
@@ -782,6 +837,22 @@ mod tests {
         assert!(!is_probable_no_speech(0.0));
         assert!(!is_probable_no_speech(f32::NAN));
         assert!(!is_probable_no_speech(f32::INFINITY));
+    }
+
+    #[test]
+    fn energy_vad_skips_silence_and_short_impulses() {
+        assert!(!contains_probable_speech(&vec![0.0; 16_000]));
+        let mut click = vec![0.0; 16_000];
+        click[500] = 1.0;
+        assert!(!contains_probable_speech(&click));
+    }
+
+    #[test]
+    fn energy_vad_accepts_sustained_quiet_speech() {
+        let samples = (0..VAD_WINDOW_SAMPLES * 3)
+            .map(|index| if index % 2 == 0 { 0.008 } else { -0.008 })
+            .collect::<Vec<_>>();
+        assert!(contains_probable_speech(&samples));
     }
 
     #[test]

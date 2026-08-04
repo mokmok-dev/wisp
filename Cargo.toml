@@ -63,7 +63,7 @@ name = "wisp"
 
 [workspace.package]
 edition = "2024"
-version = "0.0.16"
+version = "0.0.17"
 
 [patch.crates-io]
 # wasapi 0.23 does not distinguish WAIT_TIMEOUT from other non-signaled wait

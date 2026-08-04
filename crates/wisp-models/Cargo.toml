@@ -1,0 +1,39 @@
+[package]
+name = "wisp-models"
+edition.workspace = true
+version.workspace = true
+publish = false
+description = "Model lifecycle abstraction (list / acquire / evict / resolve) with an optional Microsoft Foundry Local backend."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Enables the Microsoft Foundry Local backend. Off by default so the standard
+# build stays hermetic and offline: the Foundry Local SDK pulls a large async
+# stack and expects the `foundry` CLI / service to be installed at runtime.
+foundry = ["dep:foundry-local-sdk", "dep:tokio"]
+
+[dependencies]
+thiserror = { workspace = true }
+
+# Optional Foundry Local integration. Only compiled when the `foundry` feature
+# is enabled; the default build never touches this dependency tree.
+#
+# Trust boundary (feature on only): foundry-local-sdk's build script downloads
+# the native "Foundry Local Core" engine and `dlopen`s it at runtime (honoring
+# env overrides such as FOUNDRY_NATIVE_OVERRIDE_DIR). This makes the feature-on
+# build non-hermetic and introduces a native-code trust boundary. The version
+# is pinned; deployments that enable `foundry` should vendor/verify the native
+# libraries and ensure the library search path is not derived from untrusted
+# input.
+foundry-local-sdk = { version = "1.2.3", optional = true }
+tokio = { version = "1", optional = true, default-features = false, features = [
+  "rt-multi-thread",
+  "net",
+  "time",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

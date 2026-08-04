@@ -6,6 +6,7 @@ members = [
   "crates/wisp-audiokit-sys",
   "crates/wisp-core",
   "crates/wisp-lifecycle",
+  "crates/wisp-models",
   "crates/wisp-storage",
 ]
 resolver = "3"

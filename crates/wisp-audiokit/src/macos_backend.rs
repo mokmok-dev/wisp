@@ -20,11 +20,11 @@ use crate::SessionResult;
 use crate::{
     Availability, BackendError, BackendErrorKind, BackendId, BackendResult, CaptureBackend,
     CaptureCapabilities, CaptureProbe, Event, NEMOTRON_BACKEND_ID, NativeSession,
-    NemotronTranscriberBackend, NemotronTranscriberFactory, OrchestratorEvent, Permission,
-    PermissionStatus, RecognitionPrivacy, SessionConfig, SessionError, SessionOptions,
-    SessionOrchestrator, ShutdownMode, TranscriberBackend, TranscriberCapabilities,
-    TranscriberClass, TranscriberFeature, TranscriberProbe, TranscriptionSelection,
-    UnavailableReason, check_permission, select_transcriber,
+    NemotronTranscriberBackend, OrchestratorEvent, Permission, PermissionStatus,
+    RecognitionPrivacy, SessionConfig, SessionError, SessionOptions, SessionOrchestrator,
+    ShutdownMode, TranscriberBackend, TranscriberCapabilities, TranscriberClass,
+    TranscriberFeature, TranscriberProbe, TranscriptionSelection, UnavailableReason,
+    check_permission, select_transcriber,
 };
 
 const CAPTURE_BACKEND_ID: &str = "macos-core-audio-process-tap";
@@ -941,7 +941,10 @@ impl MacosSession {
                         as Box<dyn TranscriberBackend>
                 },
                 MacosProviderKind::Nemotron(path) => {
-                    NemotronTranscriberFactory::from_artifact(path, locale)
+                    // Resolve the local artifact through the model lifecycle
+                    // abstraction; falls back to the direct factory when the
+                    // provider cannot resolve, preserving behavior.
+                    crate::nemotron_transcriber_via_filesystem_provider(path, locale)
                 },
             });
         Self {

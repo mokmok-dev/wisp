@@ -11,7 +11,7 @@ on:
       - ".github/workflows/rust.yaml"
       - "flake.lock"
       - "flake.nix"
-      - "nix/crane.nix"
+      - "nix/**"
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-rust
   cancel-in-progress: true

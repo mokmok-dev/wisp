@@ -25,12 +25,34 @@ let
     ln -s ${sherpaLinuxArchive} "$out/${sherpaLinuxArchiveName}"
   '';
 
+  # The desktop target needs Xcode 26 from the host and is built by the
+  # dedicated macOS workflow. These arguments match the portable Rust CI job.
+  portableArgs = {
+    inherit src;
+    cargoExtraArgs = "--locked --workspace --exclude wisp-desktop";
+    strictDeps = true;
+  }
+  // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+    SHERPA_ONNX_ARCHIVE_DIR = sherpaLinuxArchiveDir;
+    nativeBuildInputs = [
+      pkgs.pkg-config
+      pkgs.rustPlatform.bindgenHook
+    ];
+    buildInputs = [ pkgs.pipewire ];
+  };
+  portableArtifacts = crane.buildDepsOnly portableArgs;
+
   wispMcpArgs = {
     inherit src;
     cargoExtraArgs = "--locked -p wisp-mcp";
     strictDeps = true;
   };
-  wispMcpArtifacts = crane.buildDepsOnly wispMcpArgs;
+  # Linux checks already build every portable workspace dependency, including
+  # wisp-mcp's. Reusing that artifact derivation means the package, clippy and
+  # tests share one dependency build. On other hosts only wisp-mcp is checked,
+  # so retain its smaller package-specific dependency derivation.
+  wispMcpArtifacts =
+    if pkgs.stdenv.isLinux then portableArtifacts else crane.buildDepsOnly wispMcpArgs;
   wisp-mcp = crane.buildPackage (
     wispMcpArgs
     // {
@@ -52,23 +74,6 @@ let
       cargoArtifacts = wispWindowsArtifacts;
     }
   );
-
-  # The desktop target needs Xcode 26 from the host and is built by the
-  # dedicated macOS workflow. These checks match the portable Rust CI job.
-  portableArgs = {
-    inherit src;
-    cargoExtraArgs = "--locked --workspace --exclude wisp-desktop";
-    strictDeps = true;
-  }
-  // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
-    SHERPA_ONNX_ARCHIVE_DIR = sherpaLinuxArchiveDir;
-    nativeBuildInputs = [
-      pkgs.pkg-config
-      pkgs.rustPlatform.bindgenHook
-    ];
-    buildInputs = [ pkgs.pipewire ];
-  };
-  portableArtifacts = crane.buildDepsOnly portableArgs;
 in
 {
   packages = {
@@ -79,35 +84,33 @@ in
     inherit wisp-windows;
   };
 
-  checks = {
-    formatting = crane.cargoFmt {
-      inherit src;
+  # Formatting (rustfmt + nixfmt + swiftformat) is unified under treefmt-nix;
+  # see nix/parts/formatting.nix. Crane's cargoFmt is not duplicated here.
+  checks =
+    (
+      if isWindows then
+        {
+          inherit wisp-windows;
+        }
+      else
+        {
+          inherit wisp-mcp;
+        }
+    )
+    // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+      clippy = crane.cargoClippy (
+        portableArgs
+        // {
+          cargoArtifacts = portableArtifacts;
+          cargoClippyExtraArgs = "--all-targets -- -D warnings";
+        }
+      );
+      tests = crane.cargoTest (
+        portableArgs
+        // {
+          cargoArtifacts = portableArtifacts;
+          cargoTestExtraArgs = "--all-targets";
+        }
+      );
     };
-  }
-  // (
-    if isWindows then
-      {
-        inherit wisp-windows;
-      }
-    else
-      {
-        inherit wisp-mcp;
-      }
-  )
-  // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
-    clippy = crane.cargoClippy (
-      portableArgs
-      // {
-        cargoArtifacts = portableArtifacts;
-        cargoClippyExtraArgs = "--all-targets -- -D warnings";
-      }
-    );
-    tests = crane.cargoTest (
-      portableArgs
-      // {
-        cargoArtifacts = portableArtifacts;
-        cargoTestExtraArgs = "--all-targets";
-      }
-    );
-  };
 }

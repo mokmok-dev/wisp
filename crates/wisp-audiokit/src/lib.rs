@@ -7,6 +7,8 @@
 
 mod backend;
 mod error;
+#[cfg(feature = "foundry")]
+mod foundry_transcriber;
 #[cfg(target_os = "macos")]
 mod macos_backend;
 mod model_provider;
@@ -29,6 +31,10 @@ pub use backend::{
     select_transcriber, select_transcriber_after_failure,
 };
 pub use error::{Result, SessionError, SetupError, SetupResult};
+#[cfg(feature = "foundry")]
+pub use foundry_transcriber::{
+    FOUNDRY_TRANSCRIBER_BACKEND_ID, FoundryLiveTranscriberBackend, FoundryTranscriberFactory,
+};
 #[cfg(target_os = "macos")]
 pub use macos_backend::{MacosCaptureBackend, MacosSession, MacosTranscriberBackend};
 pub use model_provider::{
@@ -123,6 +129,9 @@ pub enum RecognizerBackend {
     Platform,
     /// Use the cache-aware Nemotron streaming model through sherpa-onnx.
     Nemotron,
+    /// Use a cached Foundry Local streaming ASR model.
+    #[cfg(feature = "foundry")]
+    FoundryLocal,
 }
 
 impl RecognizerBackend {
@@ -131,6 +140,8 @@ impl RecognizerBackend {
         match self {
             Self::Platform => platform_recognizer_label(),
             Self::Nemotron => "Nemotron (local, streaming)",
+            #[cfg(feature = "foundry")]
+            Self::FoundryLocal => "Foundry Local (streaming)",
         }
     }
 }
@@ -165,6 +176,16 @@ impl SessionConfig {
         }
     }
 
+    #[cfg(feature = "foundry")]
+    #[must_use]
+    pub fn foundry(locale: impl Into<String>) -> Self {
+        Self {
+            locale: locale.into(),
+            recognizer: RecognizerBackend::FoundryLocal,
+            local_model_path: None,
+        }
+    }
+
     #[must_use]
     pub const fn with_transcription_policy(
         mut self,
@@ -172,7 +193,13 @@ impl SessionConfig {
     ) -> SessionOptions {
         self.recognizer = match policy.preferred {
             TranscriberClass::Platform => RecognizerBackend::Platform,
-            TranscriberClass::LocalModel => RecognizerBackend::Nemotron,
+            TranscriberClass::LocalModel => match self.recognizer {
+                RecognizerBackend::Platform | RecognizerBackend::Nemotron => {
+                    RecognizerBackend::Nemotron
+                },
+                #[cfg(feature = "foundry")]
+                RecognizerBackend::FoundryLocal => RecognizerBackend::FoundryLocal,
+            },
         };
         SessionOptions::new(self, policy)
     }
@@ -221,6 +248,8 @@ impl From<SessionConfig> for SessionOptions {
         let policy = match config.recognizer {
             RecognizerBackend::Platform => TranscriptionPolicy::platform_default(),
             RecognizerBackend::Nemotron => TranscriptionPolicy::offline_local_model(),
+            #[cfg(feature = "foundry")]
+            RecognizerBackend::FoundryLocal => TranscriptionPolicy::offline_local_model(),
         };
         Self::new(config, policy)
     }
@@ -1444,6 +1473,8 @@ fn select_windows_transcription_mode(
     let recognizer_class = match recognizer {
         RecognizerBackend::Platform => TranscriberClass::Platform,
         RecognizerBackend::Nemotron => TranscriberClass::LocalModel,
+        #[cfg(feature = "foundry")]
+        RecognizerBackend::FoundryLocal => TranscriberClass::LocalModel,
     };
     if recognizer_class != policy.preferred {
         return Err(format!(
@@ -3779,6 +3810,8 @@ mod imp {
     use windows::core::HSTRING;
     use wisp_core::{SourceLabel, TrackId, TranscriptEvent};
 
+    #[cfg(feature = "foundry")]
+    use crate::FoundryLiveTranscriberBackend;
     use crate::error::{Result, SessionError};
     use crate::wasapi_capture::RecordingNotification;
     use crate::{
@@ -4546,15 +4579,50 @@ mod imp {
         }
 
         fn prepare_local_model(&self) -> Result<PendingWindowsStart> {
-            let path = self.config.local_model_path.clone().ok_or_else(|| {
-                SessionError::Start("a local recognizer was selected without a model path".into())
-            })?;
-            let backend = match self.config.recognizer {
+            let started = match self.config.recognizer {
                 RecognizerBackend::Nemotron => {
+                    let path = self.config.local_model_path.clone().ok_or_else(|| {
+                        SessionError::Start(
+                            "Nemotron was selected without a local model bundle".into(),
+                        )
+                    })?;
                     // Resolve the local artifact through the model lifecycle
                     // abstraction; falls back to the direct factory when the
                     // provider cannot resolve, preserving behavior.
-                    crate::nemotron_transcriber_via_filesystem_provider(path, &self.config.locale)
+                    let backend = crate::nemotron_transcriber_via_filesystem_provider(
+                        path,
+                        &self.config.locale,
+                    );
+                    WasapiRecording::start_with_transcriber(&self.output_dir, backend)
+                },
+                #[cfg(feature = "foundry")]
+                RecognizerBackend::FoundryLocal => {
+                    let foundry = Box::new(FoundryLiveTranscriberBackend::new(&self.config.locale));
+                    match WasapiRecording::start_with_transcriber(&self.output_dir, foundry) {
+                        Ok(started) => Ok(started),
+                        Err(foundry_error)
+                            if self.transcription_policy.allow_backend_fallback
+                                && self.config.local_model_path.is_some() =>
+                        {
+                            let path = self.config.local_model_path.clone().ok_or_else(|| {
+                                SessionError::Start(
+                                    "Nemotron fallback model path disappeared".into(),
+                                )
+                            })?;
+                            let nemotron = crate::nemotron_transcriber_via_filesystem_provider(
+                                path,
+                                &self.config.locale,
+                            );
+                            WasapiRecording::start_with_transcriber(&self.output_dir, nemotron)
+                                .map_err(|fallback_error| {
+                                    SessionError::Start(format!(
+                                        "Foundry Local startup failed ({foundry_error}); \
+                                         Nemotron fallback also failed ({fallback_error})"
+                                    ))
+                                })
+                        },
+                        Err(error) => Err(error),
+                    }
                 },
                 RecognizerBackend::Platform => {
                     return Err(SessionError::Start(
@@ -4562,8 +4630,7 @@ mod imp {
                     ));
                 },
             };
-            let (recording, transcripts) =
-                WasapiRecording::start_with_transcriber(&self.output_dir, backend)?;
+            let (recording, transcripts) = started?;
             Ok(PendingWindowsStart::LocalModel {
                 recording: Arc::new(recording),
                 transcripts,
@@ -4906,6 +4973,8 @@ mod imp {
 
     use wisp_core::{SourceLabel, TrackId, TranscriptEvent};
 
+    #[cfg(feature = "foundry")]
+    use crate::FoundryLiveTranscriberBackend;
     use crate::error::{Result, SessionError};
     use crate::{
         Permission, PermissionStatus, PipewireRecording, RecognizerBackend, SessionConfig,
@@ -5046,6 +5115,15 @@ mod imp {
                         path,
                         &self.options.config().locale,
                     );
+                    let (recording, transcripts) =
+                        PipewireRecording::start_with_transcriber(&self.output_dir, backend)?;
+                    (recording, Some(transcripts))
+                },
+                #[cfg(feature = "foundry")]
+                RecognizerBackend::FoundryLocal => {
+                    let backend = Box::new(FoundryLiveTranscriberBackend::new(
+                        &self.options.config().locale,
+                    ));
                     let (recording, transcripts) =
                         PipewireRecording::start_with_transcriber(&self.output_dir, backend)?;
                     (recording, Some(transcripts))

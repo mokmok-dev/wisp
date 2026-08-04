@@ -26,6 +26,8 @@ use crate::{
     TranscriberFeature, TranscriberProbe, TranscriptionSelection, UnavailableReason,
     check_permission, select_transcriber,
 };
+#[cfg(feature = "foundry")]
+use crate::{FOUNDRY_TRANSCRIBER_BACKEND_ID, FoundryLiveTranscriberBackend};
 
 const CAPTURE_BACKEND_ID: &str = "macos-core-audio-process-tap";
 const TRANSCRIBER_BACKEND_ID: &str = "macos-speech-analyzer";
@@ -798,6 +800,8 @@ enum MacosLifecycle {
 enum MacosProviderKind {
     SpeechAnalyzer,
     Nemotron(std::path::PathBuf),
+    #[cfg(feature = "foundry")]
+    FoundryLocal,
 }
 
 impl MacosSession {
@@ -878,6 +882,40 @@ impl MacosSession {
                     },
                 }
             },
+            #[cfg(feature = "foundry")]
+            crate::RecognizerBackend::FoundryLocal => {
+                let foundry_probe = FoundryLiveTranscriberBackend::new(&config.locale).probe();
+                let nemotron_probe = config
+                    .local_model_path
+                    .as_ref()
+                    .map(|path| NemotronTranscriberBackend::new(path, &config.locale).probe());
+                let mut probes = vec![foundry_probe];
+                probes.extend(nemotron_probe);
+                match select_transcriber(policy, &probes) {
+                    TranscriptionSelection::Backend(backend)
+                        if backend == BackendId::new(FOUNDRY_TRANSCRIBER_BACKEND_ID) =>
+                    {
+                        Some(MacosProviderKind::FoundryLocal)
+                    },
+                    TranscriptionSelection::Backend(backend)
+                        if backend == BackendId::new(NEMOTRON_BACKEND_ID) =>
+                    {
+                        config
+                            .local_model_path
+                            .clone()
+                            .map(MacosProviderKind::Nemotron)
+                    },
+                    TranscriptionSelection::RecordOnly { .. } => None,
+                    TranscriptionSelection::Unavailable { reason } => {
+                        return Err(SessionError::Start(reason));
+                    },
+                    TranscriptionSelection::Backend(backend) => {
+                        return Err(SessionError::Start(format!(
+                            "unsupported local transcription backend selected: {backend}"
+                        )));
+                    },
+                }
+            },
         };
         let speech_enabled_in_bridge = matches!(provider, Some(MacosProviderKind::SpeechAnalyzer));
         let locale = config.locale.clone();
@@ -945,6 +983,10 @@ impl MacosSession {
                     // abstraction; falls back to the direct factory when the
                     // provider cannot resolve, preserving behavior.
                     crate::nemotron_transcriber_via_filesystem_provider(path, locale)
+                },
+                #[cfg(feature = "foundry")]
+                MacosProviderKind::FoundryLocal => {
+                    Box::new(FoundryLiveTranscriberBackend::new(locale))
                 },
             });
         Self {
@@ -1203,7 +1245,9 @@ impl MacosSession {
                 },
                 Err(error)
                     if error.backend == BackendId::new(TRANSCRIBER_BACKEND_ID)
-                        || error.backend == BackendId::new(NEMOTRON_BACKEND_ID) =>
+                        || error.backend == BackendId::new(NEMOTRON_BACKEND_ID)
+                        || cfg!(feature = "foundry")
+                            && error.backend == BackendId::new("foundry-local-live") =>
                 {
                     let failed_backend = error.backend.clone();
                     let speech_permission = { lock_shared(&self.shared).speech_permission };

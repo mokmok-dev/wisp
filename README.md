@@ -143,6 +143,36 @@ let bundle_path = provider.resolve(&nemotron_model_id())?.into_artifact().unwrap
 let _backend = nemotron_transcriber_via_filesystem_provider(bundle_path, "ja-JP");
 ```
 
+### Optional Foundry Local live transcription
+
+`wisp-audiokit` also has an opt-in Foundry Local backend. It is not enabled by
+default and does not change the sherpa-onnx/Nemotron path:
+
+```bash
+cargo build -p wisp-audiokit --features foundry
+```
+
+Select it explicitly with `SessionConfig::foundry(locale)`. The backend uses
+one Foundry `LiveAudioTranscriptionSession` per Wisp track, so microphone and
+system audio remain separate, and converts capture PCM to 16 kHz mono i16
+little-endian input. English locales use
+`nemotron-speech-streaming-en-0.6b`; other locales use
+`nemotron-3.5-asr-streaming-0.6b` with a language hint.
+
+The model must already be present in Foundry Local's cache. Session startup
+only loads it; it never starts a multi-gigabyte download. Callers should ensure
+the model through their model lifecycle/provider layer before starting audio.
+If a sherpa-onnx model bundle is also supplied in `local_model_path`, macOS and
+Windows may fall back to it when Foundry is unavailable and backend fallback
+is allowed by the transcription policy.
+
+Foundry support is intended for macOS and Windows. Linux keeps the feature
+compile-time-gated and can construct the backend where a compatible Foundry
+Local engine is installed, but is not currently an advertised runtime target.
+Foundry's streaming Nemotron models emit final utterances rather than partial
+hypotheses, and using two live sessions has a higher memory cost than
+microphone-only transcription.
+
 ## Requirements
 
 - **macOS 26 (Tahoe)** — Wisp relies on `SpeechAnalyzer`, Core Audio Process Taps, and the new Metal Toolchain, so macOS 26 is required for now.

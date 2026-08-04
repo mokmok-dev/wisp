@@ -5,6 +5,19 @@ version.workspace = true
 publish = false
 description = "Safe Rust wrapper over the WispAudioKit Swift framework."
 
+[features]
+default = []
+# The model lifecycle provider and live transcription runtime share the
+# process-global Foundry Local manager.
+foundry = [
+  "wisp-models/foundry",
+  "dep:foundry-local-sdk",
+  "dep:futures-core",
+  "dep:tokio",
+  "dep:tokio-stream",
+  "dep:tokio-util",
+]
+
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 expect_used = "warn"
@@ -18,12 +31,6 @@ unwrap_used = "warn"
 # documented per-call.
 unsafe_code = "allow"
 
-[features]
-default = []
-# Forward the Foundry Local backend feature to `wisp-models`. Off by default so
-# the standard build stays hermetic and offline.
-foundry = ["wisp-models/foundry"]
-
 [dependencies]
 wisp-audiokit-sys = { path = "../wisp-audiokit-sys" }
 wisp-core = { path = "../wisp-core" }
@@ -34,6 +41,11 @@ ropus = "0.12.18"
 thiserror = { workspace = true }
 sha2 = "0.10.9"
 tempfile = { workspace = true }
+foundry-local-sdk = { version = "=1.2.3", optional = true }
+futures-core = { version = "0.3", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"], optional = true }
+tokio-stream = { version = "0.1", optional = true }
+tokio-util = { version = "0.7", optional = true }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 sherpa-onnx = "1.13.4"

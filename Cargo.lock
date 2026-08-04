@@ -7712,6 +7712,8 @@ name = "wisp-audiokit"
 version = "0.0.17"
 dependencies = [
  "crossbeam-channel",
+ "foundry-local-sdk",
+ "futures-core",
  "ogg",
  "pipewire",
  "ropus",
@@ -7719,6 +7721,9 @@ dependencies = [
  "sherpa-onnx",
  "tempfile",
  "thiserror 2.0.19",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
  "wasapi",
  "windows 0.62.2",
  "windows-core 0.62.2",

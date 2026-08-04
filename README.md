@@ -38,6 +38,7 @@ Wisp is a small Cargo workspace with cleanly separated concerns:
 | `crates/wisp-core` | Shared, platform-agnostic types (`Session`, `Segment`, IDs, `SourceLabel`). |
 | `crates/wisp-audiokit` | Platform audio/transcription backends and the backend-neutral session orchestrator. |
 | `crates/wisp-audiokit-sys` | Raw C ABI bindings to the macOS `WispAudioKit` library. |
+| `crates/wisp-models` | Backend-neutral model lifecycle abstraction (`ModelProvider`) plus an optional Microsoft Foundry Local backend. |
 | `crates/wisp-lifecycle` | Session lifecycle state machine used by the runtime and formal verification. |
 | `crates/wisp-storage` | Session/segment persistence on SQLite (bundled `rusqlite`). |
 | `native/WispAudioKit` | macOS Swift package handling Core Audio Process Tap capture and `SpeechAnalyzer` transcription. Linked into the Rust binary as a static library. |
@@ -89,6 +90,58 @@ into `TranscriberBackend` on every OS, so recording and transcription keep one
 ordered timeline. Nemotron uses sherpa-onnx with a cache-aware streaming
 transducer. Its verified multi-file model bundle is provider-owned, without
 coupling capture/session orchestration to ONNX file layout.
+
+### Model lifecycle (`wisp-models`)
+
+Model acquisition and resolution go through a single backend-neutral boundary,
+`wisp_models::ModelProvider`, mirroring the capture/transcriber backend style:
+
+- `list_available` / `list_downloaded` — enumerate catalog and cached models.
+- `status` — report a model's cache state (`NotDownloaded` / `Downloaded` /
+  `Loaded` / `Unavailable`).
+- `ensure` (+ progress) / `resolve` — download-and-cache, then resolve to a
+  local `Artifact` path or a served `Endpoint`.
+- `evict` — remove a model from the local cache.
+- `start_service` / `stop_service` / `service_status` — control a backing
+  service, when the provider has one.
+
+Two providers implement the trait:
+
+- **`FilesystemModelProvider`** (default; in `wisp-audiokit`) wraps Wisp's
+  existing pinned Nemotron bundle. Listing/`status`/`resolve` use a cheap
+  presence + exact-byte-size check; SHA-256 integrity is enforced when
+  acquiring (`ensure`) and by the setup UI. The macOS, Windows, and Linux
+  session-start paths resolve the Nemotron artifact through this provider (with
+  a behavior-preserving fallback to the direct factory).
+- **`FoundryLocalProvider`** (feature-gated) wraps the
+  [Microsoft Foundry Local](https://github.com/microsoft/foundry-local) SDK
+  (`foundry-local-sdk`). It is **off by default**: enabling it
+  (`--features foundry` on `wisp-models` or `wisp-audiokit`) pulls a large async
+  stack and a build script that **downloads and `dlopen`s a native engine**, so
+  the feature-on build is non-hermetic. When the engine is unavailable the
+  constructor degrades to `ModelError::ServiceUnavailable` rather than
+  panicking; the embedded web service is pinned to loopback.
+
+Minimal usage — resolve the local Nemotron artifact through the abstraction and
+build a transcriber:
+
+```rust
+use wisp_audiokit::{
+    FilesystemModelProvider, ModelProvider, nemotron_model_id,
+    nemotron_transcriber_via_filesystem_provider,
+};
+
+// Ensure the bundle is cached (downloads on first use, reports progress).
+let provider = FilesystemModelProvider::new(&data_dir);
+provider.ensure(&nemotron_model_id(), &mut |done, total| {
+    eprintln!("nemotron: {done}/{total}");
+})?;
+
+// The session builders call this internally; it resolves through the provider
+// and falls back to the direct factory if resolution is not possible.
+let bundle_path = provider.resolve(&nemotron_model_id())?.into_artifact().unwrap();
+let _backend = nemotron_transcriber_via_filesystem_provider(bundle_path, "ja-JP");
+```
 
 ## Requirements
 

@@ -9,6 +9,7 @@ mod backend;
 mod error;
 #[cfg(target_os = "macos")]
 mod macos_backend;
+mod model_provider;
 mod nemotron_backend;
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
 mod ogg_opus_recorder;
@@ -30,6 +31,10 @@ pub use backend::{
 pub use error::{Result, SessionError, SetupError, SetupResult};
 #[cfg(target_os = "macos")]
 pub use macos_backend::{MacosCaptureBackend, MacosSession, MacosTranscriberBackend};
+pub use model_provider::{
+    FILESYSTEM_PROVIDER_ID, FilesystemModelProvider, NEMOTRON_MODEL_ID, nemotron_model_id,
+    nemotron_transcriber_from_provider, nemotron_transcriber_via_filesystem_provider,
+};
 pub use nemotron_backend::{
     NEMOTRON_BACKEND_ID, NemotronTranscriberBackend, NemotronTranscriberFactory,
 };
@@ -47,6 +52,15 @@ pub use wisp_core::{
     AudioFormat, AudioFrame, AudioFrameError, AudioSamples, CaptureEvent, MonotonicTimestamp,
     SampleFormat, SourceKind, TrackDescriptor, TrackId, TranscriptEvent, TranscriptSegment,
     TranscriptSegmentId,
+};
+// Re-export the model lifecycle abstraction so downstream crates can depend on
+// `wisp-audiokit` alone for both transcription and model management. The
+// Foundry Local backend is re-exported under the same `foundry` feature.
+#[cfg(feature = "foundry")]
+pub use wisp_models::foundry;
+pub use wisp_models::{
+    InMemoryModelProvider, ModelClass, ModelDescriptor, ModelError, ModelId, ModelLocation,
+    ModelProvider, ModelResult, ModelStatus, ProgressCallback, ServiceStatus,
 };
 
 use std::path::{Path, PathBuf};
@@ -3769,13 +3783,12 @@ mod imp {
     use crate::wasapi_capture::RecordingNotification;
     use crate::{
         CallbackEventClass, CallbackEventReceiver, CallbackEventSender, MergedSessionReceive,
-        NemotronTranscriberFactory, OneShotSessionLifecycle, Permission, PermissionStatus,
-        RecognizerBackend, SessionConfig, SessionOptions, TranscriptionPolicy, WasapiRecording,
-        WindowsPlatformStart, WindowsPlatformStartError, WindowsRuntimeControlPublisher,
-        WindowsRuntimeNotification, WindowsTranscriptionMode,
-        callback_event_channel_with_final_gap, recv_callback_session_channels_with_control,
-        select_windows_transcription_mode, start_windows_platform,
-        try_recv_callback_session_channels_with_control,
+        OneShotSessionLifecycle, Permission, PermissionStatus, RecognizerBackend, SessionConfig,
+        SessionOptions, TranscriptionPolicy, WasapiRecording, WindowsPlatformStart,
+        WindowsPlatformStartError, WindowsRuntimeControlPublisher, WindowsRuntimeNotification,
+        WindowsTranscriptionMode, callback_event_channel_with_final_gap,
+        recv_callback_session_channels_with_control, select_windows_transcription_mode,
+        start_windows_platform, try_recv_callback_session_channels_with_control,
     };
 
     /// `WispAudioKit` library version.
@@ -4538,7 +4551,10 @@ mod imp {
             })?;
             let backend = match self.config.recognizer {
                 RecognizerBackend::Nemotron => {
-                    NemotronTranscriberFactory::from_artifact(path, &self.config.locale)
+                    // Resolve the local artifact through the model lifecycle
+                    // abstraction; falls back to the direct factory when the
+                    // provider cannot resolve, preserving behavior.
+                    crate::nemotron_transcriber_via_filesystem_provider(path, &self.config.locale)
                 },
                 RecognizerBackend::Platform => {
                     return Err(SessionError::Start(
@@ -4892,8 +4908,8 @@ mod imp {
 
     use crate::error::{Result, SessionError};
     use crate::{
-        NemotronTranscriberFactory, Permission, PermissionStatus, PipewireRecording,
-        RecognizerBackend, SessionConfig, SessionOptions,
+        Permission, PermissionStatus, PipewireRecording, RecognizerBackend, SessionConfig,
+        SessionOptions,
     };
 
     /// Version label for the Linux `PipeWire` recording backend.
@@ -5023,7 +5039,10 @@ mod imp {
                                 "Nemotron was selected without a local model bundle".into(),
                             )
                         })?;
-                    let backend = NemotronTranscriberFactory::from_artifact(
+                    // Resolve the local artifact through the model lifecycle
+                    // abstraction; falls back to the direct factory when the
+                    // provider cannot resolve, preserving behavior.
+                    let backend = crate::nemotron_transcriber_via_filesystem_provider(
                         path,
                         &self.options.config().locale,
                     );

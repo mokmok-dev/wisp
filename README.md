@@ -151,6 +151,14 @@ nix develop
 cargo run -p wisp-desktop
 ```
 
+The `default` dev shell is turnkey on both macOS and Linux: it provides the
+pinned Rust toolchain, `sccache`, the `treefmt` formatter, the `cachix` CLI, and
+the native audio build dependencies (PipeWire on Linux), applies the macOS
+Xcode/`DEVELOPER_DIR`
+handling automatically, and installs the project's pre-commit git hooks
+(`treefmt` + `clippy`) on entry. If you use [direnv](https://direnv.net/), the
+committed `.envrc` (`use flake`) does all of this on `cd`.
+
 The local MCP bridge can also be built reproducibly with
 [Crane](https://github.com/ipetkov/crane):
 
@@ -162,11 +170,34 @@ nix build .#wisp-mcp
 nix flake check
 ```
 
-On Linux, `nix flake check` runs Rust formatting plus Crane-backed Clippy and
-tests for the workspace excluding `wisp-desktop`, and builds `wisp-mcp`. On
-macOS, it runs Rust formatting and builds `wisp-mcp`; use the explicit Cargo
-commands under [Contributing](#contributing) for workspace-wide lint and test
-coverage.
+On Linux, `nix flake check` runs the unified `treefmt` formatting check plus
+Crane-backed Clippy and tests for the workspace excluding `wisp-desktop`, and
+builds `wisp-mcp`. On macOS, it runs `treefmt` and builds `wisp-mcp`; use the
+explicit Cargo commands under [Contributing](#contributing) for workspace-wide
+lint and test coverage.
+
+Formatting is unified through [treefmt-nix](https://github.com/numtide/treefmt-nix):
+`nix fmt` (or `treefmt` inside the dev shell) formats Nix (`nixfmt`), Rust
+(`rustfmt`, pinned to the workspace toolchain), and Swift (`swiftformat`) in one
+pass, and the same configuration backs the `treefmt` flake check.
+
+### Build caching
+
+The flake declares the [nix-community](https://nixos.org/manual/nix/stable/command-ref/conf-file#conf-substituters)
+binary cache in `nixConfig`, which (for trusted users) supplies prebuilt
+ancillary tooling from the wider Nix ecosystem — treefmt-nix, git-hooks.nix,
+and similar dependencies. It does **not** host this project's own Crane build
+outputs; to cache and share those, publish them to a project
+[Cachix](https://www.cachix.org/) cache. The default dev shell ships the
+`cachix` CLI, so once a cache exists you can opt in with:
+
+```bash
+cachix use <cache-name>
+```
+
+Within a single `nix flake check`, Crane reuses one `buildDepsOnly`
+(`cargoArtifacts`) derivation across the package, Clippy, and test checks, so
+the workspace dependencies are compiled once and reused.
 
 Crane can cross-compile both Windows executables from a Linux Nix host:
 

@@ -1,13 +1,23 @@
+# Developer shells.
+#
+# Plain function called from flake.nix's perSystem. Returns the `devShells`
+# attrset. Needs `config` for the treefmt wrapper and the pre-commit install
+# hook, plus the shared `pkgs`, `rustToolchain`, and pinned `swiftformat`.
+#
+# `default` is the turnkey environment entered by `nix develop` / direnv on both
+# macOS and Linux: pinned Rust toolchain, sccache, the treefmt wrapper, the
+# git-hooks tooling, and (on Linux) the native audio build deps. Its shellHook
+# installs the pre-commit git hooks so a fresh clone is fully set up in one step.
+#
+# `ci` is the minimal lint shell used by the GitHub Actions workflows.
 {
-  nixpkgs-swiftformat,
+  config,
   pkgs,
-  system,
+  rustToolchain,
+  swiftformat,
 }:
 let
-  rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ../rust-toolchain.toml;
-  swiftformat = import ./swift.nix {
-    inherit nixpkgs-swiftformat pkgs system;
-  };
+  treefmt = config.treefmt.build.wrapper;
 
   # Shared by both devShells on macOS. Nix injects its own apple-sdk +
   # xcrun wrapper, both of which are too old for what WispAudioKit and
@@ -34,9 +44,9 @@ let
 in
 {
   ci = pkgs.mkShell {
-    packages = with pkgs; [
+    packages = [
       rustToolchain
-      nixfmt
+      pkgs.nixfmt
       swiftformat
     ];
 
@@ -44,23 +54,29 @@ in
   };
 
   default = pkgs.mkShell {
-    packages =
-      (with pkgs; [
-        rustToolchain
-        sccache
-      ])
-      ++ pkgs.lib.optionals pkgs.stdenv.isLinux (
-        with pkgs;
-        [
-          pipewire
-          pkg-config
-          rustPlatform.bindgenHook
-        ]
-      );
+    # Hook entries use their packages via generated Nix store paths.
+    # Keep the direct developer tools explicit instead of adding the
+    # overlapping pre-commit.enabledPackages list a second time.
+    packages = [
+      rustToolchain
+      pkgs.cachix
+      pkgs.sccache
+      treefmt
+    ]
+    ++ pkgs.lib.optionals pkgs.stdenv.isLinux (
+      with pkgs;
+      [
+        pipewire
+        pkg-config
+        rustPlatform.bindgenHook
+      ]
+    );
 
     shellHook = ''
       export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
     ''
-    + darwinToolchainHook;
+    + darwinToolchainHook
+    # Install the fmt/clippy hooks and expose the pre-commit CLI.
+    + config.pre-commit.shellHook;
   };
 }

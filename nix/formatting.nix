@@ -29,7 +29,6 @@
       "result"
       "result-*"
     ];
-
     programs.nixfmt.enable = true;
 
     # Pin rustfmt to the workspace toolchain and honour the repo-level
@@ -75,7 +74,7 @@
           offline = false;
           # Match the portable Crane clippy check on both macOS and Linux:
           # default features, --all-targets, workspace minus the desktop
-          # crate (which needs the dedicated Xcode/Windows workflows).
+          # crate (which needs the dedicated Xcode workflow).
           allFeatures = false;
           extraArgs = "--workspace --exclude wisp-desktop --all-targets";
         };

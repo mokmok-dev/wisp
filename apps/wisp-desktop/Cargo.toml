@@ -38,7 +38,7 @@ serde_norway = { workspace = true }
 uuid = { workspace = true }
 
 # GPU-accelerated UI framework by the Zed team. Linux CI excludes this crate;
-# macOS and Windows use their platform-specific workflows.
+# macOS uses its dedicated workflow.
 gpui = { workspace = true }
 
 [dev-dependencies]

@@ -61,8 +61,7 @@
             inherit pkgs system;
           };
 
-          # 2. Crane packages + checks (native build, plus the Windows cross
-          #    build on Linux). Returns { packages, checks }.
+          # 2. Crane packages + checks. Returns { packages, checks }.
           crane = import ./nix/packages.nix {
             inherit
               inputs
@@ -79,7 +78,7 @@
           };
         in
         {
-          # Packages: wisp-mcp / default on every system, wisp-windows on Linux.
+          # Packages: wisp-desktop (macOS-only) on macOS hosts.
           inherit (crane) packages;
 
           # Formatting: feed the settings to the treefmt-nix / git-hooks modules.

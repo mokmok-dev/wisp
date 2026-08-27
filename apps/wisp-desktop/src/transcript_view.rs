@@ -17,15 +17,10 @@ use gpui::{
     ListState, ParentElement, Render, StatefulInteractiveElement, Styled, Window, div, list, px,
     rgb,
 };
-use wisp_audiokit::{
-    LocalModelStatus, Permission, PermissionStatus, RecognizerBackend, SourceLabel,
-};
+use wisp_audiokit::{Permission, PermissionStatus, SourceLabel};
 use wisp_core::{Session as StoredSession, SessionId};
 
-use crate::app::{
-    AppError, AppModel, LocalMcpBridge, ModelDownloadState, Permissions, Segment, SessionState,
-    Setup, View,
-};
+use crate::app::{AppError, AppModel, Permissions, Segment, SessionState, View};
 use crate::permissions as perms;
 use crate::transcript_export::{self, suggested_export_name};
 
@@ -40,19 +35,12 @@ pub struct TranscriptView {
     /// Open the System Settings privacy pane for a permission. Used when
     /// the permission is already denied and only the user can re-enable it.
     pub on_open_settings: std::sync::Arc<dyn Fn(Permission, &mut Window, &mut gpui::App) + 'static>,
-    /// Select the transcription backend used for new sessions.
-    pub on_select_recognizer:
-        std::sync::Arc<dyn Fn(RecognizerBackend, &mut Window, &mut gpui::App) + 'static>,
-    /// Download the local transcription model on a background thread.
-    pub on_download_local_model: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
     /// Switch from the library screen to the empty recording screen.
     pub on_new_session: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
     /// Load a session's transcript from storage and switch to history view.
     pub on_open_history: std::sync::Arc<dyn Fn(SessionId, &mut Window, &mut gpui::App) + 'static>,
     /// Return to the library screen from a live or historical session view.
     pub on_back_to_library: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
-    /// Enable/disable the local MCP bridge from the library settings card.
-    pub on_toggle_local_mcp: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
     /// Toggled by the cursor-blink animation timer in main.rs so the
     /// ghost-text caret pulses.
     pub cursor_visible: bool,
@@ -113,7 +101,6 @@ impl Render for TranscriptView {
     ) -> impl IntoElement {
         let app = self.app.read(cx);
         let permissions = app.permissions;
-        let setup = app.setup.clone();
 
         // Gate the main UI on having both required permissions. Until then,
         // we show an onboarding screen with per-permission rows the user
@@ -121,9 +108,7 @@ impl Render for TranscriptView {
         // presses Record and only then learns the app needs permissions
         // they may or may not be able to grant.
         if !app.setup_complete() {
-            return self
-                .render_onboarding(permissions, &setup)
-                .into_any_element();
+            return self.render_onboarding(permissions).into_any_element();
         }
 
         let view = app.view.clone();
@@ -138,13 +123,10 @@ impl Render for TranscriptView {
         let viewed_session = app.viewed_session.clone();
         let linked_session_id = app.linked_session_id;
         let library = app.library.clone();
-        let local_mcp = app.local_mcp.clone();
         let model = self.app.clone();
 
         match view {
-            View::Library => self
-                .render_library(&library, &local_mcp, &setup)
-                .into_any_element(),
+            View::Library => self.render_library(&library).into_any_element(),
             View::LiveSession => {
                 self.sync_transcript_list(&view, segment_count, active_idx, active_text_len);
                 self.update_scroll_signature(segment_count, text_len_sum);
@@ -305,8 +287,6 @@ impl TranscriptView {
     fn render_library(
         &self,
         sessions: &[StoredSession],
-        local_mcp: &LocalMcpBridge,
-        setup: &Setup,
     ) -> impl IntoElement {
         let on_new = self.on_new_session.clone();
         let header = div()
@@ -325,22 +305,7 @@ impl TranscriptView {
             .flex_col()
             .flex_grow()
             .min_h_0()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .px(px(20.0))
-                    .pt(px(16.0))
-                    .child(self.render_recognizer_row(setup))
-                    .child(self.render_local_model_row(setup)),
-            )
-            .child(render_session_list(
-                sessions,
-                self.on_open_history.clone(),
-                local_mcp,
-                self.on_toggle_local_mcp.clone(),
-            ));
+            .child(render_session_list(sessions, self.on_open_history.clone()));
 
         div()
             .flex()
@@ -443,55 +408,18 @@ impl TranscriptView {
     fn render_onboarding(
         &self,
         permissions: Permissions,
-        setup: &Setup,
     ) -> impl IntoElement {
         let pending = permissions.pending;
-        let setup_title = if wisp_audiokit::requires_recognizer_setup() {
-            "Wisp needs a quick setup"
-        } else {
-            "Wisp needs a couple of permissions"
-        };
         let row_mic = self.render_permission_row(
             Permission::Microphone,
             permissions.microphone,
             pending == Some(Permission::Microphone),
         );
-
-        let mut card = div()
-            .flex()
-            .flex_col()
-            .gap(px(16.0))
-            .w(px(520.0))
-            .p(px(24.0))
-            .bg(theme::surface())
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(theme::border())
-            .child(
-                div()
-                    .text_color(theme::text_primary())
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(setup_title),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme::text_secondary())
-                    .child("These run entirely on-device. Wisp doesn't send your audio anywhere."),
-            )
-            .child(row_mic);
-        if setup.recognizer == RecognizerBackend::Platform {
-            card = card.child(self.render_permission_row(
-                Permission::SpeechRecognition,
-                permissions.speech,
-                pending == Some(Permission::SpeechRecognition),
-            ));
-        }
-        if wisp_audiokit::requires_recognizer_setup() {
-            card = card
-                .child(self.render_recognizer_row(setup))
-                .child(self.render_local_model_row(setup));
-        }
+        let row_speech = self.render_permission_row(
+            Permission::SpeechRecognition,
+            permissions.speech,
+            pending == Some(Permission::SpeechRecognition),
+        );
 
         div()
             .flex()
@@ -501,7 +429,29 @@ impl TranscriptView {
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text_primary())
-            .child(card)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.0))
+                    .w(px(520.0))
+                    .p(px(24.0))
+                    .bg(theme::surface())
+                    .rounded(px(12.0))
+                    .border_1()
+                    .border_color(theme::border())
+                    .child(
+                        div()
+                            .text_color(theme::text_primary())
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Wisp needs a couple of permissions"),
+                    )
+                    .child(div().text_xs().text_color(theme::text_secondary()).child(
+                        "These run entirely on-device. Wisp doesn't send your audio anywhere.",
+                    ))
+                    .child(row_mic)
+                    .child(row_speech),
+            )
     }
 
     fn render_permission_row(
@@ -553,214 +503,6 @@ impl TranscriptView {
             .border_color(status_color(status))
             .child(info)
             .child(action)
-    }
-
-    fn render_recognizer_row(
-        &self,
-        setup: &Setup,
-    ) -> impl IntoElement {
-        let selected = setup.recognizer;
-        let platform_action = self.render_recognizer_option(
-            RecognizerBackend::Platform,
-            selected,
-            wisp_audiokit::platform_recognizer_label(),
-        );
-        let nemotron_action =
-            self.render_recognizer_option(RecognizerBackend::Nemotron, selected, "Nemotron");
-        div()
-            .flex()
-            .items_center()
-            .gap(px(12.0))
-            .py(px(12.0))
-            .px(px(12.0))
-            .bg(theme::bg())
-            .rounded(px(8.0))
-            .border_l_2()
-            .border_color(if setup.is_complete() {
-                theme::mic_accent()
-            } else {
-                theme::text_tertiary()
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .flex_grow()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_color(theme::text_primary())
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Transcription backend"),
-                    )
-                    .child(div().text_xs().text_color(theme::text_tertiary()).child(
-                        if cfg!(target_os = "macos") {
-                            "Choose SpeechAnalyzer or streaming Nemotron."
-                        } else {
-                            "Nemotron runs locally; this OS has no built-in provider."
-                        },
-                    ))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme::text_secondary())
-                            .child(selected.label()),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .p(px(2.0))
-                    .rounded_full()
-                    .bg(theme::record_idle())
-                    .child(platform_action)
-                    .child(nemotron_action),
-            )
-    }
-
-    fn render_recognizer_option(
-        &self,
-        recognizer: RecognizerBackend,
-        selected: RecognizerBackend,
-        label: &'static str,
-    ) -> impl IntoElement {
-        let is_selected = recognizer == selected;
-        let unavailable = recognizer == RecognizerBackend::Platform && !cfg!(target_os = "macos");
-        let on_select = self.on_select_recognizer.clone();
-        let id = match recognizer {
-            RecognizerBackend::Platform => "recognizer-platform",
-            RecognizerBackend::Nemotron => "recognizer-nemotron",
-        };
-        let mut button = div()
-            .id(ElementId::Name(id.into()))
-            .px(px(12.0))
-            .py(px(5.0))
-            .rounded_full()
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(if unavailable {
-                theme::text_tertiary()
-            } else if is_selected {
-                theme::text_primary()
-            } else {
-                theme::text_secondary()
-            })
-            .child(label);
-        if is_selected {
-            button = button.bg(theme::surface());
-        } else if !unavailable {
-            button = button.cursor_pointer().on_click(move |_event, window, cx| {
-                on_select(recognizer, window, cx);
-            });
-        }
-        button
-    }
-
-    fn render_local_model_row(
-        &self,
-        setup: &Setup,
-    ) -> impl IntoElement {
-        let (status_text, status_color) = match setup.local_model.clone() {
-            LocalModelStatus::Ready { bytes, .. } => (
-                format!("Ready ({} MB)", bytes / 1024 / 1024),
-                theme::mic_accent(),
-            ),
-            LocalModelStatus::Missing { spec, .. } => (
-                format!("Not downloaded ({} MB)", spec.approx_bytes / 1024 / 1024),
-                if setup.recognizer == RecognizerBackend::Nemotron {
-                    theme::record_red()
-                } else {
-                    theme::text_tertiary()
-                },
-            ),
-        };
-        let mut info = div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .flex_grow()
-            .min_w_0()
-            .child(
-                div()
-                    .text_color(theme::text_primary())
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("Local transcription model"),
-            )
-            .child(div().text_xs().text_color(theme::text_tertiary()).child(
-                "Nemotron 3.5 ASR Streaming 0.6B INT8 · 560 ms · downloaded once and used offline.",
-            ))
-            .child(div().text_xs().text_color(status_color).child(status_text));
-        if let Some(error) = &setup.model_error {
-            info = info.child(
-                div()
-                    .text_xs()
-                    .text_color(theme::record_red())
-                    .child(error.clone()),
-            );
-        }
-        div()
-            .flex()
-            .items_center()
-            .gap(px(12.0))
-            .py(px(12.0))
-            .px(px(12.0))
-            .bg(theme::bg())
-            .rounded(px(8.0))
-            .border_l_2()
-            .border_color(status_color)
-            .child(info)
-            .child(self.render_local_model_action(setup))
-    }
-
-    fn render_local_model_action(
-        &self,
-        setup: &Setup,
-    ) -> gpui::AnyElement {
-        if let ModelDownloadState::Downloading {
-            downloaded, total, ..
-        } = setup.model_download
-        {
-            let percent = if total == 0 {
-                0
-            } else {
-                downloaded
-                    .saturating_mul(100)
-                    .checked_div(total)
-                    .unwrap_or(0)
-            };
-            return div()
-                .px(px(14.0))
-                .py(px(7.0))
-                .text_sm()
-                .text_color(theme::text_tertiary())
-                .child(format!("Downloading… {percent}%"))
-                .into_any_element();
-        }
-        if setup.local_model.is_ready() {
-            return div()
-                .px(px(14.0))
-                .py(px(7.0))
-                .text_sm()
-                .text_color(theme::text_tertiary())
-                .child("Installed")
-                .into_any_element();
-        }
-        let on_download = self.on_download_local_model.clone();
-        div()
-            .id(ElementId::Name("download-local-model".into()))
-            .px(px(14.0))
-            .py(px(7.0))
-            .rounded_full()
-            .bg(theme::record_idle())
-            .text_color(theme::text_primary())
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
-            .cursor_pointer()
-            .on_click(move |_event, window, cx| on_download(window, cx))
-            .child("Download")
-            .into_any_element()
     }
 
     fn render_permission_action(
@@ -1215,8 +957,6 @@ fn render_empty_library() -> impl IntoElement {
 fn render_session_list(
     sessions: &[StoredSession],
     on_open: std::sync::Arc<dyn Fn(SessionId, &mut Window, &mut gpui::App) + 'static>,
-    local_mcp: &LocalMcpBridge,
-    on_toggle_local_mcp: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
 ) -> impl IntoElement {
     let mut list = div()
         .id(ElementId::Name("library-scroll".into()))
@@ -1227,7 +967,6 @@ fn render_session_list(
         .px(px(20.0))
         .py(px(16.0))
         .gap(px(8.0));
-    list = list.child(render_local_mcp_bridge_card(local_mcp, on_toggle_local_mcp));
     if sessions.is_empty() {
         return list.child(render_empty_library());
     }
@@ -1235,72 +974,6 @@ fn render_session_list(
         list = list.child(render_session_row(s, on_open.clone()));
     }
     list
-}
-
-fn render_local_mcp_bridge_card(
-    local_mcp: &LocalMcpBridge,
-    on_toggle: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
-) -> impl IntoElement {
-    let (status_text, status_color) = if let Some(error) = &local_mcp.error {
-        (format!("Failed: {error}"), theme::record_red())
-    } else if local_mcp.running {
-        ("Running".to_owned(), theme::mic_accent())
-    } else if local_mcp.enabled {
-        ("Enabled, not running".to_owned(), theme::text_secondary())
-    } else {
-        ("Off".to_owned(), theme::text_tertiary())
-    };
-    let action_label = if local_mcp.enabled {
-        "Disable"
-    } else {
-        "Enable"
-    };
-
-    div()
-        .id(ElementId::Name("local-mcp-bridge-card".into()))
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(14.0))
-        .py(px(12.0))
-        .px(px(14.0))
-        .bg(theme::surface())
-        .rounded(px(8.0))
-        .border_l_2()
-        .border_color(if local_mcp.running {
-            theme::mic_accent()
-        } else {
-            theme::border()
-        })
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(5.0))
-                .min_w_0()
-                .flex_grow()
-                .child(
-                    div()
-                        .text_color(theme::text_primary())
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("Local MCP Bridge"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme::text_secondary())
-                        .child(format!(
-                            "IPC: {} · MCP command: {}",
-                            local_mcp.addr, local_mcp.command_path
-                        )),
-                )
-                .child(div().text_xs().text_color(status_color).child(status_text)),
-        )
-        .child(render_toolbar_button(
-            "local-mcp-toggle",
-            action_label,
-            move |window, cx| on_toggle(window, cx),
-        ))
 }
 
 fn render_session_row(

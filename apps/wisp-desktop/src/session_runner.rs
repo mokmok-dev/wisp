@@ -11,11 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-#[cfg(target_os = "macos")]
-use wisp_audiokit::MacosSession as PlatformSession;
-#[cfg(not(target_os = "macos"))]
-use wisp_audiokit::Session as PlatformSession;
-use wisp_audiokit::{Event, SessionConfig, SessionError};
+use wisp_audiokit::{Event, MacosSession as PlatformSession, SessionConfig, SessionError};
 use wisp_core::SessionId;
 
 /// How often the running session checks for UI commands (Stop / Shutdown)
@@ -262,21 +258,14 @@ fn run_session(
             Ok(Command::Start { .. }) | Err(TryRecvError::Empty) => {},
         }
         if let Some(event) = session.recv_timeout(CMD_POLL_INTERVAL) {
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
             let terminal_error = session.take_runtime_failure();
             let _ = update_tx.send(Update::Event { session_id, event });
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
             if let Some(error) = terminal_error {
                 // Runtime failure is terminal, but native capture/writer
                 // ownership must be stopped and finalized before persistence
                 // observes RuntimeFailed.
-                #[cfg(target_os = "windows")]
-                let error = merge_runtime_failures(error, session.stop_and_take_runtime_failure());
-                #[cfg(target_os = "macos")]
-                let error = {
-                    session.stop();
-                    merge_runtime_failures(error, session.take_runtime_failure())
-                };
+                session.stop();
+                let error = merge_runtime_failures(error, session.take_runtime_failure());
                 publish_runtime_failure_after_drain(
                     || session.try_recv(),
                     session_id,
@@ -296,17 +285,12 @@ fn stop_and_publish(
     session_id: SessionId,
     update_tx: &Sender<Update>,
 ) {
-    #[cfg(target_os = "windows")]
-    let terminal_error = session.stop_and_take_runtime_failure();
-    #[cfg(not(target_os = "windows"))]
     session.stop();
     // Drain whatever the analyzer flushed during stop().
     while let Some(event) = session.try_recv() {
         let _ = update_tx.send(Update::Event { session_id, event });
     }
-    #[cfg(target_os = "macos")]
     let terminal_error = session.take_runtime_failure();
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     if let Some(error) = terminal_error {
         let _ = update_tx.send(Update::RuntimeFailed { session_id, error });
         return;
@@ -314,7 +298,6 @@ fn stop_and_publish(
     let _ = update_tx.send(Update::Stopped { session_id });
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn merge_runtime_failures(
     primary: SessionError,
     cleanup: Option<SessionError>,
@@ -326,7 +309,6 @@ fn merge_runtime_failures(
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn publish_runtime_failure_after_drain(
     mut try_recv: impl FnMut() -> Option<Event>,
     session_id: SessionId,
@@ -349,19 +331,14 @@ fn is_transcript_result(event: &Event) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use std::collections::VecDeque;
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use std::sync::mpsc::channel;
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use wisp_audiokit::SessionError;
     use wisp_audiokit::{Event, SessionResult, SourceLabel};
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use wisp_core::SessionId;
 
     use super::is_transcript_result;
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use super::{Update, merge_runtime_failures, publish_runtime_failure_after_drain};
 
     #[test]
@@ -379,7 +356,6 @@ mod tests {
         })));
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn runtime_failure_publishes_drained_events_before_terminal_update() {
         let session_id = SessionId::from(42);
@@ -419,7 +395,6 @@ mod tests {
         ));
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn runtime_failure_preserves_cleanup_failure_context() {
         let combined = merge_runtime_failures(

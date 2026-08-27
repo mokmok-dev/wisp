@@ -9,14 +9,13 @@
 //!     marked `final` (the speech engine has locked it in).
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use wisp_audiokit::{
-    Event, LocalModelId, LocalModelStatus, Permission, PermissionStatus, RecognizerBackend,
-    SessionConfig, SessionError, SessionOptions, SessionResult, SourceLabel, TranscriptionPolicy,
-    local_model_spec_for, local_model_status_for,
+    Event, Permission, PermissionStatus, SessionConfig, SessionError, SessionResult, SourceLabel,
+    TranscriptionPolicy,
 };
 use wisp_core::{Session as StoredSession, SessionId};
 use wisp_lifecycle::{Phase, UpdateContext, ViewOwner, WorkerUpdate, can_replace_transcript};
@@ -180,113 +179,6 @@ impl Permissions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelDownloadState {
-    Idle,
-    Downloading {
-        model: LocalModelId,
-        generation: u64,
-        downloaded: u64,
-        total: u64,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Setup {
-    pub recognizer: RecognizerBackend,
-    pub local_model_id: LocalModelId,
-    pub local_model: LocalModelStatus,
-    pub model_download: ModelDownloadState,
-    pub download_generation: u64,
-    pub model_error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalMcpBridge {
-    pub enabled: bool,
-    pub running: bool,
-    pub addr: String,
-    pub command_path: String,
-    pub error: Option<String>,
-}
-
-impl LocalMcpBridge {
-    pub fn new(
-        enabled: bool,
-        addr: impl Into<String>,
-        command_path: impl Into<String>,
-    ) -> Self {
-        Self {
-            enabled,
-            running: false,
-            addr: addr.into(),
-            command_path: command_path.into(),
-            error: None,
-        }
-    }
-}
-
-impl Setup {
-    pub fn new(data_dir: impl AsRef<Path>) -> Self {
-        let local_model_id = LocalModelId::Nemotron;
-        Self {
-            recognizer: if cfg!(target_os = "macos") {
-                RecognizerBackend::Platform
-            } else {
-                RecognizerBackend::Nemotron
-            },
-            local_model_id,
-            local_model: local_model_status_for(data_dir, local_model_id),
-            model_download: ModelDownloadState::Idle,
-            download_generation: 0,
-            model_error: None,
-        }
-    }
-
-    pub fn is_complete(&self) -> bool {
-        if !wisp_audiokit::requires_recognizer_setup() {
-            return true;
-        }
-        match self.recognizer {
-            RecognizerBackend::Platform => true,
-            RecognizerBackend::Nemotron => self.local_model.is_ready(),
-        }
-    }
-
-    pub fn session_config(
-        &self,
-        locale: impl Into<String>,
-    ) -> SessionConfig {
-        let locale = locale.into();
-        match self.recognizer {
-            RecognizerBackend::Platform => SessionConfig::platform_default(locale),
-            RecognizerBackend::Nemotron => {
-                SessionConfig::nemotron(locale, self.local_model.path().to_path_buf())
-            },
-        }
-    }
-}
-
-impl Default for Setup {
-    fn default() -> Self {
-        Self {
-            recognizer: if cfg!(target_os = "macos") {
-                RecognizerBackend::Platform
-            } else {
-                RecognizerBackend::Nemotron
-            },
-            local_model_id: LocalModelId::Nemotron,
-            local_model: LocalModelStatus::Missing {
-                spec: local_model_spec_for(LocalModelId::Nemotron),
-                path: std::path::PathBuf::new(),
-            },
-            model_download: ModelDownloadState::Idle,
-            download_generation: 0,
-            model_error: None,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Segment {
     pub source: SourceLabel,
@@ -363,8 +255,6 @@ pub struct AppModel {
     pub recent_log: VecDeque<String>,
     pub last_error: Option<AppError>,
     pub permissions: Permissions,
-    pub setup: Setup,
-    pub local_mcp: LocalMcpBridge,
 }
 
 impl AppModel {
@@ -420,24 +310,7 @@ impl AppModel {
             recent_log: VecDeque::new(),
             last_error: None,
             permissions: Permissions::unknown(),
-            setup: Setup::default(),
-            local_mcp: LocalMcpBridge::new(false, "127.0.0.1:8765", "wisp-mcp"),
         }
-    }
-
-    pub fn new_with_data_dir(data_dir: impl AsRef<Path>) -> Self {
-        let mut model = Self::new();
-        model.setup = Setup::new(data_dir);
-        model
-    }
-
-    pub fn new_with_data_dir_and_local_mcp(
-        data_dir: impl AsRef<Path>,
-        local_mcp: LocalMcpBridge,
-    ) -> Self {
-        let mut model = Self::new_with_data_dir(data_dir);
-        model.local_mcp = local_mcp;
-        model
     }
 
     /// Whether the live transcript still owns worker or persistence state.
@@ -680,8 +553,15 @@ impl AppModel {
     }
 
     pub fn setup_complete(&self) -> bool {
-        let options: SessionOptions = self.setup.session_config("ja-JP").into();
-        self.permissions.satisfies(options.transcription_policy()) && self.setup.is_complete()
+        self.permissions
+            .satisfies(TranscriptionPolicy::platform_default())
+    }
+
+    pub fn session_config(
+        &self,
+        locale: impl Into<String>,
+    ) -> SessionConfig {
+        SessionConfig::platform_default(locale)
     }
 }
 

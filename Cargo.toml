@@ -1,7 +1,6 @@
 [workspace]
 members = [
   "apps/wisp-desktop",
-  "apps/wisp-mcp",
   "crates/wisp-audiokit",
   "crates/wisp-audiokit-sys",
   "crates/wisp-core",
@@ -9,7 +8,6 @@ members = [
   "crates/wisp-storage",
 ]
 resolver = "3"
-exclude = ["vendor/wasapi"]
 
 [workspace.dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
@@ -64,9 +62,3 @@ name = "wisp"
 [workspace.package]
 edition = "2024"
 version = "0.0.17"
-
-[patch.crates-io]
-# wasapi 0.23 does not distinguish WAIT_TIMEOUT from other non-signaled wait
-# results and reads the null pointer WASAPI may return for silent packets.
-# Keep the patch local until those safety/correctness fixes are released.
-wasapi = { path = "vendor/wasapi" }

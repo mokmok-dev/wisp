@@ -5,8 +5,6 @@
 # code and is missing newer frameworks (e.g. CoreAudioTypes) and the swift
 # runtime stubs. Force the system `cc` (which uses the active xcode-select
 # toolchain) for linking so framework lookups resolve against the system SDK.
-#
-# Linux / Windows targets are unaffected.
 [target.aarch64-apple-darwin]
 linker = "/usr/bin/cc"
 

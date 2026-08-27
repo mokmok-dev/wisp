@@ -1970,6 +1970,7 @@ impl Session {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl SessionResult {
     /// Convert the platform compatibility result into the backend-neutral
     /// transcript contract.
@@ -1992,6 +1993,7 @@ impl SessionResult {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Event {
     /// Return a backend-neutral transcript view for result events while
     /// retaining the existing event surface used by the desktop app.

@@ -307,13 +307,13 @@ enum CallbackSweep<T> {
     Busy,
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 struct CallbackFinalCleanupHook {
     entered: std::sync::Barrier,
     release: std::sync::Barrier,
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 struct CallbackFinalOverflowHook {
     entered: std::sync::Barrier,
     release: std::sync::Barrier,

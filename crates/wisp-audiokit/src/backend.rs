@@ -47,9 +47,7 @@ impl std::fmt::Display for BackendId {
 pub enum UnavailableReason {
     UnsupportedPlatform,
     PermissionDenied(String),
-    MissingModel(String),
     UnsupportedLocale(String),
-    InsufficientCompute(String),
     InitializationFailed(String),
 }
 
@@ -95,7 +93,6 @@ pub enum RecognitionPrivacy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TranscriberClass {
     Platform,
-    LocalModel,
 }
 
 /// Transcription features guaranteed by an available backend.
@@ -158,16 +155,6 @@ impl TranscriptionPolicy {
             privacy: PrivacyRequirement::OnlineAllowed,
             preferred: TranscriberClass::Platform,
             allow_backend_fallback: false,
-            allow_record_only: true,
-        }
-    }
-
-    #[must_use]
-    pub const fn offline_local_model() -> Self {
-        Self {
-            privacy: PrivacyRequirement::OfflineRequired,
-            preferred: TranscriberClass::LocalModel,
-            allow_backend_fallback: true,
             allow_record_only: true,
         }
     }
@@ -272,7 +259,6 @@ pub enum BackendErrorKind {
     PermissionDenied,
     DeviceUnavailable,
     UnsupportedFormat,
-    MissingModel,
     Internal,
 }
 
@@ -457,63 +443,6 @@ where
 
     fn abort(&mut self) -> BackendResult<()> {
         (**self).abort()
-    }
-}
-
-/// Fan-out adapter used by platform recorders that already own the capture
-/// consumer. It keeps recording and transcription on the same ordered PCM
-/// stream while publishing backend-neutral transcript events independently.
-#[cfg(any(test, target_os = "linux", target_os = "windows"))]
-pub(crate) struct RecordingTranscriber {
-    backend: Box<dyn TranscriberBackend>,
-    events: channel::Sender<TranscriptEvent>,
-}
-
-#[cfg(any(test, target_os = "linux", target_os = "windows"))]
-impl RecordingTranscriber {
-    pub(crate) fn start(
-        mut backend: Box<dyn TranscriberBackend>,
-        tracks: &[TrackDescriptor],
-    ) -> BackendResult<(Self, channel::Receiver<TranscriptEvent>)> {
-        backend.start(tracks)?;
-        // Transcript finals are not replaceable telemetry. Keep this handoff
-        // lossless; capture-side backpressure is handled by each backend's
-        // bounded PCM queue instead.
-        let (events, receiver) = channel::unbounded();
-        Ok((Self { backend, events }, receiver))
-    }
-
-    pub(crate) fn push_capture(
-        &mut self,
-        event: &CaptureEvent,
-    ) -> BackendResult<()> {
-        match event {
-            CaptureEvent::Samples(frame) => self.backend.push(frame)?,
-            CaptureEvent::Overflow {
-                track_id,
-                dropped_frames,
-            } => self.backend.push_gap(*track_id, *dropped_frames)?,
-            _ => {},
-        }
-        self.drain()
-    }
-
-    pub(crate) fn finish(&mut self) -> BackendResult<()> {
-        self.backend.finish()?;
-        self.drain()
-    }
-
-    fn drain(&mut self) -> BackendResult<()> {
-        while let Some(event) = self.backend.next_event(Duration::ZERO)? {
-            self.events.send(event).map_err(|_| {
-                BackendError::new(
-                    BackendId::new("recording-transcriber"),
-                    BackendErrorKind::Internal,
-                    "transcript event receiver disconnected",
-                )
-            })?;
-        }
-        Ok(())
     }
 }
 
@@ -1023,20 +952,20 @@ pub enum ControlEnqueue {
     Dropped,
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerFailureRoute {
     Startup,
     Runtime,
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 pub(crate) struct StartupCoordinator {
     expected_workers: usize,
     ready_workers: AtomicUsize,
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 impl StartupCoordinator {
     pub(crate) const fn new(expected_workers: usize) -> Self {
         Self {
@@ -1054,13 +983,13 @@ impl StartupCoordinator {
     }
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct WorkerStartupPhase {
     ready_published: AtomicBool,
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 impl WorkerStartupPhase {
     pub(crate) fn mark_ready_published(&self) {
         self.ready_published.store(true, Ordering::SeqCst);
@@ -1075,7 +1004,7 @@ impl WorkerStartupPhase {
     }
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 pub(crate) fn publish_ready_and_wait<T>(
     sender: &channel::Sender<T>,
     ready: T,
@@ -1676,10 +1605,10 @@ mod tests {
         Availability, BackendError, BackendErrorKind, BackendId, BackendResult, CaptureBackend,
         CaptureCapabilities, CaptureControlEvent, CaptureEventReceiver, CaptureProbe,
         ControlEnqueue, FrameEnqueue, OrchestratorEvent, PrivacyRequirement, RecognitionPrivacy,
-        RecordingTranscriber, SessionOrchestrator, ShutdownMode, StartupCoordinator,
-        TranscriberBackend, TranscriberCapabilities, TranscriberClass, TranscriberFeature,
-        TranscriberProbe, TranscriptionPolicy, TranscriptionSelection, WorkerFailureRoute,
-        WorkerStartupPhase, publish_ready_and_wait, realtime_capture_channel, select_transcriber,
+        SessionOrchestrator, ShutdownMode, StartupCoordinator, TranscriberBackend,
+        TranscriberCapabilities, TranscriberClass, TranscriberFeature, TranscriberProbe,
+        TranscriptionPolicy, TranscriptionSelection, WorkerFailureRoute, WorkerStartupPhase,
+        publish_ready_and_wait, realtime_capture_channel, select_transcriber,
         select_transcriber_after_failure,
     };
 
@@ -1712,14 +1641,14 @@ mod tests {
     fn selects_available_preferred_backend() {
         let candidates = [
             transcriber_probe(
-                "platform",
+                "platform-online",
                 TranscriberClass::Platform,
                 RecognitionPrivacy::Online,
                 true,
             ),
             transcriber_probe(
-                "local",
-                TranscriberClass::LocalModel,
+                "platform-offline",
+                TranscriberClass::Platform,
                 RecognitionPrivacy::Offline,
                 true,
             ),
@@ -1727,7 +1656,7 @@ mod tests {
 
         assert_eq!(
             select_transcriber(TranscriptionPolicy::platform_default(), &candidates),
-            TranscriptionSelection::Backend(BackendId::new("platform"))
+            TranscriptionSelection::Backend(BackendId::new("platform-online"))
         );
     }
 
@@ -1741,20 +1670,22 @@ mod tests {
                 true,
             ),
             transcriber_probe(
-                "local-offline",
-                TranscriberClass::LocalModel,
+                "platform-offline",
+                TranscriberClass::Platform,
                 RecognitionPrivacy::Offline,
                 true,
             ),
         ];
         let policy = TranscriptionPolicy {
+            privacy: PrivacyRequirement::OfflineRequired,
             preferred: TranscriberClass::Platform,
-            ..TranscriptionPolicy::offline_local_model()
+            allow_backend_fallback: true,
+            allow_record_only: true,
         };
 
         assert_eq!(
             select_transcriber(policy, &candidates),
-            TranscriptionSelection::Backend(BackendId::new("local-offline"))
+            TranscriptionSelection::Backend(BackendId::new("platform-offline"))
         );
     }
 
@@ -1771,7 +1702,7 @@ mod tests {
             select_transcriber(
                 TranscriptionPolicy {
                     privacy: PrivacyRequirement::OfflineRequired,
-                    preferred: TranscriberClass::LocalModel,
+                    preferred: TranscriberClass::Platform,
                     allow_backend_fallback: true,
                     allow_record_only: true,
                 },
@@ -1786,8 +1717,10 @@ mod tests {
         assert!(matches!(
             select_transcriber(
                 TranscriptionPolicy {
+                    privacy: PrivacyRequirement::OfflineRequired,
+                    preferred: TranscriberClass::Platform,
                     allow_record_only: false,
-                    ..TranscriptionPolicy::offline_local_model()
+                    allow_backend_fallback: false,
                 },
                 &[],
             ),
@@ -1799,19 +1732,19 @@ mod tests {
     fn runtime_initialization_failure_honors_backend_fallback_policy() {
         let candidates = [
             transcriber_probe(
-                "platform",
+                "platform-1",
                 TranscriberClass::Platform,
                 RecognitionPrivacy::Online,
                 true,
             ),
             transcriber_probe(
-                "local",
-                TranscriberClass::LocalModel,
-                RecognitionPrivacy::Offline,
+                "platform-2",
+                TranscriberClass::Platform,
+                RecognitionPrivacy::Online,
                 true,
             ),
         ];
-        let failed = BackendId::new("platform");
+        let failed = BackendId::new("platform-1");
 
         assert_eq!(
             select_transcriber_after_failure(
@@ -1822,7 +1755,7 @@ mod tests {
                 &candidates,
                 &failed,
             ),
-            TranscriptionSelection::Backend(BackendId::new("local"))
+            TranscriptionSelection::Backend(BackendId::new("platform-2"))
         );
         assert!(matches!(
             select_transcriber_after_failure(
@@ -1838,13 +1771,13 @@ mod tests {
     fn runtime_fallback_never_weakens_offline_requirement() {
         let candidates = [
             transcriber_probe(
-                "local",
-                TranscriberClass::LocalModel,
+                "platform-offline",
+                TranscriberClass::Platform,
                 RecognitionPrivacy::Offline,
                 true,
             ),
             transcriber_probe(
-                "platform-online",
+                "platform-online-2",
                 TranscriberClass::Platform,
                 RecognitionPrivacy::Online,
                 true,
@@ -1853,9 +1786,14 @@ mod tests {
 
         assert!(matches!(
             select_transcriber_after_failure(
-                TranscriptionPolicy::offline_local_model(),
+                TranscriptionPolicy {
+                    privacy: PrivacyRequirement::OfflineRequired,
+                    preferred: TranscriberClass::Platform,
+                    allow_backend_fallback: true,
+                    allow_record_only: true,
+                },
                 &candidates,
-                &BackendId::new("local"),
+                &BackendId::new("platform-offline"),
             ),
             TranscriptionSelection::RecordOnly { .. }
         ));
@@ -2486,7 +2424,7 @@ mod tests {
         fn probe(&self) -> TranscriberProbe {
             transcriber_probe(
                 "fake-transcriber",
-                TranscriberClass::LocalModel,
+                TranscriberClass::Platform,
                 RecognitionPrivacy::Offline,
                 true,
             )
@@ -2552,90 +2490,6 @@ mod tests {
             self.calls.lock().unwrap().push("transcriber-abort");
             Ok(())
         }
-    }
-
-    #[test]
-    fn recording_transcriber_fans_out_pcm_gap_events_and_finish() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let segment = TranscriptSegment {
-            track_id: TrackId::MICROPHONE,
-            segment_id: TranscriptSegmentId::new(4),
-            text: "final".into(),
-            start_seconds: 0.0,
-            end_seconds: 1.0,
-            confidence_mean: None,
-            confidence_min: None,
-        };
-        let backend = FakeTranscriber {
-            events: VecDeque::new(),
-            finish_events: VecDeque::from([TranscriptEvent::Final(segment.clone())]),
-            push_errors_remaining: 0,
-            next_event_errors_remaining: 0,
-            calls: Arc::clone(&calls),
-        };
-        let tracks = [wisp_core::SourceLabel::Mic.track_descriptor()];
-        let (mut tap, events) = RecordingTranscriber::start(Box::new(backend), &tracks).unwrap();
-        let frame = AudioFrame::from_f32(
-            TrackId::MICROPHONE,
-            SourceKind::Microphone,
-            0,
-            MonotonicTimestamp::default(),
-            16_000,
-            1,
-            vec![0.0; 160],
-        )
-        .unwrap();
-        tap.push_capture(&CaptureEvent::Samples(frame)).unwrap();
-        tap.push_capture(&CaptureEvent::Overflow {
-            track_id: TrackId::MICROPHONE,
-            dropped_frames: 80,
-        })
-        .unwrap();
-        tap.finish().unwrap();
-        assert_eq!(events.recv().unwrap(), TranscriptEvent::Final(segment));
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            [
-                "transcriber-start",
-                "transcriber-push",
-                "transcriber-gap",
-                "transcriber-finish"
-            ]
-        );
-    }
-
-    #[test]
-    fn recording_transcriber_preserves_final_bursts_larger_than_old_queue_capacity() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let events = (0..256)
-            .map(|id| {
-                TranscriptEvent::Final(TranscriptSegment {
-                    track_id: TrackId::MICROPHONE,
-                    segment_id: TranscriptSegmentId::new(id),
-                    text: format!("final {id}"),
-                    start_seconds: 0.0,
-                    end_seconds: 0.5,
-                    confidence_mean: None,
-                    confidence_min: None,
-                })
-            })
-            .collect();
-        let backend = FakeTranscriber {
-            events,
-            finish_events: VecDeque::new(),
-            push_errors_remaining: 0,
-            next_event_errors_remaining: 0,
-            calls,
-        };
-        let tracks = [wisp_core::SourceLabel::Mic.track_descriptor()];
-        let (mut tap, receiver) = RecordingTranscriber::start(Box::new(backend), &tracks).unwrap();
-        tap.push_capture(&CaptureEvent::Error {
-            track_id: None,
-            message: "test notification".into(),
-            recoverable: true,
-        })
-        .unwrap();
-        assert_eq!(receiver.try_iter().count(), 256);
     }
 
     fn fake_orchestrator(
@@ -3006,7 +2860,7 @@ mod tests {
             fn probe(&self) -> TranscriberProbe {
                 transcriber_probe(
                     "failing",
-                    TranscriberClass::LocalModel,
+                    TranscriberClass::Platform,
                     RecognitionPrivacy::Offline,
                     true,
                 )
@@ -3019,8 +2873,8 @@ mod tests {
                 self.calls.lock().unwrap().push("transcriber-start");
                 Err(BackendError::new(
                     BackendId::new("failing"),
-                    BackendErrorKind::MissingModel,
-                    "missing model",
+                    BackendErrorKind::Internal,
+                    "startup failed",
                 ))
             }
 
@@ -3124,7 +2978,7 @@ mod tests {
             self.calls.lock().unwrap().push("transcriber-start");
             Err(BackendError::new(
                 BackendId::new("record-only-failure"),
-                BackendErrorKind::MissingModel,
+                BackendErrorKind::Internal,
                 "startup failed",
             ))
         }

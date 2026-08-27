@@ -4,10 +4,10 @@
 # attrset. Needs `config` for the treefmt wrapper and the pre-commit install
 # hook, plus the shared `pkgs`, `rustToolchain`, and pinned `swiftformat`.
 #
-# `default` is the turnkey environment entered by `nix develop` / direnv on both
-# macOS and Linux: pinned Rust toolchain, sccache, the treefmt wrapper, the
-# git-hooks tooling, and (on Linux) the native audio build deps. Its shellHook
-# installs the pre-commit git hooks so a fresh clone is fully set up in one step.
+# `default` is the turnkey environment entered by `nix develop` / direnv:
+# pinned Rust toolchain, sccache, the treefmt wrapper, and the git-hooks
+# tooling. Its shellHook installs the pre-commit git hooks so a fresh clone
+# is fully set up in one step.
 #
 # `ci` is the minimal lint shell used by the GitHub Actions workflows.
 {
@@ -19,10 +19,9 @@
 let
   treefmt = config.treefmt.build.wrapper;
 
-  # Shared by both devShells on macOS. Nix injects its own apple-sdk +
-  # xcrun wrapper, both of which are too old for what WispAudioKit and
-  # GPUI need (Speech.SpeechAnalyzer, Core Audio Process Tap, the
-  # Metal Toolchain). We:
+  # Nix injects its own apple-sdk + xcrun wrapper, both of which are too old
+  # for what WispAudioKit and GPUI need (Speech.SpeechAnalyzer, Core Audio
+  # Process Tap, the Metal Toolchain). We:
   #
   #   1. Point DEVELOPER_DIR at the real Apple install so `xcrun` and
   #      the tools it dispatches to (swift, metal, ...) pick up the
@@ -62,15 +61,7 @@ in
       pkgs.cachix
       pkgs.sccache
       treefmt
-    ]
-    ++ pkgs.lib.optionals pkgs.stdenv.isLinux (
-      with pkgs;
-      [
-        pipewire
-        pkg-config
-        rustPlatform.bindgenHook
-      ]
-    );
+    ];
 
     shellHook = ''
       export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"

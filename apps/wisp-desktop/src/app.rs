@@ -158,13 +158,12 @@ impl Permissions {
         if self.speech.is_granted() {
             return true;
         }
-        policy.preferred == wisp_audiokit::TranscriberClass::LocalModel
-            || cfg!(target_os = "macos")
-                && policy.allow_record_only
-                && matches!(
-                    self.speech,
-                    PermissionStatus::Denied | PermissionStatus::Restricted
-                )
+        cfg!(target_os = "macos")
+            && policy.allow_record_only
+            && matches!(
+                self.speech,
+                PermissionStatus::Denied | PermissionStatus::Restricted
+            )
     }
 
     pub fn set_status(

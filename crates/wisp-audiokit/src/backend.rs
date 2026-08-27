@@ -47,9 +47,7 @@ impl std::fmt::Display for BackendId {
 pub enum UnavailableReason {
     UnsupportedPlatform,
     PermissionDenied(String),
-    MissingModel(String),
     UnsupportedLocale(String),
-    InsufficientCompute(String),
     InitializationFailed(String),
 }
 
@@ -95,7 +93,6 @@ pub enum RecognitionPrivacy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TranscriberClass {
     Platform,
-    LocalModel,
 }
 
 /// Transcription features guaranteed by an available backend.
@@ -158,16 +155,6 @@ impl TranscriptionPolicy {
             privacy: PrivacyRequirement::OnlineAllowed,
             preferred: TranscriberClass::Platform,
             allow_backend_fallback: false,
-            allow_record_only: true,
-        }
-    }
-
-    #[must_use]
-    pub const fn offline_local_model() -> Self {
-        Self {
-            privacy: PrivacyRequirement::OfflineRequired,
-            preferred: TranscriberClass::LocalModel,
-            allow_backend_fallback: true,
             allow_record_only: true,
         }
     }
@@ -272,7 +259,6 @@ pub enum BackendErrorKind {
     PermissionDenied,
     DeviceUnavailable,
     UnsupportedFormat,
-    MissingModel,
     Internal,
 }
 
@@ -1712,14 +1698,14 @@ mod tests {
     fn selects_available_preferred_backend() {
         let candidates = [
             transcriber_probe(
-                "platform",
+                "platform-online",
                 TranscriberClass::Platform,
                 RecognitionPrivacy::Online,
                 true,
             ),
             transcriber_probe(
-                "local",
-                TranscriberClass::LocalModel,
+                "platform-offline",
+                TranscriberClass::Platform,
                 RecognitionPrivacy::Offline,
                 true,
             ),
@@ -1727,7 +1713,7 @@ mod tests {
 
         assert_eq!(
             select_transcriber(TranscriptionPolicy::platform_default(), &candidates),
-            TranscriptionSelection::Backend(BackendId::new("platform"))
+            TranscriptionSelection::Backend(BackendId::new("platform-online"))
         );
     }
 
@@ -1741,20 +1727,22 @@ mod tests {
                 true,
             ),
             transcriber_probe(
-                "local-offline",
-                TranscriberClass::LocalModel,
+                "platform-offline",
+                TranscriberClass::Platform,
                 RecognitionPrivacy::Offline,
                 true,
             ),
         ];
         let policy = TranscriptionPolicy {
+            privacy: PrivacyRequirement::OfflineRequired,
             preferred: TranscriberClass::Platform,
-            ..TranscriptionPolicy::offline_local_model()
+            allow_backend_fallback: true,
+            allow_record_only: true,
         };
 
         assert_eq!(
             select_transcriber(policy, &candidates),
-            TranscriptionSelection::Backend(BackendId::new("local-offline"))
+            TranscriptionSelection::Backend(BackendId::new("platform-offline"))
         );
     }
 
@@ -1771,7 +1759,7 @@ mod tests {
             select_transcriber(
                 TranscriptionPolicy {
                     privacy: PrivacyRequirement::OfflineRequired,
-                    preferred: TranscriberClass::LocalModel,
+                    preferred: TranscriberClass::Platform,
                     allow_backend_fallback: true,
                     allow_record_only: true,
                 },
@@ -1786,8 +1774,10 @@ mod tests {
         assert!(matches!(
             select_transcriber(
                 TranscriptionPolicy {
+                    privacy: PrivacyRequirement::OfflineRequired,
+                    preferred: TranscriberClass::Platform,
                     allow_record_only: false,
-                    ..TranscriptionPolicy::offline_local_model()
+                    allow_backend_fallback: false,
                 },
                 &[],
             ),
@@ -1799,19 +1789,19 @@ mod tests {
     fn runtime_initialization_failure_honors_backend_fallback_policy() {
         let candidates = [
             transcriber_probe(
-                "platform",
+                "platform-1",
                 TranscriberClass::Platform,
                 RecognitionPrivacy::Online,
                 true,
             ),
             transcriber_probe(
-                "local",
-                TranscriberClass::LocalModel,
-                RecognitionPrivacy::Offline,
+                "platform-2",
+                TranscriberClass::Platform,
+                RecognitionPrivacy::Online,
                 true,
             ),
         ];
-        let failed = BackendId::new("platform");
+        let failed = BackendId::new("platform-1");
 
         assert_eq!(
             select_transcriber_after_failure(
@@ -1822,7 +1812,7 @@ mod tests {
                 &candidates,
                 &failed,
             ),
-            TranscriptionSelection::Backend(BackendId::new("local"))
+            TranscriptionSelection::Backend(BackendId::new("platform-2"))
         );
         assert!(matches!(
             select_transcriber_after_failure(
@@ -1838,13 +1828,13 @@ mod tests {
     fn runtime_fallback_never_weakens_offline_requirement() {
         let candidates = [
             transcriber_probe(
-                "local",
-                TranscriberClass::LocalModel,
+                "platform-offline",
+                TranscriberClass::Platform,
                 RecognitionPrivacy::Offline,
                 true,
             ),
             transcriber_probe(
-                "platform-online",
+                "platform-online-2",
                 TranscriberClass::Platform,
                 RecognitionPrivacy::Online,
                 true,
@@ -1853,9 +1843,14 @@ mod tests {
 
         assert!(matches!(
             select_transcriber_after_failure(
-                TranscriptionPolicy::offline_local_model(),
+                TranscriptionPolicy {
+                    privacy: PrivacyRequirement::OfflineRequired,
+                    preferred: TranscriberClass::Platform,
+                    allow_backend_fallback: true,
+                    allow_record_only: true,
+                },
                 &candidates,
-                &BackendId::new("local"),
+                &BackendId::new("platform-offline"),
             ),
             TranscriptionSelection::RecordOnly { .. }
         ));
@@ -2486,7 +2481,7 @@ mod tests {
         fn probe(&self) -> TranscriberProbe {
             transcriber_probe(
                 "fake-transcriber",
-                TranscriberClass::LocalModel,
+                TranscriberClass::Platform,
                 RecognitionPrivacy::Offline,
                 true,
             )
@@ -3006,7 +3001,7 @@ mod tests {
             fn probe(&self) -> TranscriberProbe {
                 transcriber_probe(
                     "failing",
-                    TranscriberClass::LocalModel,
+                    TranscriberClass::Platform,
                     RecognitionPrivacy::Offline,
                     true,
                 )
@@ -3019,8 +3014,8 @@ mod tests {
                 self.calls.lock().unwrap().push("transcriber-start");
                 Err(BackendError::new(
                     BackendId::new("failing"),
-                    BackendErrorKind::MissingModel,
-                    "missing model",
+                    BackendErrorKind::Internal,
+                    "startup failed",
                 ))
             }
 
@@ -3124,7 +3119,7 @@ mod tests {
             self.calls.lock().unwrap().push("transcriber-start");
             Err(BackendError::new(
                 BackendId::new("record-only-failure"),
-                BackendErrorKind::MissingModel,
+                BackendErrorKind::Internal,
                 "startup failed",
             ))
         }

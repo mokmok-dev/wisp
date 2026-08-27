@@ -254,8 +254,6 @@ fn transcriber_start_error(
         && normalized.contains("denied"))
     {
         BackendErrorKind::PermissionDenied
-    } else if normalized.contains("model") || normalized.contains("asset") {
-        BackendErrorKind::MissingModel
     } else {
         BackendErrorKind::Internal
     };
@@ -2059,15 +2057,6 @@ mod tests {
         assert!(matches!(
             select_macos_transcriber(strict, PermissionStatus::Denied),
             TranscriptionSelection::Unavailable { .. }
-        ));
-        let no_fallback_local = crate::TranscriptionPolicy {
-            preferred: TranscriberClass::LocalModel,
-            allow_backend_fallback: false,
-            ..crate::TranscriptionPolicy::offline_local_model()
-        };
-        assert!(matches!(
-            select_macos_transcriber(no_fallback_local, PermissionStatus::Granted),
-            TranscriptionSelection::RecordOnly { .. }
         ));
     }
 

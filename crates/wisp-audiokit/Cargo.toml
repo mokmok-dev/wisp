@@ -22,31 +22,5 @@ unsafe_code = "allow"
 wisp-audiokit-sys = { path = "../wisp-audiokit-sys" }
 wisp-core = { path = "../wisp-core" }
 crossbeam-channel = { workspace = true }
-ogg = "0.9.2"
-ropus = "0.12.18"
 thiserror = { workspace = true }
-sha2 = "0.10.9"
 tempfile = { workspace = true }
-
-[target.'cfg(not(target_os = "windows"))'.dependencies]
-sherpa-onnx = "1.13.4"
-
-[target.'cfg(target_os = "windows")'.dependencies]
-# The upstream static Windows archive is built with /MT, while Rust's default
-# MSVC runtime uses /MD. Use the DLL build to avoid conflicting C runtimes.
-sherpa-onnx = { version = "1.13.4", default-features = false, features = ["shared"] }
-wasapi = "0.23.0"
-windows = { version = "0.62.2", features = [
-  "Foundation",
-  "Globalization",
-  "Media_SpeechRecognition",
-  "Win32_Foundation",
-  "Win32_Media_Audio",
-  "Win32_System_Com",
-  "Win32_System_Performance",
-] }
-windows-core = "0.62.2"
-windows-future = "0.3.2"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-pipewire = "=0.9.2"

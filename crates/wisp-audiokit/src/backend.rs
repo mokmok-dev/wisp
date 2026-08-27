@@ -446,63 +446,6 @@ where
     }
 }
 
-/// Fan-out adapter used by platform recorders that already own the capture
-/// consumer. It keeps recording and transcription on the same ordered PCM
-/// stream while publishing backend-neutral transcript events independently.
-#[cfg(any(test, target_os = "linux", target_os = "windows"))]
-pub(crate) struct RecordingTranscriber {
-    backend: Box<dyn TranscriberBackend>,
-    events: channel::Sender<TranscriptEvent>,
-}
-
-#[cfg(any(test, target_os = "linux", target_os = "windows"))]
-impl RecordingTranscriber {
-    pub(crate) fn start(
-        mut backend: Box<dyn TranscriberBackend>,
-        tracks: &[TrackDescriptor],
-    ) -> BackendResult<(Self, channel::Receiver<TranscriptEvent>)> {
-        backend.start(tracks)?;
-        // Transcript finals are not replaceable telemetry. Keep this handoff
-        // lossless; capture-side backpressure is handled by each backend's
-        // bounded PCM queue instead.
-        let (events, receiver) = channel::unbounded();
-        Ok((Self { backend, events }, receiver))
-    }
-
-    pub(crate) fn push_capture(
-        &mut self,
-        event: &CaptureEvent,
-    ) -> BackendResult<()> {
-        match event {
-            CaptureEvent::Samples(frame) => self.backend.push(frame)?,
-            CaptureEvent::Overflow {
-                track_id,
-                dropped_frames,
-            } => self.backend.push_gap(*track_id, *dropped_frames)?,
-            _ => {},
-        }
-        self.drain()
-    }
-
-    pub(crate) fn finish(&mut self) -> BackendResult<()> {
-        self.backend.finish()?;
-        self.drain()
-    }
-
-    fn drain(&mut self) -> BackendResult<()> {
-        while let Some(event) = self.backend.next_event(Duration::ZERO)? {
-            self.events.send(event).map_err(|_| {
-                BackendError::new(
-                    BackendId::new("recording-transcriber"),
-                    BackendErrorKind::Internal,
-                    "transcript event receiver disconnected",
-                )
-            })?;
-        }
-        Ok(())
-    }
-}
-
 /// Unified event surfaced by [`SessionOrchestrator`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum OrchestratorEvent {
@@ -1009,20 +952,20 @@ pub enum ControlEnqueue {
     Dropped,
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerFailureRoute {
     Startup,
     Runtime,
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 pub(crate) struct StartupCoordinator {
     expected_workers: usize,
     ready_workers: AtomicUsize,
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 impl StartupCoordinator {
     pub(crate) const fn new(expected_workers: usize) -> Self {
         Self {
@@ -1040,13 +983,13 @@ impl StartupCoordinator {
     }
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct WorkerStartupPhase {
     ready_published: AtomicBool,
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 impl WorkerStartupPhase {
     pub(crate) fn mark_ready_published(&self) {
         self.ready_published.store(true, Ordering::SeqCst);
@@ -1061,7 +1004,7 @@ impl WorkerStartupPhase {
     }
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 pub(crate) fn publish_ready_and_wait<T>(
     sender: &channel::Sender<T>,
     ready: T,
@@ -1662,10 +1605,10 @@ mod tests {
         Availability, BackendError, BackendErrorKind, BackendId, BackendResult, CaptureBackend,
         CaptureCapabilities, CaptureControlEvent, CaptureEventReceiver, CaptureProbe,
         ControlEnqueue, FrameEnqueue, OrchestratorEvent, PrivacyRequirement, RecognitionPrivacy,
-        RecordingTranscriber, SessionOrchestrator, ShutdownMode, StartupCoordinator,
-        TranscriberBackend, TranscriberCapabilities, TranscriberClass, TranscriberFeature,
-        TranscriberProbe, TranscriptionPolicy, TranscriptionSelection, WorkerFailureRoute,
-        WorkerStartupPhase, publish_ready_and_wait, realtime_capture_channel, select_transcriber,
+        SessionOrchestrator, ShutdownMode, StartupCoordinator, TranscriberBackend,
+        TranscriberCapabilities, TranscriberClass, TranscriberFeature, TranscriberProbe,
+        TranscriptionPolicy, TranscriptionSelection, WorkerFailureRoute, WorkerStartupPhase,
+        publish_ready_and_wait, realtime_capture_channel, select_transcriber,
         select_transcriber_after_failure,
     };
 
@@ -2547,90 +2490,6 @@ mod tests {
             self.calls.lock().unwrap().push("transcriber-abort");
             Ok(())
         }
-    }
-
-    #[test]
-    fn recording_transcriber_fans_out_pcm_gap_events_and_finish() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let segment = TranscriptSegment {
-            track_id: TrackId::MICROPHONE,
-            segment_id: TranscriptSegmentId::new(4),
-            text: "final".into(),
-            start_seconds: 0.0,
-            end_seconds: 1.0,
-            confidence_mean: None,
-            confidence_min: None,
-        };
-        let backend = FakeTranscriber {
-            events: VecDeque::new(),
-            finish_events: VecDeque::from([TranscriptEvent::Final(segment.clone())]),
-            push_errors_remaining: 0,
-            next_event_errors_remaining: 0,
-            calls: Arc::clone(&calls),
-        };
-        let tracks = [wisp_core::SourceLabel::Mic.track_descriptor()];
-        let (mut tap, events) = RecordingTranscriber::start(Box::new(backend), &tracks).unwrap();
-        let frame = AudioFrame::from_f32(
-            TrackId::MICROPHONE,
-            SourceKind::Microphone,
-            0,
-            MonotonicTimestamp::default(),
-            16_000,
-            1,
-            vec![0.0; 160],
-        )
-        .unwrap();
-        tap.push_capture(&CaptureEvent::Samples(frame)).unwrap();
-        tap.push_capture(&CaptureEvent::Overflow {
-            track_id: TrackId::MICROPHONE,
-            dropped_frames: 80,
-        })
-        .unwrap();
-        tap.finish().unwrap();
-        assert_eq!(events.recv().unwrap(), TranscriptEvent::Final(segment));
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            [
-                "transcriber-start",
-                "transcriber-push",
-                "transcriber-gap",
-                "transcriber-finish"
-            ]
-        );
-    }
-
-    #[test]
-    fn recording_transcriber_preserves_final_bursts_larger_than_old_queue_capacity() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let events = (0..256)
-            .map(|id| {
-                TranscriptEvent::Final(TranscriptSegment {
-                    track_id: TrackId::MICROPHONE,
-                    segment_id: TranscriptSegmentId::new(id),
-                    text: format!("final {id}"),
-                    start_seconds: 0.0,
-                    end_seconds: 0.5,
-                    confidence_mean: None,
-                    confidence_min: None,
-                })
-            })
-            .collect();
-        let backend = FakeTranscriber {
-            events,
-            finish_events: VecDeque::new(),
-            push_errors_remaining: 0,
-            next_event_errors_remaining: 0,
-            calls,
-        };
-        let tracks = [wisp_core::SourceLabel::Mic.track_descriptor()];
-        let (mut tap, receiver) = RecordingTranscriber::start(Box::new(backend), &tracks).unwrap();
-        tap.push_capture(&CaptureEvent::Error {
-            track_id: None,
-            message: "test notification".into(),
-            recoverable: true,
-        })
-        .unwrap();
-        assert_eq!(receiver.try_iter().count(), 256);
     }
 
     fn fake_orchestrator(

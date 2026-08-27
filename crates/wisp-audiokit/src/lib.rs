@@ -179,22 +179,22 @@ impl From<SessionConfig> for SessionOptions {
         Self::new(config, policy)
     }
 }
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 const CALLBACK_FINAL_CAPACITY: usize = 64;
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 const CALLBACK_PARTIAL_CAPACITY: usize = 64;
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 const CALLBACK_LOG_CAPACITY: usize = 16;
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 const CALLBACK_SOURCE_SLOTS: usize = 2;
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 trait CallbackEventKey: Clone + PartialEq {
     fn source_slot(&self) -> usize;
     fn sequence(&self) -> u64;
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 impl CallbackEventKey for u64 {
     fn source_slot(&self) -> usize {
         0
@@ -205,7 +205,7 @@ impl CallbackEventKey for u64 {
     }
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 impl CallbackEventKey for (wisp_core::SourceLabel, u64) {
     fn source_slot(&self) -> usize {
         match self.0 {
@@ -219,7 +219,7 @@ impl CallbackEventKey for (wisp_core::SourceLabel, u64) {
     }
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CallbackEventClass<K> {
     Final(Option<K>),
@@ -227,7 +227,7 @@ enum CallbackEventClass<K> {
     Log,
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallbackEnqueue {
     Enqueued,
@@ -236,7 +236,7 @@ enum CallbackEnqueue {
     DroppedBusy,
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 struct CallbackQueueState<T, K> {
     partials: std::collections::VecDeque<(K, T)>,
     logs: std::collections::VecDeque<T>,
@@ -244,13 +244,13 @@ struct CallbackQueueState<T, K> {
     lossy_wake_armed: bool,
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 struct CallbackTerminalWatermarks {
     initialized: [std::sync::atomic::AtomicBool; CALLBACK_SOURCE_SLOTS],
     sequences: [std::sync::atomic::AtomicU64; CALLBACK_SOURCE_SLOTS],
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 impl Default for CallbackTerminalWatermarks {
     fn default() -> Self {
         Self {
@@ -260,7 +260,7 @@ impl Default for CallbackTerminalWatermarks {
     }
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 impl<T, K> Default for CallbackQueueState<T, K> {
     fn default() -> Self {
         Self {
@@ -272,7 +272,7 @@ impl<T, K> Default for CallbackQueueState<T, K> {
     }
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 #[derive(Clone)]
 struct CallbackEventSender<T, K> {
     state: std::sync::Arc<std::sync::Mutex<CallbackQueueState<T, K>>>,
@@ -289,7 +289,7 @@ struct CallbackEventSender<T, K> {
     final_overflow_hook: Option<std::sync::Arc<CallbackFinalOverflowHook>>,
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 struct CallbackEventReceiver<T, K> {
     state: std::sync::Arc<std::sync::Mutex<CallbackQueueState<T, K>>>,
     lossy_ready: crossbeam_channel::Receiver<()>,
@@ -300,7 +300,7 @@ struct CallbackEventReceiver<T, K> {
     final_gap_factory: Option<fn(u64) -> T>,
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 enum CallbackSweep<T> {
     Event(T),
     Empty,
@@ -319,14 +319,14 @@ struct CallbackFinalOverflowHook {
     release: std::sync::Barrier,
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn callback_event_channel_with_final_gap<T, K>(
     final_gap_factory: fn(u64) -> T
 ) -> (CallbackEventSender<T, K>, CallbackEventReceiver<T, K>) {
     callback_event_channel_inner(Some(final_gap_factory))
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn callback_event_channel_inner<T, K>(
     final_gap_factory: Option<fn(u64) -> T>
 ) -> (CallbackEventSender<T, K>, CallbackEventReceiver<T, K>) {
@@ -363,7 +363,7 @@ fn callback_event_channel_inner<T, K>(
     )
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 impl<T, K> CallbackEventSender<T, K>
 where
     K: CallbackEventKey,
@@ -481,7 +481,7 @@ where
     }
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 impl<T, K> CallbackEventReceiver<T, K>
 where
     K: CallbackEventKey,
@@ -604,7 +604,7 @@ where
     }
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn finish_final_acceptance<T, K>(
     state: &mut CallbackQueueState<T, K>,
     key: &K,
@@ -629,7 +629,7 @@ fn finish_final_acceptance<T, K>(
     }
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn reconcile_terminal_high_watermarks<T, K>(
     state: &mut CallbackQueueState<T, K>,
     published: &CallbackTerminalWatermarks,
@@ -660,7 +660,7 @@ fn reconcile_terminal_high_watermarks<T, K>(
     }
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn reconcile_empty_lossy_wake<T, K>(
     state: &mut CallbackQueueState<T, K>,
     lossy_ready: &crossbeam_channel::Receiver<()>,
@@ -669,7 +669,7 @@ fn reconcile_empty_lossy_wake<T, K>(
     state.lossy_wake_armed = false;
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn key_is_finalized<T, K>(
     state: &CallbackQueueState<T, K>,
     key: &K,
@@ -681,7 +681,7 @@ where
         .is_some_and(|finalized| key.sequence() <= finalized)
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn arm_lossy_wake<T, K>(
     state: &mut CallbackQueueState<T, K>,
     wake: &crossbeam_channel::Sender<()>,
@@ -696,7 +696,7 @@ fn arm_lossy_wake<T, K>(
     }
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn saturating_atomic_increment(value: &std::sync::atomic::AtomicU64) {
     let _ = value.fetch_update(
         std::sync::atomic::Ordering::Relaxed,

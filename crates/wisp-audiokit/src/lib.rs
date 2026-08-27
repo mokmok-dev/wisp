@@ -27,6 +27,7 @@ pub use wisp_core::{
     TranscriptSegmentId,
 };
 
+#[cfg(target_os = "macos")]
 use std::path::Path;
 
 #[cfg(target_os = "macos")]
@@ -1799,7 +1800,9 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 pub(crate) use imp::NativeSession;
+#[cfg(target_os = "macos")]
 pub use imp::version;
+#[cfg(target_os = "macos")]
 pub use imp::{Event, SessionResult, check_permission, request_permission};
 pub use wisp_core::SourceLabel;
 /// Source-compatible macOS session facade.

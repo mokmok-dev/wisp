@@ -244,7 +244,7 @@ impl TranscriptView {
             .child(self.render_live_top_bar(state, microphone_muted, &model, &export_name, cx))
             .child(render_transcript(
                 self.transcript_list.clone(),
-                model,
+                &model,
                 segment_count,
                 self.cursor_visible,
             ))
@@ -277,7 +277,7 @@ impl TranscriptView {
             ))
             .child(render_transcript(
                 self.transcript_list.clone(),
-                model,
+                &model,
                 segment_count,
                 false,
             ))
@@ -345,7 +345,7 @@ impl TranscriptView {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(render_transcript_actions(&model, export_name, cx));
+            .child(render_transcript_actions(model, export_name, cx));
         if matches!(state, SessionState::Recording { .. }) {
             actions = actions.child(render_microphone_mute_button(microphone_muted, toggle_mute));
         }
@@ -402,7 +402,7 @@ impl TranscriptView {
                     .child(render_back_button("library-back-history", on_back))
                     .child(title_block),
             )
-            .child(render_transcript_actions(&model, export_name, cx))
+            .child(render_transcript_actions(model, export_name, cx))
     }
 
     fn render_onboarding(
@@ -689,7 +689,7 @@ fn render_microphone_mute_button(
 
 fn render_transcript(
     list_state: ListState,
-    model: Entity<AppModel>,
+    model: &Entity<AppModel>,
     segment_count: usize,
     cursor_visible: bool,
 ) -> impl IntoElement {

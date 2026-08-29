@@ -222,7 +222,9 @@ public final class WispSession: @unchecked Sendable {
             try await startTranscription()
         } catch {
             let captureStillRunning = lifecycleState.withLock {
-                if case .started = $0 { return true }
+                if case .started = $0 {
+                    return true
+                }
                 return false
             }
             if allowRecordOnly, captureStillRunning {
@@ -288,7 +290,9 @@ public final class WispSession: @unchecked Sendable {
         case .started:
             return
         case .stopped(let task):
-            if let task { await task.value }
+            if let task {
+                await task.value
+            }
             throw PoCError.invalidLifecycle("session was stopped while start was in progress")
         }
     }
@@ -391,7 +395,9 @@ public final class WispSession: @unchecked Sendable {
     /// configure analyzers. Capture remains independently owned and running.
     public func startTranscription() async throws {
         guard lifecycleState.withLock({
-            if case .started = $0 { return true }
+            if case .started = $0 {
+                return true
+            }
             return false
         }) else {
             throw PoCError.invalidLifecycle("capture must be running before transcription")
@@ -933,7 +939,9 @@ public final class WispSession: @unchecked Sendable {
                 return nil
             }
         }
-        if let cleanupTask { await cleanupTask.value }
+        if let cleanupTask {
+            await cleanupTask.value
+        }
         lifecycleState.withLock { $0 = .stopped }
     }
 
@@ -1035,7 +1043,9 @@ public final class WispSession: @unchecked Sendable {
             }
         }
         do {
-            if let task { try await task.value }
+            if let task {
+                try await task.value
+            }
         } catch {
             transcriptionState.withLock { $0 = .finishPending }
             throw error
@@ -1472,7 +1482,9 @@ final class RealtimeAudioHandoff: @unchecked Sendable {
                 desired: desired,
                 ordering: .acquiringAndReleasing
             )
-            if result.exchanged { return }
+            if result.exchanged {
+                return
+            }
             observed = result.original
         }
     }

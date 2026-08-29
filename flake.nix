@@ -1,9 +1,6 @@
 {
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
-    # Keep Linux swiftformat on the last known-good nixpkgs revision. Newer
-    # nixpkgs currently builds Swift 5.10 with a Clang-only TLS flag.
-    nixpkgs-swiftformat.url = "github:nixos/nixpkgs/b5aa0fbd538984f6e3d201be0005b4463d8b09f8";
+    nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1";
     crane.url = "github:ipetkov/crane";
     flake-parts.url = "github:hercules-ci/flake-parts";
     rust-overlay.url = "github:oxalica/rust-overlay";
@@ -12,18 +9,6 @@
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
     git-hooks.url = "github:cachix/git-hooks.nix";
     git-hooks.inputs.nixpkgs.follows = "nixpkgs";
-  };
-
-  # Opt into the nix-community binary cache for prebuilt ecosystem tooling.
-  # Project Crane outputs need a separately configured project Cachix; the
-  # default dev shell includes its CLI. See "Build caching" in the README.
-  nixConfig = {
-    extra-substituters = [
-      "https://nix-community.cachix.org"
-    ];
-    extra-trusted-public-keys = [
-      "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
-    ];
   };
 
   outputs =
@@ -56,10 +41,7 @@
             overlays = [ inputs.rust-overlay.overlays.default ];
           };
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-          swiftformat = import ./nix/swift.nix {
-            inherit (inputs) nixpkgs-swiftformat;
-            inherit pkgs system;
-          };
+          swiftformat = pkgs.swiftformat;
 
           # 2. Crane packages + checks. Returns { packages, checks }.
           crane = import ./nix/packages.nix {

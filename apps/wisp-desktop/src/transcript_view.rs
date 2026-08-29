@@ -331,7 +331,7 @@ impl TranscriptView {
         &self,
         state: SessionState,
         microphone_muted: bool,
-        model: Entity<AppModel>,
+        model: &Entity<AppModel>,
         export_name: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -373,7 +373,7 @@ impl TranscriptView {
         &self,
         title: &str,
         subtitle: Option<&str>,
-        model: Entity<AppModel>,
+        model: &Entity<AppModel>,
         export_name: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1100,6 +1100,7 @@ struct LiveSessionSnapshot<'a> {
 
 /// Snapshot of the status-bar display state, bundled so both the view render
 /// and `render_status_bar` stay under clippy's argument limit.
+#[derive(Clone, Copy)]
 struct LiveStatus<'a> {
     state: SessionState,
     microphone_muted: bool,

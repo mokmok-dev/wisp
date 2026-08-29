@@ -148,7 +148,7 @@ impl Render for TranscriptView {
             },
             View::History { .. } => {
                 self.sync_transcript_list(&view, segment_count, active_idx, active_text_len);
-                self.render_history(viewed_session.as_ref(), model, segment_count, cx)
+                self.render_history(viewed_session.as_ref(), &model, segment_count, cx)
                     .into_any_element()
             },
         }
@@ -254,7 +254,7 @@ impl TranscriptView {
     fn render_history(
         &self,
         session: Option<&StoredSession>,
-        model: Entity<AppModel>,
+        model: &Entity<AppModel>,
         segment_count: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {

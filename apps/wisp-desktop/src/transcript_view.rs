@@ -241,13 +241,7 @@ impl TranscriptView {
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text_primary())
-            .child(self.render_live_top_bar(
-                state,
-                microphone_muted,
-                model.clone(),
-                &export_name,
-                cx,
-            ))
+            .child(self.render_live_top_bar(state, microphone_muted, &model, &export_name, cx))
             .child(render_transcript(
                 self.transcript_list.clone(),
                 model,
@@ -277,7 +271,7 @@ impl TranscriptView {
             .child(self.render_history_top_bar(
                 &title,
                 subtitle.as_deref(),
-                model.clone(),
+                &model,
                 &export_name,
                 cx,
             ))

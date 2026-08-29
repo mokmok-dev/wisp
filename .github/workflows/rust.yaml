@@ -29,6 +29,8 @@ jobs:
           # Avoid another Nix-based workflow winning the shared primary key
           # before this job can persist Crane's buildDepsOnly artifacts.
           cache-suffix: crane
-      # Crane shares buildDepsOnly artifacts between the package, clippy, and
-      # test derivations. setup-nix persists those derivations between runs.
-      - run: nix flake check --print-build-logs
+      # Building through `nix develop` (not `nix flake check`) so clippy
+      # inherits the host Xcode toolchain; gpui compiles Metal shaders with
+      # Xcode's `metal`, which is unreachable from inside a pure sandbox.
+      # Tests are covered in rust-macos.yaml.
+      - run: nix develop .#default --quiet --command cargo clippy --workspace --all-targets --all-features -- --deny warnings

@@ -33,12 +33,6 @@
             lib = pkgs.lib;
             inherit craneLib rustToolchain;
           };
-          src = pkgs.lib.cleanSourceWith { src = ./.; };
-          commonArgs = {
-            inherit src;
-            strictDeps = true;
-          };
-          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
           darwinToolchainHook = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
             if [ -d /Applications/Xcode.app/Contents/Developer ]; then
@@ -58,24 +52,11 @@
             };
           };
 
-          checks = {
-            clippy = craneLib.cargoClippy {
-              inherit
-                src
-                cargoArtifacts
-                ;
-              cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
-            };
-            test = craneLib.cargoTest (
-              commonArgs
-              // {
-                inherit
-                  src
-                  cargoArtifacts
-                  ;
-              }
-            );
-          };
+          # clippy and the workspace test are intentionally NOT exposed as
+          # flake checks: a pure derivation build on macOS would need Xcode's
+          # `metal` (gpui compiles shaders with it), which is unreachable from
+          # inside a Nix sandbox. They are run through `nix develop` in CI
+          # instead (see .github/workflows/rust.yaml and rust-macos.yaml).
 
           devShells = {
             default = pkgs.mkShellNoCC {

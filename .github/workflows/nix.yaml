@@ -20,3 +20,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-nix
       - run: nix flake check --print-build-logs
+      # clippy and the tests are not flake checks (a pure sandbox can't reach
+      # Xcode's `metal`, which gpui needs for shaders), so run them through
+      # `nix develop` against the host Xcode toolchain.
+      - run: nix develop .#default --quiet --command cargo clippy --workspace --all-targets --all-features -- --deny warnings
+      - run: nix develop .#default --quiet --command cargo test --workspace --locked

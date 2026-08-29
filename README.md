@@ -215,7 +215,7 @@ cargo test --workspace --all-targets
 bash formal/check.sh
 
 # Swift formatting (available in the Nix CI shell)
-nix develop .#ci --command swiftformat --lint \
+nix develop .#default --command swiftformat --lint \
   native/WispAudioKit/Sources native/WispAudioKit/Tests
 
 # macOS 26 only

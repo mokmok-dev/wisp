@@ -271,13 +271,13 @@ impl TranscriptView {
             .child(self.render_history_top_bar(
                 &title,
                 subtitle.as_deref(),
-                &model,
+                model,
                 &export_name,
                 cx,
             ))
             .child(render_transcript(
                 self.transcript_list.clone(),
-                &model,
+                model,
                 segment_count,
                 false,
             ))

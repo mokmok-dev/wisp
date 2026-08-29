@@ -307,7 +307,7 @@ pub(crate) fn toggle_recording(
             app.state,
             app.has_pending_persistence(),
             app.setup_complete(),
-            app.session_config("ja-JP"),
+            AppModel::session_config("ja-JP"),
         )
     };
     if pending_persistence {

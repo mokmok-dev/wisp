@@ -193,8 +193,7 @@ fn worker_loop(
             }) => {
                 run_session(&output_dir, config, session, cmd_rx, update_tx);
             },
-            Ok(Command::SetMicrophoneMuted(_)) => {}, // no-op, nothing running
-            Ok(Command::Stop) => {},                  // no-op, nothing running
+            Ok(Command::SetMicrophoneMuted(_) | Command::Stop) => {}, // no-op, nothing running
             Ok(Command::Shutdown) | Err(_) => return,
         }
     }
@@ -265,7 +264,7 @@ fn run_session(
                 // ownership must be stopped and finalized before persistence
                 // observes RuntimeFailed.
                 session.stop();
-                let error = merge_runtime_failures(error, session.take_runtime_failure());
+                let error = merge_runtime_failures(&error, session.take_runtime_failure());
                 publish_runtime_failure_after_drain(
                     || session.try_recv(),
                     session_id,
@@ -299,14 +298,17 @@ fn stop_and_publish(
 }
 
 fn merge_runtime_failures(
-    primary: SessionError,
+    primary: &SessionError,
     cleanup: Option<SessionError>,
 ) -> SessionError {
-    cleanup.map_or(primary.clone(), |cleanup| {
-        SessionError::Start(format!(
-            "{primary}; cleanup/finalization also failed: {cleanup}"
-        ))
-    })
+    cleanup.map_or_else(
+        || primary.to_owned(),
+        |cleanup| {
+            SessionError::Start(format!(
+                "{primary}; cleanup/finalization also failed: {cleanup}"
+            ))
+        },
+    )
 }
 
 fn publish_runtime_failure_after_drain(
@@ -398,7 +400,7 @@ mod tests {
     #[test]
     fn runtime_failure_preserves_cleanup_failure_context() {
         let combined = merge_runtime_failures(
-            SessionError::Start("capture failed".into()),
+            &SessionError::Start("capture failed".into()),
             Some(SessionError::Start("sync failed".into())),
         );
         let message = combined.to_string();

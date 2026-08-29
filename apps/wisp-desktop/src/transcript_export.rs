@@ -48,7 +48,7 @@ pub fn format_transcript_plain(segments: &[Segment]) -> String {
 /// Full Markdown export: a YAML frontmatter envelope followed by the
 /// plain-text transcript body.
 ///
-/// The envelope borrows the *essence* of a CloudEvents envelope — a small,
+/// The envelope borrows the *essence* of a `CloudEvents` envelope — a small,
 /// standard set of "what / when / who produced this" attributes (`id`,
 /// `type`, `source`, `time`, `subject`) — without adopting the full
 /// messaging spec. Returns an empty string when there is nothing to export,
@@ -73,10 +73,10 @@ pub fn format_transcript_markdown(
 struct TranscriptEnvelope<'a> {
     /// Envelope schema + version, so downstream parsers can branch on shape.
     schema: &'static str,
-    /// CloudEvents `type`: what the document is, independent of any session.
+    /// `CloudEvents` `type`: what the document is, independent of any session.
     #[serde(rename = "type")]
     event_type: &'static str,
-    /// CloudEvents `source`: a stable, machine-independent producer id.
+    /// `CloudEvents` `source`: a stable, machine-independent producer id.
     /// Deliberately no hostname, absolute paths, or audio locations, to honour
     /// Wisp's offline / privacy-first promise.
     source: &'static str,
@@ -84,7 +84,7 @@ struct TranscriptEnvelope<'a> {
     id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     subject: Option<String>,
-    /// CloudEvents `time`: session start, RFC 3339.
+    /// `CloudEvents` `time`: session start, RFC 3339.
     #[serde(skip_serializing_if = "Option::is_none")]
     time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -209,9 +209,8 @@ pub fn export_transcript(
     let rx = cx.prompt_for_new_path(&directory, Some(&suggested));
 
     cx.spawn(async move |cx| {
-        let path = match rx.await {
-            Ok(Ok(Some(path))) => path,
-            _ => return,
+        let Ok(Ok(Some(path))) = rx.await else {
+            return;
         };
         if let Err(err) = std::fs::write(&path, text.as_bytes()) {
             eprintln!(
@@ -269,9 +268,7 @@ pub fn suggested_export_name(
     title: Option<&str>,
     fallback: &str,
 ) -> String {
-    title
-        .map(sanitize_filename)
-        .unwrap_or_else(|| sanitize_filename(fallback))
+    title.map_or_else(|| sanitize_filename(fallback), sanitize_filename)
 }
 
 #[cfg(test)]

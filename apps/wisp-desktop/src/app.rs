@@ -77,7 +77,6 @@ impl SessionState {
 
     #[must_use]
     pub fn with_phase(
-        self,
         phase: Phase,
         recording_started_at: Instant,
     ) -> Self {
@@ -556,10 +555,7 @@ impl AppModel {
             .satisfies(TranscriptionPolicy::platform_default())
     }
 
-    pub fn session_config(
-        &self,
-        locale: impl Into<String>,
-    ) -> SessionConfig {
+    pub fn session_config(locale: impl Into<String>) -> SessionConfig {
         SessionConfig::platform_default(locale)
     }
 }

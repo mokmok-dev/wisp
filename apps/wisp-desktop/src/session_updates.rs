@@ -78,7 +78,7 @@ pub fn apply_update(
             // A quit request can move Starting -> Stopping before the worker
             // reports Started. Do not regress the UI back to Recording; the
             // queued Stop still owns the transition.
-            model.set_state(model.state.with_phase(next_phase, now()));
+            model.set_state(SessionState::with_phase(next_phase, now()));
         },
         Event { session_id, event } => {
             if model.accepts_worker_update(session_id) {
@@ -470,14 +470,11 @@ fn load_recovery_model(
     )));
 
     if let Some(session_id) = retained_session_id {
-        let store = match storage.lock() {
-            Ok(store) => store,
-            Err(_) => {
-                return Err(RecoveryLoadError::Retryable {
-                    message: "storage lock is unavailable".into(),
-                    model: Box::new(model),
-                });
-            },
+        let Ok(store) = storage.lock() else {
+            return Err(RecoveryLoadError::Retryable {
+                message: "storage lock is unavailable".into(),
+                model: Box::new(model),
+            });
         };
         match store.sessions().get(session_id) {
             Ok(Some(session)) => {

@@ -133,20 +133,22 @@ impl Render for TranscriptView {
                 let live_export_title = linked_session_id
                     .and_then(|id| library.iter().find(|s| s.id == id).map(|s| s.title.clone()));
                 self.render_live_session(
-                    state,
-                    microphone_muted,
-                    model,
-                    segment_count,
-                    log_count,
-                    last_error.as_ref(),
-                    live_export_title.as_deref(),
+                    LiveSessionSnapshot {
+                        state,
+                        microphone_muted,
+                        model,
+                        segment_count,
+                        log_count,
+                        last_error: last_error.as_ref(),
+                        export_title: live_export_title.as_deref(),
+                    },
                     cx,
                 )
                 .into_any_element()
             },
             View::History { .. } => {
                 self.sync_transcript_list(&view, segment_count, active_idx, active_text_len);
-                self.render_history(viewed_session.as_ref(), model, segment_count, cx)
+                self.render_history(viewed_session.as_ref(), &model, segment_count, cx)
                     .into_any_element()
             },
         }
@@ -213,48 +215,46 @@ impl TranscriptView {
 
     fn render_live_session(
         &self,
-        state: SessionState,
-        microphone_muted: bool,
-        model: Entity<AppModel>,
-        segment_count: usize,
-        log_count: usize,
-        last_error: Option<&AppError>,
-        export_title: Option<&str>,
+        snapshot: LiveSessionSnapshot<'_>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let LiveSessionSnapshot {
+            state,
+            microphone_muted,
+            model,
+            segment_count,
+            log_count,
+            last_error,
+            export_title,
+        } = snapshot;
         let export_name = suggested_export_name(export_title, "transcript");
+        let status = LiveStatus {
+            state,
+            microphone_muted,
+            segment_count,
+            log_count,
+            last_error,
+        };
         div()
             .flex()
             .flex_col()
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text_primary())
-            .child(self.render_live_top_bar(
-                state,
-                microphone_muted,
-                model.clone(),
-                &export_name,
-                cx,
-            ))
+            .child(self.render_live_top_bar(state, microphone_muted, &model, &export_name, cx))
             .child(render_transcript(
                 self.transcript_list.clone(),
-                model,
+                &model,
                 segment_count,
                 self.cursor_visible,
             ))
-            .child(render_status_bar(
-                state,
-                microphone_muted,
-                segment_count,
-                log_count,
-                last_error,
-            ))
+            .child(render_status_bar(status))
     }
 
     fn render_history(
         &self,
         session: Option<&StoredSession>,
-        model: Entity<AppModel>,
+        model: &Entity<AppModel>,
         segment_count: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -271,7 +271,7 @@ impl TranscriptView {
             .child(self.render_history_top_bar(
                 &title,
                 subtitle.as_deref(),
-                model.clone(),
+                model,
                 &export_name,
                 cx,
             ))
@@ -325,7 +325,7 @@ impl TranscriptView {
         &self,
         state: SessionState,
         microphone_muted: bool,
-        model: Entity<AppModel>,
+        model: &Entity<AppModel>,
         export_name: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -367,7 +367,7 @@ impl TranscriptView {
         &self,
         title: &str,
         subtitle: Option<&str>,
-        model: Entity<AppModel>,
+        model: &Entity<AppModel>,
         export_name: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -689,7 +689,7 @@ fn render_microphone_mute_button(
 
 fn render_transcript(
     list_state: ListState,
-    model: Entity<AppModel>,
+    model: &Entity<AppModel>,
     segment_count: usize,
     cursor_visible: bool,
 ) -> impl IntoElement {
@@ -850,7 +850,7 @@ fn render_new_session_button(
 }
 
 fn render_transcript_actions(
-    model: Entity<AppModel>,
+    model: &Entity<AppModel>,
     export_name: &str,
     cx: &App,
 ) -> gpui::AnyElement {
@@ -879,7 +879,7 @@ fn render_transcript_actions(
         ))
         .child(render_toolbar_button("transcript-export", "Export", {
             let export_name = export_name.clone();
-            let model = model.clone();
+            let model = (*model).clone();
             move |_window, cx| {
                 let app = model.read(cx);
                 let text = transcript_export::format_transcript_markdown(
@@ -1080,13 +1080,37 @@ fn render_count_status_bar(text: String) -> impl IntoElement {
         )
 }
 
-fn render_status_bar(
+/// Snapshot of everything needed to render the live-session view, so
+/// `render_live_session` stays under clippy's argument limit.
+struct LiveSessionSnapshot<'a> {
+    state: SessionState,
+    microphone_muted: bool,
+    model: Entity<AppModel>,
+    segment_count: usize,
+    log_count: usize,
+    last_error: Option<&'a AppError>,
+    export_title: Option<&'a str>,
+}
+
+/// Snapshot of the status-bar display state, bundled so both the view render
+/// and `render_status_bar` stay under clippy's argument limit.
+#[derive(Clone, Copy)]
+struct LiveStatus<'a> {
     state: SessionState,
     microphone_muted: bool,
     segment_count: usize,
     log_count: usize,
-    last_error: Option<&AppError>,
-) -> impl IntoElement {
+    last_error: Option<&'a AppError>,
+}
+
+fn render_status_bar(status: LiveStatus<'_>) -> impl IntoElement {
+    let LiveStatus {
+        state,
+        microphone_muted,
+        segment_count,
+        log_count,
+        last_error,
+    } = status;
     let (dot, status_text) = match state {
         SessionState::Idle => (theme::record_idle(), "Idle".to_string()),
         SessionState::Starting => (theme::text_tertiary(), "Starting…".to_string()),

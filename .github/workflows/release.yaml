@@ -63,15 +63,9 @@ jobs:
           xcrun --find metal
 
       - uses: ./.github/actions/setup-nix
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-bin: "false"
-          cache-workspace-crates: "true"
-          cache-on-failure: "true"
-          cmd-format: nix develop .#ci --quiet -c {0}
 
       - name: Build Wisp binaries (release)
-        run: nix develop .#ci --quiet --command cargo build -p wisp-desktop --release --locked
+        run: nix develop .#default --quiet --command cargo build -p wisp-desktop --release --locked
 
       - name: Assemble Wisp.app bundle
         run: |

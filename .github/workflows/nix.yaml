@@ -4,7 +4,7 @@ on:
     paths:
       - "flake.lock"
       - "flake.nix"
-      - "nix/**"
+      - "apps/wisp-desktop/**"
       - ".github/workflows/nix.yaml"
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-nix
@@ -15,10 +15,13 @@ permissions:
   id-token: write
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-nix
-      - uses: DeterminateSystems/flake-checker-action@de924abd783455e8429c858962b9e43062d19da1 # v13
-      - run: nix develop .#ci --quiet --command nixfmt --check flake.nix nix
       - run: nix flake check --print-build-logs
+      # clippy and the tests are not flake checks (a pure sandbox can't reach
+      # Xcode's `metal`, which gpui needs for shaders), so run them through
+      # `nix develop` against the host Xcode toolchain.
+      - run: nix develop .#default --quiet --command cargo clippy --workspace --all-targets --all-features -- --deny warnings
+      - run: nix develop .#default --quiet --command cargo test --workspace --locked

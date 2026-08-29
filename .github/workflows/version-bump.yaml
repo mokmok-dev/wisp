@@ -38,7 +38,7 @@ permissions:
   id-token: write
 jobs:
   bump:
-    runs-on: ubuntu-latest
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -123,7 +123,7 @@ jobs:
           # Sync the local crate versions in Cargo.lock without touching any
           # third-party pins. `--workspace` limits the update to the workspace
           # members, whose versions are inherited from the value we just set.
-          nix develop .#ci --quiet --command cargo update --workspace
+          nix develop .#default --quiet --command cargo update --workspace
 
           echo "--- Cargo.toml [workspace.package] ---"
           grep -n 'version' Cargo.toml | tail -1

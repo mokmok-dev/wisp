@@ -215,7 +215,9 @@ final class SessionHandle: @unchecked Sendable {
 
     deinit {
         lastError.withLock { slot in
-            if let p = slot.pointer { p.deallocate() }
+            if let p = slot.pointer {
+                p.deallocate()
+            }
             slot.pointer = nil
         }
     }

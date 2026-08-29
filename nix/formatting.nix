@@ -39,7 +39,7 @@
       edition = "2024";
     };
 
-    # nicklockwood/SwiftFormat (pinned on Linux via nixpkgs-swiftformat).
+    # nicklockwood/SwiftFormat.
     # treefmt-nix only ships the unrelated apple/swift-format module, so the
     # formatter is wired up by hand. Repo-level .swiftformat is honoured.
     #

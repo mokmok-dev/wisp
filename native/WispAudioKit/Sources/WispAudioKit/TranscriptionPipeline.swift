@@ -213,7 +213,9 @@ actor AnalyzerCoordinator {
     }
 
     func enable(locale: Locale) async throws -> Bool {
-        if configured { return active }
+        if configured {
+            return active
+        }
         configured = true
         do {
             let transcriber = makeLiveSpeechTranscriber(locale: locale)

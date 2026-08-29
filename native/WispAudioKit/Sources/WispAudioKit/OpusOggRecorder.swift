@@ -220,7 +220,9 @@ private final class OpusEncoder: @unchecked Sendable {
                 error: &error,
                 withInputFrom: inputBlock
             )
-            if let error { throw error }
+            if let error {
+                throw error
+            }
             if output.packetCount > 0, output.byteLength > 0 {
                 let packet = Data(bytes: output.data, count: Int(output.byteLength))
                 try writer.writeAudioPacket(

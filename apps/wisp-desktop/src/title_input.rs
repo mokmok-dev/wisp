@@ -476,7 +476,7 @@ impl gpui::InputHandler for TitleInput {
         range_utf16: Option<Range<usize>>,
         new_text: &str,
         new_selected_range: Option<Range<usize>>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut App,
     ) {
         {
@@ -487,7 +487,10 @@ impl gpui::InputHandler for TitleInput {
                 new_selected_range.as_ref().map(|r| (r.start, r.end)),
             );
         }
-        (self.on_change)(new_text, window, cx);
+        // This is an IME *composition* update (`setMarkedText:`): the text is
+        // still being decided and must not be treated as committed. Only
+        // repaint; the `on_change` / document write happens on the confirming
+        // `insertText:` via `replace_text_in_range`.
         self.notify(cx);
     }
 

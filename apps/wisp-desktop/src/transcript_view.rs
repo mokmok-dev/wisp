@@ -419,6 +419,10 @@ impl TranscriptView {
     }
 
     /// Create (or refresh from the model) the shared live-title editor state.
+    ///
+    /// While the IME is composing (marked text present) the editor owns the
+    /// display and the model holds the last committed value, so the sync is
+    /// skipped to avoid wiping the in-progress composition.
     fn ensure_live_title_state(
         &self,
         model: &Entity<AppModel>,
@@ -428,7 +432,7 @@ impl TranscriptView {
         let current = model.read(cx).live_title.clone();
         if let Some(state) = slot.as_ref() {
             let mut inner = state.borrow_mut();
-            if inner.editor.text() != current {
+            if inner.editor.marked().is_none() && inner.editor.text() != current {
                 inner.set_text(&current);
             }
             state.clone()

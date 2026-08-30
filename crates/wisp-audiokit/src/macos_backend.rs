@@ -17,6 +17,7 @@ use wisp_core::{
 
 #[cfg(test)]
 use crate::SessionResult;
+use crate::recording::OggOpusRecorder;
 use crate::{
     Availability, BackendError, BackendErrorKind, BackendId, BackendResult, CaptureBackend,
     CaptureCapabilities, CaptureProbe, Event, NativeSession, OrchestratorEvent, Permission,
@@ -144,6 +145,11 @@ struct SharedState {
     microphone_permission: PermissionStatus,
     speech_permission: PermissionStatus,
     bridge_transcription: BridgeTranscription,
+    /// Directory receiving `mic.ogg`/`system.ogg`; `None` disables recording
+    /// (used by the test stitch bridge).
+    recording_dir: Option<std::path::PathBuf>,
+    recorder: Option<OggOpusRecorder>,
+    recorder_failure: Option<crate::recording::RecorderError>,
     capture_started: bool,
     transcriber_started: bool,
     transcriber_tracks: [TranscriberTrackState; 2],
@@ -298,7 +304,40 @@ fn drain_bridge(state: &mut SharedState) {
         }
     }
     while let Some(event) = state.bridge.try_recv_audio() {
+        route_capture_audio(&mut *state, &event);
         state.capture_events.push_back(event);
+    }
+}
+
+/// Routes one captured sample frame through the session recorder, creating the
+/// recorder on its first frame. A recorder failure is retained once and
+/// suppresses further attempts, so a broken writer degrades to a capture that
+/// keeps delivering PCM (and transcription) rather than failing repeatedly.
+fn route_capture_audio(
+    state: &mut SharedState,
+    event: &CaptureEvent,
+) {
+    let CaptureEvent::Samples(frame) = event else {
+        return;
+    };
+    if state.recorder_failure.is_some() {
+        return;
+    }
+    if state.recorder.is_none()
+        && let Some(dir) = state.recording_dir.as_deref()
+    {
+        match OggOpusRecorder::new(dir) {
+            Ok(recorder) => state.recorder = Some(recorder),
+            Err(error) => {
+                state.recorder_failure = Some(error);
+                return;
+            },
+        }
+    }
+    if let Some(recorder) = state.recorder.as_mut()
+        && let Err(error) = recorder.push(frame)
+    {
+        state.recorder_failure = Some(error);
     }
 }
 
@@ -330,6 +369,7 @@ impl MacosCaptureBackend {
         output_dir: impl AsRef<Path>,
         locale: &str,
     ) -> crate::Result<Self> {
+        let output_dir = output_dir.as_ref();
         let config = SessionConfig::platform_default(locale);
         let bridge = NativeSession::new_for_backend(output_dir, config, false, true, true)?;
         Ok(Self::new(make_shared_state(
@@ -337,6 +377,7 @@ impl MacosCaptureBackend {
             check_permission(Permission::Microphone),
             check_permission(Permission::SpeechRecognition),
             false,
+            Some(output_dir),
         )))
     }
 
@@ -429,6 +470,7 @@ impl CaptureBackend for MacosCaptureBackend {
         } else {
             state.bridge.recv_audio_timeout(timeout)
         } {
+            route_capture_audio(&mut state, &event);
             return Ok(Some(event));
         }
         Ok(state
@@ -465,7 +507,35 @@ impl CaptureBackend for MacosCaptureBackend {
                 state.compatibility_events.clear();
             },
         }
+        finalize_recording(&mut state, mode);
         Ok(())
+    }
+}
+
+/// Finishes or aborts the session recorder and, on graceful shutdown, surfaces
+/// a terminal recording failure if one occurred. Abort intentionally closes
+/// the files without EOS and does not publish an error, matching the
+/// truncation-recovery contract of the Ogg writer.
+fn finalize_recording(
+    state: &mut SharedState,
+    mode: ShutdownMode,
+) {
+    let recorder_result = match (mode, state.recorder.as_mut()) {
+        (ShutdownMode::Graceful, Some(recorder)) => recorder.finish(),
+        (ShutdownMode::Abort, Some(recorder)) => recorder.abort(),
+        (_, None) => Ok(()),
+    };
+    if let Err(error) = recorder_result {
+        state.recorder_failure.get_or_insert(error);
+    }
+    if mode == ShutdownMode::Graceful
+        && let Some(error) = state.recorder_failure.take()
+    {
+        state.capture_events.push_back(CaptureEvent::Error {
+            track_id: None,
+            message: error.to_string(),
+            recoverable: false,
+        });
     }
 }
 
@@ -828,6 +898,7 @@ impl MacosSession {
         output_dir: impl AsRef<Path>,
         options: SessionOptions,
     ) -> crate::Result<Self> {
+        let output_dir = output_dir.as_ref();
         let (config, policy) = options.into_parts();
         let microphone_permission = check_permission(Permission::Microphone);
         let speech_permission = check_permission(Permission::SpeechRecognition);
@@ -865,6 +936,7 @@ impl MacosSession {
             speech_permission,
             provider,
             policy,
+            Some(output_dir),
         ))
     }
 
@@ -883,6 +955,7 @@ impl MacosSession {
             speech_permission,
             provider,
             policy,
+            None,
         )
     }
 
@@ -892,6 +965,7 @@ impl MacosSession {
         speech_permission: PermissionStatus,
         provider: Option<MacosProviderKind>,
         policy: crate::TranscriptionPolicy,
+        recording_dir: Option<&Path>,
     ) -> Self {
         let speech_enabled_in_bridge = matches!(provider, Some(MacosProviderKind::SpeechAnalyzer));
         let shared = make_shared_state(
@@ -899,6 +973,7 @@ impl MacosSession {
             microphone_permission,
             speech_permission,
             speech_enabled_in_bridge,
+            recording_dir,
         );
         let capture = MacosCaptureBackend::new(Arc::clone(&shared));
         let record_only = provider.is_none();
@@ -1238,6 +1313,7 @@ fn make_shared_state(
     microphone_permission: PermissionStatus,
     speech_permission: PermissionStatus,
     speech_enabled_in_bridge: bool,
+    recording_dir: Option<&Path>,
 ) -> Shared {
     Arc::new(Mutex::new(SharedState {
         bridge,
@@ -1251,6 +1327,9 @@ fn make_shared_state(
         } else {
             BridgeTranscription::Disabled
         },
+        recording_dir: recording_dir.map(Path::to_path_buf),
+        recorder: None,
+        recorder_failure: None,
         capture_started: false,
         transcriber_started: false,
         transcriber_tracks: Default::default(),
@@ -1948,6 +2027,7 @@ mod tests {
             PermissionStatus::Granted,
             PermissionStatus::Denied,
             false,
+            None,
         );
         let mut capture = MacosCaptureBackend::new(shared);
 

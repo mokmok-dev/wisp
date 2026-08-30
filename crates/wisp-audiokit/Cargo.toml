@@ -22,5 +22,6 @@ unsafe_code = "allow"
 wisp-audiokit-sys = { path = "../wisp-audiokit-sys" }
 wisp-core = { path = "../wisp-core" }
 crossbeam-channel = { workspace = true }
+shiguredo_opus = "2026.2.0"
 thiserror = { workspace = true }
 tempfile = { workspace = true }

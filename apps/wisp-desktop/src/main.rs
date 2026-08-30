@@ -42,6 +42,7 @@ mod library;
 mod permissions;
 mod session_runner;
 mod session_updates;
+mod title_input;
 mod transcript_export;
 mod transcript_view;
 
@@ -64,6 +65,8 @@ const PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 fn main() {
     Application::new().run(|cx| {
         cx.activate(true);
+
+        title_input::init(cx);
 
         let data_dir = default_data_directory();
         let recordings_dir = data_dir.join("recordings");
@@ -143,8 +146,12 @@ fn open_main_window(
             let model_for_new = model.clone();
             let model_for_open_history = model.clone();
             let model_for_back = model.clone();
+            let model_for_live_title = model.clone();
+            let model_for_rename = model.clone();
             let storage_for_toggle = storage.clone();
             let storage_for_open_history = storage.clone();
+            let storage_for_live_title = storage.clone();
+            let storage_for_rename = storage.clone();
             let recordings_for_toggle = recordings_dir.clone();
             let runner_for_toggle = runner.clone();
             let runner_for_mute = runner.clone();
@@ -152,6 +159,8 @@ fn open_main_window(
             let view = TranscriptView {
                 app: model.clone(),
                 cursor_visible: true,
+                live_title_state: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                renaming: std::rc::Rc::new(std::cell::RefCell::new(None)),
                 transcript_list,
                 transcript_list_count: 0,
                 transcript_active_len: 0,
@@ -205,6 +214,12 @@ fn open_main_window(
                         m.show_library();
                         cx.notify();
                     });
+                }),
+                on_live_title: Arc::new(move |text, _window, cx| {
+                    change_live_title(&model_for_live_title, &storage_for_live_title, cx, text);
+                }),
+                on_rename_session: Arc::new(move |session_id, text, _window, cx| {
+                    rename_session(&model_for_rename, &storage_for_rename, session_id, text, cx);
                 }),
             };
             // Re-render whenever the underlying model changes.
@@ -294,6 +309,7 @@ fn spawn_permission_refresh(
     .detach();
 }
 
+#[allow(clippy::too_many_lines)] // start/stop state machine, kept linear for clarity
 pub(crate) fn toggle_recording(
     runner: &SessionRunner,
     model: &gpui::Entity<AppModel>,
@@ -301,13 +317,14 @@ pub(crate) fn toggle_recording(
     recordings_dir: &std::path::Path,
     cx: &mut gpui::App,
 ) {
-    let (state, pending_persistence, setup_complete, config) = {
+    let (state, pending_persistence, setup_complete, config, live_title) = {
         let app = model.read(cx);
         (
             app.state,
             app.has_pending_persistence(),
             app.setup_complete(),
             AppModel::session_config("ja-JP"),
+            app.live_title.clone(),
         )
     };
     if pending_persistence {
@@ -329,12 +346,20 @@ pub(crate) fn toggle_recording(
             let started_at = Utc::now();
             let dir_name = library::session_dir_name(started_at);
             let session_dir = recordings_dir.join(&dir_name);
+            let title = {
+                let trimmed = live_title.trim();
+                if trimmed.is_empty() {
+                    library::default_title(started_at)
+                } else {
+                    trimmed.to_owned()
+                }
+            };
             let session_id =
                 match storage
                     .lock()
                     .map_err(|error| error.to_string())
                     .and_then(|store| {
-                        library::create_session(&store, started_at, &dir_name)
+                        library::create_session(&store, started_at, &dir_name, &title)
                             .map_err(|error| error.to_string())
                     }) {
                     Ok(session_id) => session_id,
@@ -357,6 +382,7 @@ pub(crate) fn toggle_recording(
                     m.current_session_started_at = Some(started_at);
                     m.current_session_dir_name = Some(dir_name.clone());
                     m.current_output_dir = Some(session_dir.clone());
+                    m.live_title = title;
                     cx.notify();
                 }
                 did_begin
@@ -433,6 +459,73 @@ fn refresh_library(
     drop(store);
     model.update(cx, |m, cx| {
         m.set_library(list);
+        cx.notify();
+    });
+}
+
+/// Track the live-session title as it is edited in the recording top bar.
+///
+/// The model keeps the raw value so the field stays in sync across IME
+/// composition; once a database row exists the trimmed value (or the default
+/// timestamp when blank) is persisted so an unnamed session still shows a
+/// sensible library title. Mid-composition kana values are overwritten on the
+/// next edit or commit and never reach the final transcript.
+fn change_live_title(
+    model: &Entity<AppModel>,
+    storage: &SharedStorage,
+    cx: &mut App,
+    new_title: &str,
+) {
+    let trimmed = new_title.trim();
+    model.update(cx, |m, cx| {
+        m.live_title = new_title.to_string();
+        let Some(session_id) = m.current_session_id.or(m.linked_session_id) else {
+            cx.notify();
+            return;
+        };
+        let stored = if trimmed.is_empty() {
+            m.current_session_started_at
+                .map(library::default_title)
+                .unwrap_or_default()
+        } else {
+            trimmed.to_owned()
+        };
+        if let Ok(store) = storage.lock() {
+            let _ = store.sessions().update_title(session_id, &stored);
+        }
+        cx.notify();
+    });
+}
+
+/// Apply an inline rename from the library or history header. A blank title
+/// keeps the previous value, so clearing the field acts as a cancel.
+fn rename_session(
+    model: &Entity<AppModel>,
+    storage: &SharedStorage,
+    session_id: SessionId,
+    new_title: &str,
+    cx: &mut App,
+) {
+    let trimmed = new_title.trim();
+    let Ok(store) = storage.lock() else {
+        return;
+    };
+    if !trimmed.is_empty() {
+        let _ = store.sessions().update_title(session_id, trimmed);
+    }
+    let Ok(list) = store.sessions().list() else {
+        drop(store);
+        return;
+    };
+    drop(store);
+    model.update(cx, |m, cx| {
+        m.set_library(list);
+        if !trimmed.is_empty()
+            && let Some(viewed) = &mut m.viewed_session
+            && viewed.id == session_id
+        {
+            trimmed.clone_into(&mut viewed.title);
+        }
         cx.notify();
     });
 }

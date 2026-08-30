@@ -22,8 +22,8 @@ use wisp_storage::{Storage, StorageError};
 use crate::app::{Segment as UiSegment, break_on_sentence_end};
 
 /// Format a `started_at` timestamp into the default session title:
-/// `2026-05-29 14:30` in the user's local timezone. Users can rename
-/// later (the storage layer supports it; UI hook is TODO).
+/// `2026-05-29 14:30` in the user's local timezone. Sessions can be renamed
+/// from the live top bar, the library rows, and the history header.
 pub fn default_title(started_at: DateTime<Utc>) -> String {
     started_at
         .with_timezone(&chrono::Local)
@@ -47,17 +47,25 @@ pub fn session_dir_name(started_at: DateTime<Utc>) -> String {
 /// Create a new session row. `dir_name` is the per-session subdirectory
 /// passed to the Swift audio kit beneath the `recordings` directory. Ogg/Opus
 /// paths are stored relative to the storage root, as required by
-/// `wisp_core::Session`.
+/// `wisp_core::Session`. A blank `title` falls back to the recorded-at
+/// timestamp.
 pub fn create_session(
     storage: &Storage,
     started_at: DateTime<Utc>,
     dir_name: &str,
+    title: &str,
 ) -> Result<SessionId, StorageError> {
     let mic_rel = format!("recordings/{dir_name}/mic.ogg");
     let sys_rel = format!("recordings/{dir_name}/system.ogg");
+    let title = title.trim();
+    let title = if title.is_empty() {
+        default_title(started_at)
+    } else {
+        title.to_owned()
+    };
     storage.sessions().create(&NewSession {
         started_at,
-        title: default_title(started_at),
+        title,
         mic_wav_path: mic_rel,
         system_wav_path: sys_rel,
     })
@@ -158,7 +166,7 @@ mod tests {
             .expect("valid timestamp");
         let dir_name = session_dir_name(started_at);
 
-        let id = create_session(&storage, started_at, &dir_name).expect("create session");
+        let id = create_session(&storage, started_at, &dir_name, "").expect("create session");
         let session = storage
             .sessions()
             .get(id)
@@ -186,5 +194,44 @@ mod tests {
             .expect("valid timestamp");
 
         assert_ne!(session_dir_name(started_at), session_dir_name(started_at));
+    }
+
+    #[test]
+    fn create_session_prefers_custom_title_and_falls_back_to_timestamp() {
+        let storage = Storage::open_in_memory().expect("in-memory storage");
+        let started_at = Utc
+            .with_ymd_and_hms(2026, 7, 15, 4, 30, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let named = create_session(
+            &storage,
+            started_at,
+            &session_dir_name(started_at),
+            "Q3 review",
+        )
+        .expect("create named session");
+        assert_eq!(
+            storage
+                .sessions()
+                .get(named)
+                .expect("read named session")
+                .expect("session exists")
+                .title,
+            "Q3 review"
+        );
+
+        let unnamed = create_session(&storage, started_at, &session_dir_name(started_at), "  ")
+            .expect("create blank session");
+        assert_eq!(
+            storage
+                .sessions()
+                .get(unnamed)
+                .expect("read blank session")
+                .expect("session exists")
+                .title,
+            default_title(started_at),
+            "blank titles fall back to the recorded-at timestamp"
+        );
     }
 }

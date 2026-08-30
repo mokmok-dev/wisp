@@ -207,7 +207,7 @@ fn resolve_session_id(
         return Ok(session_id);
     }
 
-    library::create_session(storage, started_at, dir_name)
+    library::create_session(storage, started_at, dir_name, &model.live_title)
         .map_err(|error| format!("could not create the session row: {error}"))
 }
 
@@ -850,7 +850,7 @@ mod tests {
         let output_dir = recordings_dir.join(&dir_name);
         let session_id = {
             let store = storage.lock().expect("storage lock");
-            library::create_session(&store, started_at, &dir_name).expect("session row")
+            library::create_session(&store, started_at, &dir_name, "").expect("session row")
         };
         let mut crashed_process = AppModel::new();
         crashed_process.current_session_id = Some(session_id);
@@ -916,7 +916,7 @@ mod tests {
         let output_dir = recordings_dir.join(&dir_name);
         let session_id = {
             let store = storage.lock().expect("storage lock");
-            library::create_session(&store, started_at, &dir_name).expect("session row")
+            library::create_session(&store, started_at, &dir_name, "").expect("session row")
         };
         let mut completed_process = AppModel::new();
         completed_process.current_session_id = Some(session_id);
@@ -987,7 +987,7 @@ mod tests {
         let output_dir = recordings_dir.join(&dir_name);
         let session_id = {
             let store = storage.lock().expect("storage lock");
-            library::create_session(&store, started_at, &dir_name).expect("session row")
+            library::create_session(&store, started_at, &dir_name, "").expect("session row")
         };
         let mut crashed_process = AppModel::new();
         crashed_process.current_session_id = Some(session_id);

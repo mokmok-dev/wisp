@@ -18,55 +18,128 @@
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui::{
     App, AvailableSpace, Bounds, CursorStyle, DispatchPhase, Element, ElementId, EntityId,
-    FocusHandle, Hitbox, HitboxBehavior, Hsla, IntoElement, KeyBinding, KeyContext, LayoutId,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Style, TextRun,
-    TextStyle, UTF16Selection, UnderlineStyle, Window, actions, fill, point, px, size,
+    FocusHandle, Hitbox, HitboxBehavior, Hsla, IntoElement, KeyBinding, KeyContext, KeyDownEvent,
+    Keystroke, LayoutId, Modifiers, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    SharedString, Style, TextRun, TextStyle, UTF16Selection, UnderlineStyle, Window, actions, fill,
+    point, px, size,
 };
 
 /// Keyboard context for the title input. Keybindings that apply inside the
-/// field (Enter / Escape / arrows / backspace) are scoped to it so they never
-/// shadow the application menu's global shortcuts.
+/// field (Enter / Escape) are scoped to it so they never shadow the
+/// application menu's global shortcuts.
 const KEY_CONTEXT: &str = "wisp-title-input";
 
-actions!(
-    wisp_title,
-    [
-        SubmitTitle,
-        CancelTitle,
-        Backspace,
-        DeleteForward,
-        DeleteToEnd,
-        MoveLeft,
-        MoveRight,
-        MoveToStart,
-        MoveToEnd,
-        SelectAll,
-    ]
-);
+/// Editing and caret keys are handled directly from low-level `KeyDown`
+/// events (see [`TitleInput::paint`]) so they can be de-duplicated against
+/// macOS's synthetic re-dispatch, and so modifier shortcuts work on every
+/// layout. Only Enter and Escape go through the keymap.
+///
+/// A window of time within which a second, otherwise-identical editing
+/// keystroke is treated as macOS's synthetic re-dispatch of the same physical
+/// press (via `NSTextInputContext` / `doCommandBySelector:`) instead of a new
+/// keystroke. Human double-taps are comfortably slower than this.
+const EDIT_KEY_DEDUP_DURATION: std::time::Duration = std::time::Duration::from_millis(30);
+
+actions!(wisp_title, [SubmitTitle, CancelTitle,]);
 
 /// Register the input's scoped keybindings. Call once at application setup.
 ///
-/// `ctrl-a` / `ctrl-e` move the caret but do not extend the selection (a plain
-/// caret motion, no macOS anchoring), while `cmd-a` selects everything and
-/// `cmd-k` deletes from the caret to the end of the line.
+/// Only Enter and Escape are routed through the keymap; every other edit
+/// shortcut is matched from raw `KeyDown` events (see the key table in
+/// [`edit_operation_for`]) so the unmodified editing keys can be de-duplicated
+/// against macOS's synthetic re-dispatch.
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", SubmitTitle, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", CancelTitle, Some(KEY_CONTEXT)),
-        KeyBinding::new("backspace", Backspace, Some(KEY_CONTEXT)),
-        KeyBinding::new("delete", DeleteForward, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-k", DeleteToEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("left", MoveLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("right", MoveRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("home", MoveToStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("end", MoveToEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-a", MoveToStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-e", MoveToEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-a", SelectAll, Some(KEY_CONTEXT)),
     ]);
+}
+
+/// Map a raw keystroke to an edit operation. Unmodified `backspace` / `delete`
+/// / arrows / `home` / `end` are matched exactly (no modifiers), and the
+/// Emacs-style and Command shortcuts are matched by their modifier state only,
+/// so they work regardless of keyboard layout:
+///
+/// | Keys | Operation |
+/// | --- | --- |
+/// | `ctrl-a` / `ctrl-p` / `home` | move to start of line |
+/// | `ctrl-e` / `ctrl-n` / `end` | move to end of line |
+/// | `ctrl-b` / `left` | move left |
+/// | `ctrl-f` / `right` | move right |
+/// | `ctrl-h` / `backspace` | delete backward |
+/// | `ctrl-d` / `delete` | delete forward |
+/// | `cmd-a` | select all |
+/// | `cmd-k` | delete to end of line |
+fn edit_operation_for(keystroke: &Keystroke) -> Option<fn(&mut TitleEditor)> {
+    let unmodified = !keystroke.modifiers.control
+        && !keystroke.modifiers.alt
+        && !keystroke.modifiers.shift
+        && !keystroke.modifiers.platform
+        && !keystroke.modifiers.function;
+    let ctrl = keystroke.modifiers.control
+        && !keystroke.modifiers.alt
+        && !keystroke.modifiers.shift
+        && !keystroke.modifiers.platform
+        && !keystroke.modifiers.function;
+    let cmd = keystroke.modifiers.platform
+        && !keystroke.modifiers.alt
+        && !keystroke.modifiers.shift
+        && !keystroke.modifiers.control
+        && !keystroke.modifiers.function;
+
+    match keystroke.key.as_str() {
+        "backspace" if unmodified => Some(TitleEditor::backspace),
+        "delete" if unmodified => Some(TitleEditor::delete_forward),
+        "left" if unmodified => Some(TitleEditor::move_left),
+        "right" if unmodified => Some(TitleEditor::move_right),
+        "home" if unmodified => Some(TitleEditor::move_to_start),
+        "end" if unmodified => Some(TitleEditor::move_to_end),
+        "h" if ctrl => Some(TitleEditor::backspace),
+        "d" if ctrl => Some(TitleEditor::delete_forward),
+        "b" if ctrl => Some(TitleEditor::move_left),
+        "f" if ctrl => Some(TitleEditor::move_right),
+        "a" | "p" if ctrl => Some(TitleEditor::move_to_start),
+        "e" | "n" if ctrl => Some(TitleEditor::move_to_end),
+        "a" if cmd => Some(TitleEditor::select_all),
+        "k" if cmd => Some(TitleEditor::delete_to_end),
+        _ => None,
+    }
+}
+
+/// Fingerprint of the last processed editing keystroke. macOS re-dispatches
+/// unmodified editing keys (mac `inputContext` → `doCommandBySelector:`)
+/// as a fresh `KeyDown` right after the original, so identical presses
+/// arriving within [`EDIT_KEY_DEDUP_DURATION`] are treated as one physical
+/// press.
+#[derive(Debug, Clone)]
+struct EditKeystroke {
+    key: String,
+    modifiers: Modifiers,
+    at: Instant,
+}
+
+impl EditKeystroke {
+    fn from_event(
+        keystroke: &Keystroke,
+        at: Instant,
+    ) -> Self {
+        Self {
+            key: keystroke.key.clone(),
+            modifiers: keystroke.modifiers,
+            at,
+        }
+    }
+
+    fn same_press(
+        &self,
+        other: &Self,
+    ) -> bool {
+        self.key == other.key && self.modifiers == other.modifiers
+    }
 }
 
 /// Per-field state that must survive re-renders: the edited text, the
@@ -82,6 +155,8 @@ pub struct TitleInputState {
     /// selection.
     mouse_selecting: bool,
     caret_bounds: Option<Bounds<Pixels>>,
+    /// Last editing keystroke used for macOS re-dispatch de-duplication.
+    last_edit_keystroke: Option<EditKeystroke>,
 }
 
 impl TitleInputState {
@@ -97,6 +172,7 @@ impl TitleInputState {
             request_focus: false,
             mouse_selecting: false,
             caret_bounds: None,
+            last_edit_keystroke: None,
         }
     }
 
@@ -109,6 +185,7 @@ impl TitleInputState {
         self.editor.set_text(text);
         self.mouse_selecting = false;
         self.caret_bounds = None;
+        self.last_edit_keystroke = None;
     }
 
     fn set_caret_bounds(
@@ -121,6 +198,50 @@ impl TitleInputState {
     fn caret_bounds(&self) -> Option<Bounds<Pixels>> {
         self.caret_bounds
     }
+
+    /// Decide whether `keystroke` (with `is_held` from the raw `KeyDown`)
+    /// is a duplicate of the previous editing keystroke and should be
+    /// swallowed. Auto-repeat passes straight through and resets the window so
+    /// holding Backspace keeps deleting; a fresh identical press is dropped
+    /// only when it lands within [`EDIT_KEY_DEDUP_DURATION`] of its twin.
+    fn should_dedupe_edit_keystroke(
+        &mut self,
+        keystroke: &Keystroke,
+        is_held: bool,
+    ) -> bool {
+        is_duplicate_edit_key(
+            &mut self.last_edit_keystroke,
+            keystroke,
+            is_held,
+            Instant::now(),
+        )
+    }
+}
+
+/// Pure de-duplication decision for editing keystrokes. Shared with the unit
+/// tests so the macOS synthetic re-dispatch guard can be exercised without a
+/// window. See [`TitleInputState::should_dedupe_edit_keystroke`].
+fn is_duplicate_edit_key(
+    last: &mut Option<EditKeystroke>,
+    keystroke: &Keystroke,
+    is_held: bool,
+    now: Instant,
+) -> bool {
+    let incoming = EditKeystroke::from_event(keystroke, now);
+    if is_held {
+        // Long-press repeat: never treat as a duplicate; forget the previous
+        // non-repeat so the next fresh press is not swallowed.
+        *last = None;
+        return false;
+    }
+    if let Some(previous) = last.as_ref()
+        && previous.same_press(&incoming)
+        && now.duration_since(previous.at) < EDIT_KEY_DEDUP_DURATION
+    {
+        return true;
+    }
+    *last = Some(incoming);
+    false
 }
 
 /// How the input sizes itself within its parent.
@@ -609,39 +730,33 @@ impl Element for TitleInput {
                 },
             );
         }
-        let mut register_edit_action = |action_type: std::any::TypeId, op: fn(&mut TitleEditor)| {
+        // Editing keys (arrows, backspace, delete, home/end) and every
+        // modifier shortcut are matched from the raw `KeyDown` so they can be
+        // de-duplicated against macOS's synthetic re-dispatch; `stop_propagation`
+        // also keeps them from being routed to the IME a second time.
+        window.on_key_event({
             let this = self.clone();
-            window.on_action(
-                action_type,
-                move |_: &dyn std::any::Any, _: DispatchPhase, window, cx| {
-                    if !this.state.borrow().focus_handle.is_focused(window) {
-                        return;
-                    }
-                    op(&mut this.state.borrow_mut().editor);
-                    this.notify(cx);
-                },
-            );
-        };
-        register_edit_action(std::any::TypeId::of::<Backspace>(), TitleEditor::backspace);
-        register_edit_action(
-            std::any::TypeId::of::<DeleteForward>(),
-            TitleEditor::delete_forward,
-        );
-        register_edit_action(
-            std::any::TypeId::of::<DeleteToEnd>(),
-            TitleEditor::delete_to_end,
-        );
-        register_edit_action(std::any::TypeId::of::<MoveLeft>(), TitleEditor::move_left);
-        register_edit_action(std::any::TypeId::of::<MoveRight>(), TitleEditor::move_right);
-        register_edit_action(
-            std::any::TypeId::of::<MoveToStart>(),
-            TitleEditor::move_to_start,
-        );
-        register_edit_action(
-            std::any::TypeId::of::<MoveToEnd>(),
-            TitleEditor::move_to_end,
-        );
-        register_edit_action(std::any::TypeId::of::<SelectAll>(), TitleEditor::select_all);
+            move |event: &KeyDownEvent, phase: DispatchPhase, window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || !this.state.borrow().focus_handle.is_focused(window)
+                {
+                    return;
+                }
+                let Some(operation) = edit_operation_for(&event.keystroke) else {
+                    return;
+                };
+                if this
+                    .state
+                    .borrow_mut()
+                    .should_dedupe_edit_keystroke(&event.keystroke, event.is_held)
+                {
+                    return;
+                }
+                operation(&mut this.state.borrow_mut().editor);
+                this.notify(cx);
+                cx.stop_propagation();
+            }
+        });
 
         // Focus once when the field first appears (fresh inline-rename row),
         // before registering the input handler so the next keystroke is not
@@ -1151,6 +1266,211 @@ fn byte_to_utf16_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keystroke(
+        key: &str,
+        modifiers: Modifiers,
+    ) -> Keystroke {
+        Keystroke {
+            key: key.into(),
+            modifiers,
+            key_char: None,
+        }
+    }
+
+    fn ctrl(key: &str) -> Keystroke {
+        keystroke(key, Modifiers::control())
+    }
+
+    fn cmd(key: &str) -> Keystroke {
+        keystroke(key, Modifiers::command())
+    }
+
+    fn plain(key: &str) -> Keystroke {
+        keystroke(key, Modifiers::none())
+    }
+
+    #[test]
+    fn edit_operation_for_maps_unmodified_editing_keys() {
+        // backspace at end of "ab" deletes one character.
+        assert_eq!(apply(&plain("backspace"), "ab", |_| {}), ("a".into(), 1));
+        // delete forward with caret at 0 removes the first character.
+        assert_eq!(
+            apply(&plain("delete"), "abc", |e| e.set_cursor(0)),
+            ("bc".into(), 0)
+        );
+        // arrows move the caret one step.
+        assert_eq!(apply(&plain("left"), "abc", |_| {}), ("abc".into(), 2));
+        assert_eq!(
+            apply(&plain("right"), "abc", |e| e.set_cursor(0)),
+            ("abc".into(), 1)
+        );
+        // home / end move to the line boundaries.
+        assert_eq!(
+            apply(&plain("home"), "abc", |e| e.set_cursor(2)),
+            ("abc".into(), 0)
+        );
+        assert_eq!(
+            apply(&plain("end"), "abc", |e| e.set_cursor(1)),
+            ("abc".into(), 3)
+        );
+        // A plain printable key is not an edit operation.
+        assert!(edit_operation_for(&plain("a")).is_none());
+    }
+
+    #[test]
+    fn edit_operation_for_maps_emacs_and_command_shortcuts() {
+        // ctrl-h / ctrl-b / ctrl-f mirror backspace / left / right.
+        assert_eq!(apply(&ctrl("h"), "ab", |_| {}), ("a".into(), 1));
+        assert_eq!(apply(&ctrl("b"), "abc", |_| {}), ("abc".into(), 2));
+        assert_eq!(
+            apply(&ctrl("f"), "abc", |e| e.set_cursor(0)),
+            ("abc".into(), 1)
+        );
+        // ctrl-d deletes forward.
+        assert_eq!(
+            apply(&ctrl("d"), "abc", |e| e.set_cursor(0)),
+            ("bc".into(), 0)
+        );
+        // ctrl-a / ctrl-p to line start, ctrl-e / ctrl-n to line end.
+        assert_eq!(
+            apply(&ctrl("a"), "abc", |e| e.set_cursor(2)),
+            ("abc".into(), 0)
+        );
+        assert_eq!(
+            apply(&ctrl("p"), "abc", |e| e.set_cursor(2)),
+            ("abc".into(), 0)
+        );
+        assert_eq!(
+            apply(&ctrl("e"), "abc", |e| e.set_cursor(1)),
+            ("abc".into(), 3)
+        );
+        assert_eq!(
+            apply(&ctrl("n"), "abc", |e| e.set_cursor(1)),
+            ("abc".into(), 3)
+        );
+        // cmd-a selects all (caret to end), cmd-k deletes to end.
+        assert_eq!(
+            apply(&cmd("a"), "abc", |e| e.set_cursor(1)),
+            ("abc".into(), 3)
+        );
+        assert_eq!(
+            apply(&cmd("k"), "abc", |e| e.set_cursor(1)),
+            ("a".into(), 1)
+        );
+        // Modifier-specific non-values stay unhandled.
+        assert!(edit_operation_for(&cmd("b")).is_none());
+        assert!(edit_operation_for(&plain("h")).is_none());
+    }
+
+    /// Apply the edit operation bound to `op_key`, if any, and return the
+    /// resulting `(text, caret)` so mapping tests assert on behavior instead
+    /// of function-pointer identity.
+    fn apply(
+        op_key: &Keystroke,
+        initial: &str,
+        setup: impl FnOnce(&mut TitleEditor),
+    ) -> (String, usize) {
+        let mut editor = TitleEditor::new(initial);
+        setup(&mut editor);
+        if let Some(operation) = edit_operation_for(op_key) {
+            operation(&mut editor);
+        }
+        (editor.text().to_string(), editor.cursor())
+    }
+
+    #[test]
+    fn dedup_swallows_a_rapid_identical_press() {
+        let mut last = None;
+        let t0 = Instant::now();
+        // First press is applied and recorded.
+        assert!(!is_duplicate_edit_key(
+            &mut last,
+            &plain("delete"),
+            false,
+            t0
+        ));
+        // macOS's synthetic re-dispatch of the same physical press.
+        assert!(is_duplicate_edit_key(
+            &mut last,
+            &plain("delete"),
+            false,
+            t0 + std::time::Duration::from_millis(5)
+        ));
+    }
+
+    #[test]
+    fn dedup_allows_a_distinct_key_right_after() {
+        let mut last = None;
+        let t0 = Instant::now();
+        assert!(!is_duplicate_edit_key(&mut last, &plain("left"), false, t0));
+        // Different key: never treated as a duplicate.
+        assert!(!is_duplicate_edit_key(
+            &mut last,
+            &plain("right"),
+            false,
+            t0 + std::time::Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn dedup_treats_modifier_specific_presses_as_distinct() {
+        let mut last = None;
+        let t0 = Instant::now();
+        assert!(!is_duplicate_edit_key(&mut last, &plain("a"), false, t0));
+        // ctrl-a is a different operation (line start vs. unhandled).
+        assert!(!is_duplicate_edit_key(
+            &mut last,
+            &ctrl("a"),
+            false,
+            t0 + std::time::Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn dedup_lets_held_repeats_through_and_resets() {
+        let mut last = None;
+        let t0 = Instant::now();
+        assert!(!is_duplicate_edit_key(
+            &mut last,
+            &plain("backspace"),
+            false,
+            t0
+        ));
+        // An auto-repeat (held) must always apply.
+        assert!(!is_duplicate_edit_key(
+            &mut last,
+            &plain("backspace"),
+            true,
+            t0 + std::time::Duration::from_millis(16)
+        ));
+        // And the next fresh press after a hold is not swallowed.
+        assert!(!is_duplicate_edit_key(
+            &mut last,
+            &plain("backspace"),
+            false,
+            t0 + std::time::Duration::from_millis(40)
+        ));
+    }
+
+    #[test]
+    fn dedup_after_the_window_is_not_swallowed() {
+        let mut last = None;
+        let t0 = Instant::now();
+        assert!(!is_duplicate_edit_key(
+            &mut last,
+            &plain("delete"),
+            false,
+            t0
+        ));
+        // Two genuine taps longer than the window apart are both applied.
+        assert!(!is_duplicate_edit_key(
+            &mut last,
+            &plain("delete"),
+            false,
+            t0 + std::time::Duration::from_millis(120)
+        ));
+    }
 
     #[test]
     fn backspace_deletes_previous_char() {

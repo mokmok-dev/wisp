@@ -250,6 +250,11 @@ pub struct AppModel {
     /// The session being viewed in `View::History`, kept around so the
     /// header can render its title without re-querying.
     pub viewed_session: Option<StoredSession>,
+    /// Working title for the live session. Edited in the live top bar (a
+    /// `title_input::TitleInput`) before and during recording; the empty
+    /// string means "fall back to the recorded-at timestamp" when the row is
+    /// created.
+    pub live_title: String,
     pub recent_log: VecDeque<String>,
     pub last_error: Option<AppError>,
     pub permissions: Permissions,
@@ -305,6 +310,7 @@ impl AppModel {
             current_session_dir_name: None,
             current_output_dir: None,
             viewed_session: None,
+            live_title: String::new(),
             recent_log: VecDeque::new(),
             last_error: None,
             permissions: Permissions::unknown(),
@@ -348,6 +354,7 @@ impl AppModel {
         self.microphone_muted = false;
         self.segments.clear();
         self.viewed_session = None;
+        self.live_title = String::new();
         self.current_session_id = None;
         self.linked_session_id = None;
         self.pending_session_write = None;
@@ -369,6 +376,7 @@ impl AppModel {
         self.microphone_muted = false;
         self.segments.clear();
         self.viewed_session = None;
+        self.live_title = String::new();
         self.current_session_id = None;
         self.linked_session_id = None;
         self.pending_session_write = None;
@@ -947,6 +955,18 @@ mod tests {
         }
         assert!(m.recent_log.len() <= 200);
         assert!(m.recent_log.back().unwrap().contains("299"));
+    }
+
+    #[test]
+    fn navigation_resets_the_live_title() {
+        let mut m = AppModel::new();
+        m.live_title = "Q3 planning".into();
+        m.show_library();
+        assert!(m.live_title.is_empty());
+
+        m.live_title = "Q3 planning".into();
+        m.show_new_session();
+        assert!(m.live_title.is_empty());
     }
 
     #[cfg(target_os = "macos")]

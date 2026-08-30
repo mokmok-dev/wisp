@@ -22,7 +22,11 @@ use wisp_core::{Session as StoredSession, SessionId};
 
 use crate::app::{AppError, AppModel, Permissions, Segment, SessionState, View};
 use crate::permissions as perms;
+use crate::title_input::{TitleInput, TitleInputState, TitleInputStyle};
 use crate::transcript_export::{self, suggested_export_name};
+
+/// Editing state for one active inline rename (library row or history header).
+type RenamingState = (SessionId, Rc<RefCell<TitleInputState>>);
 
 pub struct TranscriptView {
     pub app: gpui::Entity<AppModel>,
@@ -41,6 +45,15 @@ pub struct TranscriptView {
     pub on_open_history: std::sync::Arc<dyn Fn(SessionId, &mut Window, &mut gpui::App) + 'static>,
     /// Return to the library screen from a live or historical session view.
     pub on_back_to_library: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
+    /// Persist a live-session title edited in the recording top bar.
+    pub on_live_title: std::sync::Arc<dyn Fn(&str, &mut Window, &mut gpui::App) + 'static>,
+    /// Persist an inline rename from the library or history header.
+    pub on_rename_session:
+        std::sync::Arc<dyn Fn(SessionId, &str, &mut Window, &mut gpui::App) + 'static>,
+    /// Shared editing state for the always-visible live top-bar field.
+    pub live_title_state: Rc<RefCell<Option<Rc<RefCell<TitleInputState>>>>>,
+    /// Active inline rename (library row or history header), if any.
+    pub renaming: Rc<RefCell<Option<RenamingState>>>,
     /// Toggled by the cursor-blink animation timer in main.rs so the
     /// ghost-text caret pulses.
     pub cursor_visible: bool,
@@ -126,7 +139,7 @@ impl Render for TranscriptView {
         let model = self.app.clone();
 
         match view {
-            View::Library => self.render_library(&library).into_any_element(),
+            View::Library => self.render_library(&library, cx).into_any_element(),
             View::LiveSession => {
                 self.sync_transcript_list(&view, segment_count, active_idx, active_text_len);
                 self.update_scroll_signature(segment_count, text_len_sum);
@@ -259,8 +272,12 @@ impl TranscriptView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let title = session.map_or_else(|| "Session".to_string(), |s| s.title.clone());
-        let subtitle = session.map(history_subtitle);
         let export_name = suggested_export_name(Some(&title), "transcript");
+        let is_renaming = self
+            .renaming
+            .borrow()
+            .as_ref()
+            .is_some_and(|(rid, _)| session.is_some_and(|s| *rid == s.id));
 
         div()
             .flex()
@@ -268,13 +285,7 @@ impl TranscriptView {
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text_primary())
-            .child(self.render_history_top_bar(
-                &title,
-                subtitle.as_deref(),
-                model,
-                &export_name,
-                cx,
-            ))
+            .child(self.render_history_top_bar(session, model, &export_name, is_renaming, cx))
             .child(render_transcript(
                 self.transcript_list.clone(),
                 model,
@@ -287,6 +298,7 @@ impl TranscriptView {
     fn render_library(
         &self,
         sessions: &[StoredSession],
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let on_new = self.on_new_session.clone();
         let header = div()
@@ -305,7 +317,13 @@ impl TranscriptView {
             .flex_col()
             .flex_grow()
             .min_h_0()
-            .child(render_session_list(sessions, self.on_open_history.clone()));
+            .child(render_session_list(
+                sessions,
+                self.on_open_history.clone(),
+                self.renaming.clone(),
+                self.on_rename_session.clone(),
+                cx.entity_id(),
+            ));
 
         div()
             .flex()
@@ -336,11 +354,17 @@ impl TranscriptView {
             let app = model.read(cx);
             (app.has_unsettled_session(), app.has_pending_persistence())
         };
-        let mut leading = div().flex().items_center().gap(px(12.0));
+        let mut leading = div()
+            .flex()
+            .flex_grow()
+            .min_w_0()
+            .items_center()
+            .gap(px(12.0));
         if !has_unsettled_session {
             leading = leading.child(render_back_button("library-back-live", on_back));
         }
-        leading = leading.child(render_brand());
+        leading = leading.child(render_brand_compact());
+        leading = leading.child(self.render_live_title_field(model, cx));
         let mut actions = div()
             .flex()
             .items_center()
@@ -363,28 +387,98 @@ impl TranscriptView {
             .child(actions)
     }
 
+    /// The always-editable session-name field in the live top bar. Seeded
+    /// from `model.live_title`; edits flow back through `on_live_title`.
+    fn render_live_title_field(
+        &self,
+        model: &Entity<AppModel>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let state = self.ensure_live_title_state(model, cx);
+        let field = TitleInput::new(
+            ElementId::Name("title-input-live".into()),
+            state,
+            cx.entity_id(),
+            "Name this session",
+            live_input_style(),
+            theme::text_primary().into(),
+            theme::text_tertiary().into(),
+            theme::text_primary().into(),
+            {
+                let on_live = self.on_live_title.clone();
+                move |text, window, cx| on_live(text, window, cx)
+            },
+            {
+                let on_live = self.on_live_title.clone();
+                move |text, window, cx| on_live(text, window, cx)
+            },
+            move |_window, _cx| {},
+        );
+        div().flex_grow().min_w_0().child(render_input_pill(field))
+    }
+
+    /// Create (or refresh from the model) the shared live-title editor state.
+    fn ensure_live_title_state(
+        &self,
+        model: &Entity<AppModel>,
+        cx: &mut Context<Self>,
+    ) -> Rc<RefCell<TitleInputState>> {
+        let mut slot = self.live_title_state.borrow_mut();
+        let current = model.read(cx).live_title.clone();
+        if let Some(state) = slot.as_ref() {
+            let mut inner = state.borrow_mut();
+            if inner.editor.text() != current {
+                inner.set_text(&current);
+            }
+            state.clone()
+        } else {
+            let state = Rc::new(RefCell::new(TitleInputState::new(cx, &current)));
+            *slot = Some(state.clone());
+            state
+        }
+    }
+
     fn render_history_top_bar(
         &self,
-        title: &str,
-        subtitle: Option<&str>,
+        session: Option<&StoredSession>,
         model: &Entity<AppModel>,
         export_name: &str,
+        is_renaming: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let on_back = self.on_back_to_library.clone();
-        let mut title_block = div().flex().flex_col().gap(px(2.0)).child(
-            div()
-                .text_color(theme::text_primary())
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(title.to_string()),
-        );
-        if let Some(sub) = subtitle {
+        let mut title_block = div().flex().flex_col().gap(px(2.0)).min_w_0();
+        if is_renaming {
+            // Keep the pill from swallowing the whole bar width.
+            let pill = div()
+                .flex()
+                .flex_none()
+                .child(render_input_pill(self.render_rename_input(session, cx)));
+            title_block = title_block.child(pill);
+        } else {
+            let title = session.map_or_else(|| "Session".to_string(), |s| s.title.clone());
             title_block = title_block.child(
                 div()
-                    .text_xs()
-                    .text_color(theme::text_tertiary())
-                    .child(sub.to_string()),
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_color(theme::text_primary())
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(self.render_rename_button(session, cx)),
             );
+            if let Some(session) = session {
+                let subtitle = history_subtitle(session);
+                title_block = title_block.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::text_tertiary())
+                        .child(subtitle),
+                );
+            }
         }
         div()
             .h(px(56.0))
@@ -399,10 +493,74 @@ impl TranscriptView {
                     .flex()
                     .items_center()
                     .gap(px(12.0))
+                    .min_w_0()
                     .child(render_back_button("library-back-history", on_back))
                     .child(title_block),
             )
             .child(render_transcript_actions(model, export_name, cx))
+    }
+
+    /// Small "Rename" button next to a history title.
+    fn render_rename_button(
+        &self,
+        session: Option<&StoredSession>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let Some(session) = session else {
+            return div().into_any_element();
+        };
+        let session_id = session.id;
+        let renaming = self.renaming.clone();
+        let view_entity_id = cx.entity_id();
+        let title = session.title.clone();
+        render_toolbar_button("history-rename", "Rename", {
+            let renaming = renaming.clone();
+            move |_window, cx| {
+                start_rename(&renaming, session_id, &title, view_entity_id, cx);
+            }
+        })
+        .into_any_element()
+    }
+
+    /// The active inline rename input for a library row or history header.
+    /// Only called while a rename for `session` id is in flight.
+    fn render_rename_input(
+        &self,
+        session: Option<&StoredSession>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let renaming = self.renaming.clone();
+        let view_entity_id = cx.entity_id();
+        let Some((session_id, state)) = session.map(|s| s.id).and_then(|id| {
+            renaming
+                .borrow()
+                .as_ref()
+                .map(|(_, state)| (id, state.clone()))
+        }) else {
+            let placeholder = Rc::new(RefCell::new(TitleInputState::new(cx, "")));
+            return TitleInput::new(
+                ElementId::Name("title-input-rename-empty".into()),
+                placeholder,
+                view_entity_id,
+                "Session name",
+                rename_input_style(),
+                theme::text_primary().into(),
+                theme::text_tertiary().into(),
+                theme::text_primary().into(),
+                |_text, _window, _cx| {},
+                |_text, _window, _cx| {},
+                |_window, _cx| {},
+            );
+        };
+        let on_rename = self.on_rename_session.clone();
+        rename_title_input(
+            ElementId::Name(format!("title-input-rename-{}", session_id.as_i64()).into()),
+            state,
+            view_entity_id,
+            session_id,
+            on_rename,
+            renaming,
+        )
     }
 
     fn render_onboarding(
@@ -613,6 +771,23 @@ fn render_brand() -> impl IntoElement {
                 .text_xs()
                 .text_color(theme::text_tertiary())
                 .child("on-device transcription"),
+        )
+}
+
+/// Brand mark without the tagline — used in the live top bar next to the
+/// session-name field so it reads as a compact header.
+fn render_brand_compact() -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .flex_none()
+        .child(div().size(px(8.0)).rounded_full().bg(theme::mic_accent()))
+        .child(
+            div()
+                .text_color(theme::text_primary())
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Wisp"),
         )
 }
 
@@ -957,6 +1132,9 @@ fn render_empty_library() -> impl IntoElement {
 fn render_session_list(
     sessions: &[StoredSession],
     on_open: std::sync::Arc<dyn Fn(SessionId, &mut Window, &mut gpui::App) + 'static>,
+    renaming: Rc<RefCell<Option<RenamingState>>>,
+    on_rename: std::sync::Arc<dyn Fn(SessionId, &str, &mut Window, &mut gpui::App) + 'static>,
+    view_entity_id: gpui::EntityId,
 ) -> impl IntoElement {
     let mut list = div()
         .id(ElementId::Name("library-scroll".into()))
@@ -971,14 +1149,25 @@ fn render_session_list(
         return list.child(render_empty_library());
     }
     for s in sessions {
-        list = list.child(render_session_row(s, on_open.clone()));
+        list = list.child(render_session_row(
+            s,
+            on_open.clone(),
+            renaming.clone(),
+            on_rename.clone(),
+            view_entity_id,
+        ));
     }
     list
 }
 
+#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::too_many_arguments)]
 fn render_session_row(
     session: &StoredSession,
     on_open: std::sync::Arc<dyn Fn(SessionId, &mut Window, &mut gpui::App) + 'static>,
+    renaming: Rc<RefCell<Option<RenamingState>>>,
+    on_rename: std::sync::Arc<dyn Fn(SessionId, &str, &mut Window, &mut gpui::App) + 'static>,
+    view_entity_id: gpui::EntityId,
 ) -> impl IntoElement {
     let id = session.id;
     // Unique element id per row — GPUI requires every interactive child
@@ -992,7 +1181,12 @@ fn render_session_row(
         |end| format_duration(end.signed_duration_since(session.started_at)),
     );
 
-    div()
+    let renaming_state = renaming
+        .borrow()
+        .as_ref()
+        .and_then(|(rid, state)| (*rid == id).then(|| state.clone()));
+
+    let mut row = div()
         .id(element_id)
         .flex()
         .items_center()
@@ -1003,37 +1197,144 @@ fn render_session_row(
         .bg(theme::surface())
         .rounded(px(8.0))
         .border_l_2()
-        .border_color(theme::mic_accent())
-        .cursor_pointer()
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .min_w_0()
-                .flex_grow()
-                .child(
-                    div()
-                        .text_color(theme::text_primary())
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(session.title.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme::text_tertiary())
-                        .child(when),
-                ),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme::text_secondary())
-                .child(duration_text),
-        )
-        .on_click(move |_event, window, cx| {
-            on_open(id, window, cx);
-        })
+        .border_color(theme::mic_accent());
+
+    if let Some(state) = renaming_state {
+        let input = rename_title_input(
+            ElementId::Name(format!("title-input-rename-{}", id.as_i64()).into()),
+            state,
+            view_entity_id,
+            id,
+            on_rename,
+            renaming,
+        );
+        row = row.child(render_input_pill(input));
+    } else {
+        let rename_button = render_toolbar_button("session-rename", "Rename", {
+            let renaming = renaming.clone();
+            let title = session.title.clone();
+            move |_window, cx| {
+                cx.stop_propagation();
+                start_rename(&renaming, id, &title, view_entity_id, cx);
+            }
+        });
+        row = row
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .min_w_0()
+                    .flex_grow()
+                    .child(
+                        div()
+                            .text_color(theme::text_primary())
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(session.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::text_tertiary())
+                            .child(when),
+                    ),
+            )
+            .child(rename_button)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::text_secondary())
+                    .child(duration_text),
+            )
+            .cursor_pointer()
+            .on_click(move |_event, window, cx| {
+                on_open(id, window, cx);
+            });
+    }
+
+    row
+}
+
+/// Wraps a [`TitleInput`] in the pill-style field background shared by the
+/// live top bar, library rows, and the history header.
+fn render_input_pill(input: impl IntoElement) -> impl IntoElement {
+    div()
+        .min_w_0()
+        .h(px(32.0))
+        .flex()
+        .items_center()
+        .bg(theme::surface())
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(theme::border())
+        .px(px(4.0))
+        .child(input)
+}
+
+/// Style for the always-flexible live-session title field.
+fn live_input_style() -> TitleInputStyle {
+    TitleInputStyle {
+        fill: true,
+        min_width: px(160.0),
+        max_width: Some(px(420.0)),
+        pad_x: px(10.0),
+        pad_y: px(5.0),
+        font_size: px(15.0),
+    }
+}
+
+/// Style for a compact inline rename field.
+fn rename_input_style() -> TitleInputStyle {
+    TitleInputStyle::default()
+}
+
+/// Enter rename mode for `session_id`, seeding the editor with `title` and
+/// focusing the fresh field on its first paint.
+fn start_rename(
+    renaming: &Rc<RefCell<Option<RenamingState>>>,
+    session_id: SessionId,
+    title: &str,
+    view_entity_id: gpui::EntityId,
+    cx: &mut gpui::App,
+) {
+    let state = Rc::new(RefCell::new(TitleInputState::new(cx, title)));
+    state.borrow_mut().request_focus = true;
+    *renaming.borrow_mut() = Some((session_id, state));
+    cx.notify(view_entity_id);
+}
+
+/// Build the shared rename input element. Enter/blur persists via `on_rename`
+/// and closes the rename; Escape closes it without saving.
+fn rename_title_input(
+    element_id: ElementId,
+    state: Rc<RefCell<TitleInputState>>,
+    view_entity_id: gpui::EntityId,
+    session_id: SessionId,
+    on_rename: std::sync::Arc<dyn Fn(SessionId, &str, &mut Window, &mut gpui::App) + 'static>,
+    renaming: Rc<RefCell<Option<RenamingState>>>,
+) -> TitleInput {
+    let renaming_commit = renaming.clone();
+    TitleInput::new(
+        element_id,
+        state,
+        view_entity_id,
+        "Session name",
+        rename_input_style(),
+        theme::text_primary().into(),
+        theme::text_tertiary().into(),
+        theme::text_primary().into(),
+        |_text, _window, _cx| {},
+        {
+            move |text, window, cx| {
+                renaming_commit.borrow_mut().take();
+                on_rename(session_id, text, window, cx);
+            }
+        },
+        move |_window, cx| {
+            renaming.borrow_mut().take();
+            cx.notify(view_entity_id);
+        },
+    )
 }
 
 /// Format a `chrono::Duration` as `MM:SS` or `H:MM:SS` for the library

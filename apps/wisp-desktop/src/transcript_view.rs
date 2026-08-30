@@ -404,6 +404,7 @@ impl TranscriptView {
             theme::text_primary().into(),
             theme::text_tertiary().into(),
             theme::text_primary().into(),
+            selection_fill(),
             {
                 let on_live = self.on_live_title.clone();
                 move |text, window, cx| on_live(text, window, cx)
@@ -547,6 +548,7 @@ impl TranscriptView {
                 theme::text_primary().into(),
                 theme::text_tertiary().into(),
                 theme::text_primary().into(),
+                selection_fill(),
                 |_text, _window, _cx| {},
                 |_text, _window, _cx| {},
                 |_window, _cx| {},
@@ -1323,6 +1325,7 @@ fn rename_title_input(
         theme::text_primary().into(),
         theme::text_tertiary().into(),
         theme::text_primary().into(),
+        selection_fill(),
         |_text, _window, _cx| {},
         {
             move |text, window, cx| {
@@ -1335,6 +1338,14 @@ fn rename_title_input(
             cx.notify(view_entity_id);
         },
     )
+}
+
+/// Selection highlight fill: the brand accent at low alpha, semi-transparent
+/// so the text underneath stays readable.
+fn selection_fill() -> gpui::Hsla {
+    let mut accent: gpui::Hsla = theme::mic_accent().into();
+    accent.fade_out(0.62);
+    accent
 }
 
 /// Format a `chrono::Duration` as `MM:SS` or `H:MM:SS` for the library

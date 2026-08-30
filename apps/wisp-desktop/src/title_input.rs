@@ -22,8 +22,8 @@ use std::rc::Rc;
 use gpui::{
     App, AvailableSpace, Bounds, CursorStyle, DispatchPhase, Element, ElementId, EntityId,
     FocusHandle, Hitbox, HitboxBehavior, Hsla, IntoElement, KeyBinding, KeyContext, LayoutId,
-    MouseDownEvent, Pixels, Point, SharedString, Style, TextRun, TextStyle, UTF16Selection,
-    UnderlineStyle, Window, actions, fill, point, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Style, TextRun,
+    TextStyle, UTF16Selection, UnderlineStyle, Window, actions, fill, point, px, size,
 };
 
 /// Keyboard context for the title input. Keybindings that apply inside the
@@ -38,24 +38,34 @@ actions!(
         CancelTitle,
         Backspace,
         DeleteForward,
+        DeleteToEnd,
         MoveLeft,
         MoveRight,
         MoveToStart,
         MoveToEnd,
+        SelectAll,
     ]
 );
 
 /// Register the input's scoped keybindings. Call once at application setup.
+///
+/// `ctrl-a` / `ctrl-e` move the caret but do not extend the selection (a plain
+/// caret motion, no macOS anchoring), while `cmd-a` selects everything and
+/// `cmd-k` deletes from the caret to the end of the line.
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", SubmitTitle, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", CancelTitle, Some(KEY_CONTEXT)),
         KeyBinding::new("backspace", Backspace, Some(KEY_CONTEXT)),
         KeyBinding::new("delete", DeleteForward, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-k", DeleteToEnd, Some(KEY_CONTEXT)),
         KeyBinding::new("left", MoveLeft, Some(KEY_CONTEXT)),
         KeyBinding::new("right", MoveRight, Some(KEY_CONTEXT)),
         KeyBinding::new("home", MoveToStart, Some(KEY_CONTEXT)),
         KeyBinding::new("end", MoveToEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-a", MoveToStart, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-e", MoveToEnd, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-a", SelectAll, Some(KEY_CONTEXT)),
     ]);
 }
 
@@ -68,6 +78,9 @@ pub struct TitleInputState {
     /// Set when the field should grab keyboard focus on its next paint
     /// (used when an inline rename row first appears).
     pub request_focus: bool,
+    /// Whether the user is currently dragging inside the field to extend a
+    /// selection.
+    mouse_selecting: bool,
     caret_bounds: Option<Bounds<Pixels>>,
 }
 
@@ -82,6 +95,7 @@ impl TitleInputState {
             editor: TitleEditor::new(text),
             focus_handle: cx.focus_handle(),
             request_focus: false,
+            mouse_selecting: false,
             caret_bounds: None,
         }
     }
@@ -93,6 +107,7 @@ impl TitleInputState {
         text: &str,
     ) {
         self.editor.set_text(text);
+        self.mouse_selecting = false;
         self.caret_bounds = None;
     }
 
@@ -157,6 +172,7 @@ pub struct TitleInput {
     text_color: Hsla,
     placeholder_color: Hsla,
     caret_color: Hsla,
+    selection_color: Hsla,
     view_entity_id: EntityId,
     on_change: Rc<dyn Fn(&str, &mut Window, &mut App) + 'static>,
     on_commit: Rc<dyn Fn(&str, &mut Window, &mut App) + 'static>,
@@ -174,6 +190,7 @@ impl TitleInput {
         text_color: Hsla,
         placeholder_color: Hsla,
         caret_color: Hsla,
+        selection_color: Hsla,
         on_change: impl Fn(&str, &mut Window, &mut App) + 'static,
         on_commit: impl Fn(&str, &mut Window, &mut App) + 'static,
         on_cancel: impl Fn(&mut Window, &mut App) + 'static,
@@ -186,6 +203,7 @@ impl TitleInput {
             text_color,
             placeholder_color,
             caret_color,
+            selection_color,
             view_entity_id,
             on_change: Rc::new(on_change),
             on_commit: Rc::new(on_commit),
@@ -474,10 +492,10 @@ impl Element for TitleInput {
         };
 
         // --- mouse interaction -----------------------------------------------
-        let state_for_mouse = self.state.clone();
-        let on_commit = self.on_commit.clone();
         let view_entity_id = self.view_entity_id;
-        window.on_mouse_event(
+        let on_commit = self.on_commit.clone();
+        window.on_mouse_event({
+            let state_for_mouse = self.state.clone();
             move |event: &MouseDownEvent, phase: DispatchPhase, window, cx| {
                 if phase != DispatchPhase::Bubble {
                     return;
@@ -501,7 +519,11 @@ impl Element for TitleInput {
                         if !was_focused {
                             state.focus_handle.focus(window);
                         }
+                        // Anchor at the click point so a subsequent drag
+                        // extends a selection from here.
                         state.editor.set_cursor(caret);
+                        state.editor.set_anchor(caret);
+                        state.mouse_selecting = true;
                     }
                     cx.notify(view_entity_id);
                 } else {
@@ -514,8 +536,49 @@ impl Element for TitleInput {
                         on_commit(&text, window, cx);
                     }
                 }
-            },
-        );
+            }
+        });
+
+        // Dragging extends the selection from the anchor laid down on mousedown;
+        // `caret_index_for_x` clamps to the text extent, so dragging past the
+        // left/right edge still selects up to the field boundary.
+        window.on_mouse_event({
+            let state_for_mouse = self.state.clone();
+            move |event: &MouseMoveEvent, phase: DispatchPhase, window, cx| {
+                if phase != DispatchPhase::Bubble || !event.dragging() {
+                    return;
+                }
+                if !state_for_mouse.borrow().mouse_selecting {
+                    return;
+                }
+                let text = state_for_mouse.borrow().editor.text().to_string();
+                let caret = TitleInput::caret_index_for_x(
+                    window,
+                    &text,
+                    style,
+                    bounds.origin.x,
+                    event.position.x,
+                );
+                let changed = state_for_mouse
+                    .borrow_mut()
+                    .editor
+                    .extend_selection_to_changed(caret);
+                if changed {
+                    cx.notify(view_entity_id);
+                }
+            }
+        });
+
+        window.on_mouse_event({
+            let state_for_mouse = self.state.clone();
+            move |_event: &MouseUpEvent, phase: DispatchPhase, _window, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                state_for_mouse.borrow_mut().mouse_selecting = false;
+                cx.notify(view_entity_id);
+            }
+        });
 
         // --- keyboard actions (dispatched only when this node is focused) -----
         {
@@ -564,6 +627,10 @@ impl Element for TitleInput {
             std::any::TypeId::of::<DeleteForward>(),
             TitleEditor::delete_forward,
         );
+        register_edit_action(
+            std::any::TypeId::of::<DeleteToEnd>(),
+            TitleEditor::delete_to_end,
+        );
         register_edit_action(std::any::TypeId::of::<MoveLeft>(), TitleEditor::move_left);
         register_edit_action(std::any::TypeId::of::<MoveRight>(), TitleEditor::move_right);
         register_edit_action(
@@ -574,6 +641,7 @@ impl Element for TitleInput {
             std::any::TypeId::of::<MoveToEnd>(),
             TitleEditor::move_to_end,
         );
+        register_edit_action(std::any::TypeId::of::<SelectAll>(), TitleEditor::select_all);
 
         // Focus once when the field first appears (fresh inline-rename row),
         // before registering the input handler so the next keystroke is not
@@ -610,6 +678,24 @@ impl Element for TitleInput {
         );
         let line_height = (shaped.ascent + shaped.descent).max(px(1.0));
         let text_origin = point(bounds.origin.x + style.pad_x, bounds.origin.y + style.pad_y);
+
+        // Selection highlight, painted before the text so it sits underneath.
+        let selection = if is_placeholder {
+            None
+        } else {
+            self.state.borrow().editor.selection()
+        };
+        if let Some(selection) = selection.as_ref() {
+            let start_x = shaped.x_for_index(selection.start).min(shaped.width);
+            let end_x = shaped.x_for_index(selection.end).min(shaped.width);
+            let width = (end_x - start_x).max(px(1.0));
+            let selection_bounds = Bounds::new(
+                point(text_origin.x + start_x, bounds.origin.y + style.pad_y),
+                size(width, line_height),
+            );
+            window.paint_quad(fill(selection_bounds, self.selection_color));
+        }
+
         shaped.paint(text_origin, line_height, window, cx).ok();
 
         if focused {
@@ -623,7 +709,11 @@ impl Element for TitleInput {
                 point(text_origin.x + caret_x, bounds.origin.y + style.pad_y),
                 size(px(1.5), line_height),
             );
-            window.paint_quad(fill(caret_bounds, self.caret_color));
+            // Only paint the caret when there is no selection on top of it;
+            // the highlight rectangle is the visual for a dragged range.
+            if selection.is_none() {
+                window.paint_quad(fill(caret_bounds, self.caret_color));
+            }
             self.state.borrow_mut().set_caret_bounds(caret_bounds);
         }
     }
@@ -640,8 +730,11 @@ impl Element for TitleInput {
 #[derive(Debug, Clone)]
 pub struct TitleEditor {
     text: String,
-    /// Caret position in bytes.
+    /// Caret position in bytes (the head of any selection).
     cursor: usize,
+    /// Selection anchor in bytes. When set and different from `cursor`,
+    /// `min(anchor, cursor)..max(anchor, cursor)` is the selected range.
+    anchor: Option<usize>,
     /// Byte range of the IME-composing text, present while composing.
     marked: Option<Range<usize>>,
 }
@@ -668,6 +761,7 @@ impl TitleEditor {
         Self {
             text,
             cursor,
+            anchor: None,
             marked: None,
         }
     }
@@ -687,17 +781,32 @@ impl TitleEditor {
         self.marked.clone()
     }
 
-    /// Replace the whole buffer, caret to end, dropping IME state.
+    /// Replace the whole buffer, caret to end, dropping IME state and any
+    /// selection.
     pub fn set_text(
         &mut self,
         text: &str,
     ) {
         self.text = sanitize_newlines(text);
         self.cursor = self.text.len();
+        self.anchor = None;
         self.marked = None;
     }
 
-    /// Place the caret at a byte offset (snapped to a char boundary).
+    /// The current selection as a byte range, `None` when the caret is not
+    /// selected (a zero-width selection, e.g. while dragging).
+    #[must_use]
+    pub fn selection(&self) -> Option<Range<usize>> {
+        match self.anchor {
+            Some(anchor) if anchor != self.cursor => {
+                let (start, end) = (anchor.min(self.cursor), anchor.max(self.cursor));
+                Some(start..end)
+            },
+            _ => None,
+        }
+    }
+
+    /// Place the caret at a byte offset, collapsing any selection.
     pub fn set_cursor(
         &mut self,
         byte_index: usize,
@@ -705,10 +814,47 @@ impl TitleEditor {
         self.cursor = self
             .text
             .floor_char_boundary(byte_index.min(self.text.len()));
+        self.anchor = None;
     }
 
-    /// Replace a UTF-16 range or, when `range` is `None`, the caret with the
-    /// given committed text. Maps to `insertText:`.
+    /// Set the selection anchor at a byte offset, keeping the caret (head)
+    /// where it is. Selection is collapsed to a zero-width range immediately.
+    pub fn set_anchor(
+        &mut self,
+        byte_index: usize,
+    ) {
+        self.anchor = Some(
+            self.text
+                .floor_char_boundary(byte_index.min(self.text.len())),
+        );
+    }
+
+    /// Move the head of the selection to `byte_index`, growing or shrinking
+    /// the selection relative to the anchor. The head may cross the anchor
+    /// (this flips the selection range's orientation). A plain click sets the
+    /// anchor first via [`TitleEditor::set_anchor`]. Returns whether the caret
+    /// moved, so drain-loop handlers can skip repaints when a drag did not
+    /// cross a character boundary.
+    pub fn extend_selection_to_changed(
+        &mut self,
+        byte_index: usize,
+    ) -> bool {
+        if self.anchor.is_none() {
+            return false;
+        }
+        let nearest = self
+            .text
+            .floor_char_boundary(byte_index.min(self.text.len()));
+        if nearest == self.cursor {
+            return false;
+        }
+        self.cursor = nearest;
+        true
+    }
+
+    /// Replace a UTF-16 range or, when `range` is `None`, the caret — or the
+    /// current selection if one exists — with the given committed text. This
+    /// is how typing over a selection and IME `insertText:` land.
     pub fn replace_range(
         &mut self,
         range: Option<(usize, usize)>,
@@ -718,11 +864,12 @@ impl TitleEditor {
         let (start, end) = self.resolve_range(range);
         self.text.replace_range(start..end, &text);
         self.cursor = start + text.len();
+        self.anchor = None;
         self.marked = None;
     }
 
-    /// Replace a UTF-16 range and mark the replacement as composing text,
-    /// placing the caret at `selected` (a UTF-16 offset within `text`).
+    /// Replace a UTF-16 range (or the caret / selection when `None`) and mark
+    /// the replacement as composing text, placing the caret at `selected`.
     /// Maps to `setMarkedText:`.
     pub fn replace_and_mark(
         &mut self,
@@ -735,6 +882,7 @@ impl TitleEditor {
         self.text.replace_range(start..end, &text);
         let marked_end = start + text.len();
         self.marked = Some(start..marked_end);
+        self.anchor = None;
         self.cursor = match selected {
             Some((sel_start, _)) => start + byte_of_utf16_offset(&text, sel_start),
             None => marked_end,
@@ -747,6 +895,8 @@ impl TitleEditor {
         self.marked = None;
     }
 
+    /// Delete backwards one character, or the whole selection when one exists
+    /// (including any IME composition).
     pub fn backspace(&mut self) {
         if let Some(marked) = self.marked.clone() {
             let start = clamp_boundary(&self.text, marked.start);
@@ -754,6 +904,13 @@ impl TitleEditor {
             self.text.replace_range(start..end, "");
             self.cursor = start;
             self.marked = None;
+            self.anchor = None;
+            return;
+        }
+        if let Some(selection) = self.selection() {
+            self.text.replace_range(selection.clone(), "");
+            self.cursor = selection.start;
+            self.anchor = None;
             return;
         }
         if self.cursor == 0 {
@@ -764,6 +921,8 @@ impl TitleEditor {
         self.cursor = start;
     }
 
+    /// Delete forwards one character, or the whole selection when one exists
+    /// (including any IME composition).
     pub fn delete_forward(&mut self) {
         if let Some(marked) = self.marked.clone() {
             let start = clamp_boundary(&self.text, marked.start);
@@ -771,6 +930,13 @@ impl TitleEditor {
             self.text.replace_range(start..end, "");
             self.cursor = start;
             self.marked = None;
+            self.anchor = None;
+            return;
+        }
+        if let Some(selection) = self.selection() {
+            self.text.replace_range(selection.clone(), "");
+            self.cursor = selection.start;
+            self.anchor = None;
             return;
         }
         if self.cursor >= self.text.len() {
@@ -778,6 +944,28 @@ impl TitleEditor {
         }
         let end = self.next_boundary(self.cursor);
         self.text.replace_range(self.cursor..end, "");
+    }
+
+    /// Delete from the caret to the end of the line (`cmd-k`), or the whole
+    /// selection when one exists.
+    pub fn delete_to_end(&mut self) {
+        if let Some(selection) = self.selection() {
+            self.text.replace_range(selection.clone(), "");
+            self.cursor = selection.start;
+            self.anchor = None;
+            return;
+        }
+        if self.cursor >= self.text.len() {
+            return;
+        }
+        self.text.truncate(self.cursor);
+    }
+
+    /// Select the whole buffer, placing the caret at the end.
+    pub fn select_all(&mut self) {
+        self.anchor = Some(0);
+        self.cursor = self.text.len();
+        self.marked = None;
     }
 
     pub fn move_left(&mut self) {
@@ -792,6 +980,13 @@ impl TitleEditor {
             self.cursor = marked.start;
             return;
         }
+        if let Some(selection) = self.selection() {
+            // A selection collapses to its leading edge and the anchor is
+            // dropped, matching arrow-key behavior in native text fields.
+            self.cursor = selection.start;
+            self.anchor = None;
+            return;
+        }
         self.cursor = self.prev_boundary(self.cursor);
     }
 
@@ -804,14 +999,21 @@ impl TitleEditor {
             self.cursor = marked.end;
             return;
         }
+        if let Some(selection) = self.selection() {
+            self.cursor = selection.end;
+            self.anchor = None;
+            return;
+        }
         self.cursor = self.next_boundary(self.cursor);
     }
 
     pub fn move_to_start(&mut self) {
+        self.anchor = None;
         self.cursor = self.marked.as_ref().map_or(0, |marked| marked.start);
     }
 
     pub fn move_to_end(&mut self) {
+        self.anchor = None;
         self.cursor = self
             .marked
             .as_ref()
@@ -843,16 +1045,21 @@ impl TitleEditor {
     }
 
     /// Translate an optional UTF-16 range into a clamped byte range.
+    /// `None` resolves to the current selection, falling back to the caret.
     fn resolve_range(
         &self,
         range: Option<(usize, usize)>,
     ) -> (usize, usize) {
-        let (start_utf16, end_utf16) = match range {
-            Some((start, end)) => (start, end),
-            None => (
-                byte_to_utf16_offset(&self.text, self.cursor),
-                byte_to_utf16_offset(&self.text, self.cursor),
-            ),
+        let (start_utf16, end_utf16) = if let Some((start, end)) = range {
+            (start, end)
+        } else if let Some(selection) = self.selection() {
+            (
+                byte_to_utf16_offset(&self.text, selection.start),
+                byte_to_utf16_offset(&self.text, selection.end),
+            )
+        } else {
+            let index = byte_to_utf16_offset(&self.text, self.cursor);
+            (index, index)
         };
         let start = byte_of_utf16_offset(&self.text, start_utf16);
         let end = byte_of_utf16_offset(&self.text, end_utf16);
@@ -863,11 +1070,17 @@ impl TitleEditor {
         )
     }
 
-    /// The selected range as UTF-16 offsets (a caret is a zero-width range).
+    /// The selected range as UTF-16 offsets. Returns the selection when one
+    /// exists, otherwise a zero-width caret.
     #[must_use]
     pub fn selected_text_range_utf16(&self) -> Range<usize> {
-        let index = byte_to_utf16_offset(&self.text, self.cursor);
-        index..index
+        if let Some(selection) = self.selection() {
+            byte_to_utf16_offset(&self.text, selection.start)
+                ..byte_to_utf16_offset(&self.text, selection.end)
+        } else {
+            let index = byte_to_utf16_offset(&self.text, self.cursor);
+            index..index
+        }
     }
 
     /// The IME composing range as UTF-16 offsets, if composing.
@@ -1045,5 +1258,110 @@ mod tests {
         assert_eq!(byte_to_utf16_offset(text, 5), 3);
         assert_eq!(byte_of_utf16_offset(text, 3), 5);
         assert_eq!(byte_to_utf16_offset(text, text.len()), 4);
+    }
+
+    #[test]
+    fn select_all_marks_the_whole_buffer() {
+        let mut editor = TitleEditor::new("こんにちは");
+        editor.select_all();
+        assert_eq!(editor.selection(), Some(0..editor.text().len()));
+        assert_eq!(editor.cursor(), editor.text().len());
+        assert_eq!(editor.selected_text_range_utf16(), 0..5);
+    }
+
+    #[test]
+    fn delete_to_end_clears_after_the_caret() {
+        let mut editor = TitleEditor::new("abcdef");
+        editor.set_cursor(3);
+        editor.delete_to_end();
+        assert_eq!(editor.text(), "abc");
+        assert_eq!(editor.cursor(), 3);
+    }
+
+    #[test]
+    fn delete_to_end_replaces_a_selection_without_deleting_the_anchor_side() {
+        let mut editor = TitleEditor::new("abcdef");
+        editor.set_anchor(1);
+        editor.extend_selection_to_changed(4);
+        assert_eq!(editor.selection(), Some(1..4));
+        editor.delete_to_end();
+        assert_eq!(editor.text(), "aef");
+        assert_eq!(editor.cursor(), 1);
+    }
+
+    #[test]
+    fn backspace_and_delete_remove_the_selection() {
+        let mut editor = TitleEditor::new("abcdef");
+        editor.set_anchor(2);
+        editor.extend_selection_to_changed(5);
+        editor.backspace();
+        assert_eq!(editor.text(), "abf");
+        assert_eq!(editor.cursor(), 2);
+
+        let mut editor = TitleEditor::new("abcdef");
+        editor.set_anchor(2);
+        editor.extend_selection_to_changed(5);
+        editor.delete_forward();
+        assert_eq!(editor.text(), "abf");
+        assert_eq!(editor.cursor(), 2);
+    }
+
+    #[test]
+    fn typing_over_a_selection_replaces_it() {
+        let mut editor = TitleEditor::new("abcdef");
+        editor.set_anchor(2);
+        editor.extend_selection_to_changed(5);
+        // `replace_range(None, ..)` is what `insertText:` routes through.
+        editor.replace_range(None, "XYZ");
+        assert_eq!(editor.text(), "abXYZf");
+        assert_eq!(editor.cursor(), 5);
+        assert_eq!(editor.selection(), None);
+    }
+
+    #[test]
+    fn arrows_collapse_the_selection() {
+        let mut editor = TitleEditor::new("abcdef");
+        editor.set_anchor(2);
+        editor.extend_selection_to_changed(5);
+        editor.move_right();
+        assert_eq!(editor.cursor(), 5);
+        assert_eq!(editor.selection(), None);
+
+        let mut editor = TitleEditor::new("abcdef");
+        editor.set_anchor(2);
+        editor.extend_selection_to_changed(5);
+        editor.move_left();
+        assert_eq!(editor.cursor(), 2);
+        assert_eq!(editor.selection(), None);
+    }
+
+    #[test]
+    fn drag_reverses_selection_beyond_the_anchor() {
+        let mut editor = TitleEditor::new("abcdef");
+        editor.set_anchor(4);
+        editor.extend_selection_to_changed(1);
+        assert_eq!(editor.selection(), Some(1..4));
+        assert_eq!(editor.cursor(), 1);
+        // Dragging back the other way flips the head again.
+        editor.extend_selection_to_changed(6);
+        assert_eq!(editor.selection(), Some(4..6));
+    }
+
+    #[test]
+    fn extend_selection_respects_char_boundaries() {
+        let mut editor = TitleEditor::new("a😀b");
+        editor.set_anchor(1);
+        assert!(editor.extend_selection_to_changed(5));
+        assert_eq!(editor.cursor(), 5);
+        // A repeated call on the same boundary reports no change.
+        assert!(!editor.extend_selection_to_changed(5));
+    }
+
+    #[test]
+    fn clicking_then_dragging_from_the_same_spot_starts_in_an_empty_selection() {
+        let mut editor = TitleEditor::new("abc");
+        editor.set_cursor(2);
+        editor.set_anchor(2);
+        assert_eq!(editor.selection(), None);
     }
 }

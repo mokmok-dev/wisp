@@ -31,6 +31,8 @@ use gpui::{
     App, AppContext, Application, AsyncApp, Bounds, Entity, Timer, TitlebarOptions, WindowBounds,
     WindowHandle, WindowOptions, px, size,
 };
+use gpui_component::Root;
+use gpui_component_assets::Assets;
 use wisp_audiokit::SessionError;
 use wisp_core::SessionId;
 use wisp_storage::Storage;
@@ -63,8 +65,11 @@ use transcript_view::{
 const PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 
 fn main() {
-    Application::new().run(|cx| {
+    Application::new().with_assets(Assets).run(|cx| {
         cx.activate(true);
+
+        // Must be called before any GPUI Component feature is used.
+        gpui_component::init(cx);
 
         title_input::init(cx);
 
@@ -94,7 +99,7 @@ fn main() {
         // without a flash of the wrong content.
         permissions::refresh(&model, cx);
 
-        let window = open_main_window(
+        let (_window, transcript_view) = open_main_window(
             cx,
             window_options,
             MainWindowDeps {
@@ -114,7 +119,7 @@ fn main() {
         );
 
         spawn_session_update_pump(cx, runner, storage, model.clone());
-        spawn_cursor_blink(cx, window);
+        spawn_cursor_blink(cx, transcript_view);
         spawn_permission_refresh(cx, model);
     });
 }
@@ -131,103 +136,125 @@ fn open_main_window(
     cx: &mut App,
     window_options: WindowOptions,
     deps: MainWindowDeps,
-) -> WindowHandle<TranscriptView> {
+) -> (WindowHandle<Root>, Entity<TranscriptView>) {
     let MainWindowDeps {
         runner,
         storage,
         model,
         recordings_dir,
     } = deps;
-    cx.open_window(window_options, move |_, cx| {
-        cx.new(|cx| {
-            let model_for_toggle = model.clone();
-            let model_for_mute = model.clone();
-            let model_for_request = model.clone();
-            let model_for_new = model.clone();
-            let model_for_open_history = model.clone();
-            let model_for_back = model.clone();
-            let model_for_live_title = model.clone();
-            let model_for_rename = model.clone();
-            let storage_for_toggle = storage.clone();
-            let storage_for_open_history = storage.clone();
-            let storage_for_live_title = storage.clone();
-            let storage_for_rename = storage.clone();
-            let recordings_for_toggle = recordings_dir.clone();
-            let runner_for_toggle = runner.clone();
-            let runner_for_mute = runner.clone();
-            let (transcript_list, follow_transcript) = new_transcript_list_state();
-            let view = TranscriptView {
-                app: model.clone(),
-                cursor_visible: true,
-                live_title_state: std::rc::Rc::new(std::cell::RefCell::new(None)),
-                renaming: std::rc::Rc::new(std::cell::RefCell::new(None)),
-                transcript_list,
-                transcript_list_count: 0,
-                transcript_active_len: 0,
-                transcript_list_view: app::View::Library,
-                follow_transcript,
-                last_signature: (0, 0),
-                on_toggle_record: Arc::new(move |_window, cx| {
-                    toggle_recording(
-                        &runner_for_toggle,
-                        &model_for_toggle,
-                        &storage_for_toggle,
-                        &recordings_for_toggle,
-                        cx,
-                    );
-                }),
-                on_toggle_microphone_mute: Arc::new(move |_window, cx| {
-                    let muted = !model_for_mute.read(cx).microphone_muted;
-                    if runner_for_mute.set_microphone_muted(muted) {
-                        model_for_mute.update(cx, |model, cx| {
-                            if matches!(model.state, SessionState::Recording { .. }) {
-                                model.microphone_muted = muted;
-                                cx.notify();
-                            }
+    // `open_window` returns a handle to the window's *root* view (the
+    // `Root`), so the inner transcript view is smuggled out through this
+    // slot while the window builder runs.
+    let transcript_view = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let transcript_view_slot = transcript_view.clone();
+    let handle = cx
+        .open_window(window_options, move |window, cx| {
+            let view = cx.new(|cx| {
+                let model_for_toggle = model.clone();
+                let model_for_mute = model.clone();
+                let model_for_request = model.clone();
+                let model_for_new = model.clone();
+                let model_for_open_history = model.clone();
+                let model_for_back = model.clone();
+                let model_for_live_title = model.clone();
+                let model_for_rename = model.clone();
+                let storage_for_toggle = storage.clone();
+                let storage_for_open_history = storage.clone();
+                let storage_for_live_title = storage.clone();
+                let storage_for_rename = storage.clone();
+                let recordings_for_toggle = recordings_dir.clone();
+                let runner_for_toggle = runner.clone();
+                let runner_for_mute = runner.clone();
+                let (transcript_list, follow_transcript) = new_transcript_list_state();
+                let view = TranscriptView {
+                    app: model.clone(),
+                    cursor_visible: true,
+                    live_title_state: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                    renaming: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                    transcript_list,
+                    transcript_list_count: 0,
+                    transcript_active_len: 0,
+                    transcript_list_view: app::View::Library,
+                    follow_transcript,
+                    last_signature: (0, 0),
+                    on_toggle_record: Arc::new(move |_window, cx| {
+                        toggle_recording(
+                            &runner_for_toggle,
+                            &model_for_toggle,
+                            &storage_for_toggle,
+                            &recordings_for_toggle,
+                            cx,
+                        );
+                    }),
+                    on_toggle_microphone_mute: Arc::new(move |_window, cx| {
+                        let muted = !model_for_mute.read(cx).microphone_muted;
+                        if runner_for_mute.set_microphone_muted(muted) {
+                            model_for_mute.update(cx, |model, cx| {
+                                if matches!(model.state, SessionState::Recording { .. }) {
+                                    model.microphone_muted = muted;
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }),
+                    on_request_permission: Arc::new(move |perm, _window, cx| {
+                        permissions::request(perm, model_for_request.clone(), cx);
+                    }),
+                    on_open_settings: Arc::new(move |perm, _window, _cx| {
+                        permissions::open_settings(perm);
+                        // The next periodic permission refresh picks up the
+                        // toggle once the user flips it in System Settings.
+                    }),
+                    on_new_session: Arc::new(move |_window, cx| {
+                        model_for_new.update(cx, |m, cx| {
+                            m.show_new_session();
+                            cx.notify();
                         });
-                    }
-                }),
-                on_request_permission: Arc::new(move |perm, _window, cx| {
-                    permissions::request(perm, model_for_request.clone(), cx);
-                }),
-                on_open_settings: Arc::new(move |perm, _window, _cx| {
-                    permissions::open_settings(perm);
-                    // The next periodic permission refresh picks up the
-                    // toggle once the user flips it in System Settings.
-                }),
-                on_new_session: Arc::new(move |_window, cx| {
-                    model_for_new.update(cx, |m, cx| {
-                        m.show_new_session();
-                        cx.notify();
-                    });
-                }),
-                on_open_history: Arc::new(move |session_id, _window, cx| {
-                    open_history(
-                        &storage_for_open_history,
-                        &model_for_open_history,
-                        session_id,
-                        cx,
-                    );
-                }),
-                on_back_to_library: Arc::new(move |_window, cx| {
-                    model_for_back.update(cx, |m, cx| {
-                        m.show_library();
-                        cx.notify();
-                    });
-                }),
-                on_live_title: Arc::new(move |text, _window, cx| {
-                    change_live_title(&model_for_live_title, &storage_for_live_title, cx, text);
-                }),
-                on_rename_session: Arc::new(move |session_id, text, _window, cx| {
-                    rename_session(&model_for_rename, &storage_for_rename, session_id, text, cx);
-                }),
-            };
-            // Re-render whenever the underlying model changes.
-            cx.observe(&view.app, |_, _, cx| cx.notify()).detach();
-            view
+                    }),
+                    on_open_history: Arc::new(move |session_id, _window, cx| {
+                        open_history(
+                            &storage_for_open_history,
+                            &model_for_open_history,
+                            session_id,
+                            cx,
+                        );
+                    }),
+                    on_back_to_library: Arc::new(move |_window, cx| {
+                        model_for_back.update(cx, |m, cx| {
+                            m.show_library();
+                            cx.notify();
+                        });
+                    }),
+                    on_live_title: Arc::new(move |text, _window, cx| {
+                        change_live_title(&model_for_live_title, &storage_for_live_title, cx, text);
+                    }),
+                    on_rename_session: Arc::new(move |session_id, text, _window, cx| {
+                        rename_session(
+                            &model_for_rename,
+                            &storage_for_rename,
+                            session_id,
+                            text,
+                            cx,
+                        );
+                    }),
+                };
+                // Re-render whenever the underlying model changes.
+                cx.observe(&view.app, |_, _, cx| cx.notify()).detach();
+                view
+            });
+            // The window's first-level view must be a `Root` so dialogs,
+            // sheets and notifications can be shown. Keep the inner view
+            // handle so the cursor-blink task can tick it directly.
+            *transcript_view_slot.borrow_mut() = Some(view.clone());
+            cx.new(|cx| Root::new(view, window, cx))
         })
-    })
-    .expect("failed to open Wisp window")
+        .expect("failed to open Wisp window");
+    let transcript_view = transcript_view
+        .borrow()
+        .clone()
+        .expect("window builder ran without creating the transcript view");
+    (handle, transcript_view)
 }
 
 /// Drain `SessionRunner` updates into the model every ~33ms.
@@ -265,7 +292,7 @@ fn spawn_session_update_pump(
 /// Toggle the ghost-text cursor and refresh the status-bar elapsed counter.
 fn spawn_cursor_blink(
     cx: &mut App,
-    window: WindowHandle<TranscriptView>,
+    view: Entity<TranscriptView>,
 ) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         let mut elapsed = Duration::ZERO;
@@ -274,7 +301,7 @@ fn spawn_cursor_blink(
             elapsed += ui_tick_period();
             let ticks = elapsed.as_millis() / cursor_blink_period().as_millis();
             let blink = ticks.is_multiple_of(2);
-            let result = window.update(cx, |view, _, cx| {
+            let result = view.update(cx, |view, cx| {
                 if !view.app.read(cx).needs_live_ui_tick() {
                     return;
                 }

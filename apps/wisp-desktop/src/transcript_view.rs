@@ -17,6 +17,8 @@ use gpui::{
     ListState, ParentElement, Render, StatefulInteractiveElement, Styled, Window, div, list, px,
     rgb,
 };
+use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_component::{Colorize, IconName, Sizable};
 use wisp_audiokit::{Permission, PermissionStatus, SourceLabel};
 use wisp_core::{Session as StoredSession, SessionId};
 
@@ -310,7 +312,7 @@ impl TranscriptView {
             .border_b_1()
             .border_color(theme::border())
             .child(render_brand())
-            .child(render_new_session_button(on_new));
+            .child(render_new_session_button(on_new, cx));
 
         let body = div()
             .flex()
@@ -323,6 +325,7 @@ impl TranscriptView {
                 self.renaming.clone(),
                 self.on_rename_session.clone(),
                 cx.entity_id(),
+                cx,
             ));
 
         div()
@@ -361,7 +364,7 @@ impl TranscriptView {
             .items_center()
             .gap(px(12.0));
         if !has_unsettled_session {
-            leading = leading.child(render_back_button("library-back-live", on_back));
+            leading = leading.child(render_back_button("library-back-live", on_back, cx));
         }
         leading = leading.child(render_brand_compact());
         leading = leading.child(self.render_live_title_field(model, cx));
@@ -371,9 +374,13 @@ impl TranscriptView {
             .gap(px(8.0))
             .child(render_transcript_actions(model, export_name, cx));
         if matches!(state, SessionState::Recording { .. }) {
-            actions = actions.child(render_microphone_mute_button(microphone_muted, toggle_mute));
+            actions = actions.child(render_microphone_mute_button(
+                microphone_muted,
+                toggle_mute,
+                cx,
+            ));
         }
-        actions = actions.child(render_record_button(state, pending_persistence, toggle));
+        actions = actions.child(render_record_button(state, pending_persistence, toggle, cx));
 
         div()
             .h(px(56.0))
@@ -499,7 +506,7 @@ impl TranscriptView {
                     .items_center()
                     .gap(px(12.0))
                     .min_w_0()
-                    .child(render_back_button("library-back-history", on_back))
+                    .child(render_back_button("library-back-history", on_back, cx))
                     .child(title_block),
             )
             .child(render_transcript_actions(model, export_name, cx))
@@ -518,12 +525,17 @@ impl TranscriptView {
         let renaming = self.renaming.clone();
         let view_entity_id = cx.entity_id();
         let title = session.title.clone();
-        render_toolbar_button("history-rename", "Rename", {
-            let renaming = renaming.clone();
-            move |_window, cx| {
-                start_rename(&renaming, session_id, &title, view_entity_id, cx);
-            }
-        })
+        render_toolbar_button(
+            "history-rename",
+            "Rename",
+            {
+                let renaming = renaming.clone();
+                move |_window, cx| {
+                    start_rename(&renaming, session_id, &title, view_entity_id, cx);
+                }
+            },
+            cx,
+        )
         .into_any_element()
     }
 
@@ -760,6 +772,22 @@ fn status_color(status: PermissionStatus) -> gpui::Rgba {
     }
 }
 
+/// A `ButtonCustomVariant` matching the app's flat pill buttons: the given
+/// fill with the standard light foreground, plus lighten/darken hover and
+/// active states derived from the fill.
+fn button_variant(
+    cx: &App,
+    fill: gpui::Rgba,
+) -> ButtonCustomVariant {
+    let fill: gpui::Hsla = fill.into();
+    ButtonCustomVariant::new(cx)
+        .color(fill)
+        .foreground(theme::text_primary().into())
+        .border(theme::border().into())
+        .hover(fill.lighten(0.12))
+        .active(fill.darken(0.08))
+}
+
 fn render_brand() -> impl IntoElement {
     div()
         .flex()
@@ -801,6 +829,7 @@ fn render_record_button(
     state: SessionState,
     pending_persistence: bool,
     on_click: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
+    cx: &App,
 ) -> impl IntoElement {
     let (label, fill, dot_color) = if pending_persistence {
         ("Retry Save", theme::record_idle(), theme::system_accent())
@@ -818,25 +847,12 @@ fn render_record_button(
         state,
         SessionState::Idle | SessionState::Recording { .. } | SessionState::Failed
     );
-    let id = ElementId::Name("record-button".into());
-    let mut button = div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap_2()
-        .px(px(14.0))
-        .py(px(7.0))
-        .rounded_full()
-        .bg(fill)
-        .text_color(theme::text_primary())
-        .text_sm()
-        .font_weight(FontWeight::MEDIUM)
-        .child(div().size(px(8.0)).rounded_full().bg(dot_color))
-        .child(label);
+    let mut button = Button::new("record-button")
+        .custom(button_variant(cx, fill))
+        .label(label)
+        .child(div().size(px(8.0)).rounded_full().bg(dot_color));
     if interactive {
-        button = button.cursor_pointer().on_click(move |_event, window, cx| {
-            on_click(window, cx);
-        });
+        button = button.on_click(move |_event, window, cx| on_click(window, cx));
     }
     button
 }
@@ -844,27 +860,17 @@ fn render_record_button(
 fn render_microphone_mute_button(
     muted: bool,
     on_click: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
+    cx: &App,
 ) -> impl IntoElement {
     let (label, dot_color) = if muted {
         ("Unmute mic", theme::record_red())
     } else {
         ("Mute mic", theme::mic_accent())
     };
-    div()
-        .id(ElementId::Name("microphone-mute-button".into()))
-        .flex()
-        .items_center()
-        .gap_2()
-        .px(px(12.0))
-        .py(px(7.0))
-        .rounded_full()
-        .bg(theme::record_idle())
-        .text_color(theme::text_primary())
-        .text_sm()
-        .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
+    Button::new("microphone-mute-button")
+        .custom(button_variant(cx, theme::record_idle()))
+        .label(label)
         .child(div().size(px(8.0)).rounded_full().bg(dot_color))
-        .child(label)
         .on_click(move |_event, window, cx| on_click(window, cx))
 }
 
@@ -1008,26 +1014,14 @@ fn render_segment_card(
 }
 
 fn render_new_session_button(
-    on_click: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>
+    on_click: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
+    cx: &App,
 ) -> impl IntoElement {
-    div()
-        .id(ElementId::Name("new-session-button".into()))
-        .flex()
-        .items_center()
-        .gap_2()
-        .px(px(14.0))
-        .py(px(7.0))
-        .rounded_full()
-        .bg(theme::record_idle())
-        .text_color(theme::text_primary())
-        .text_sm()
-        .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
-        .child(div().size(px(8.0)).rounded_full().bg(theme::mic_accent()))
-        .child("New Session")
-        .on_click(move |_event, window, cx| {
-            on_click(window, cx);
-        })
+    Button::new("new-session-button")
+        .custom(button_variant(cx, theme::record_idle()))
+        .icon(IconName::Plus)
+        .label("New Session")
+        .on_click(move |_event, window, cx| on_click(window, cx))
 }
 
 fn render_transcript_actions(
@@ -1057,19 +1051,25 @@ fn render_transcript_actions(
             move |_window, cx| {
                 transcript_export::copy_transcript_to_clipboard(&segments_copy, cx);
             },
+            cx,
         ))
-        .child(render_toolbar_button("transcript-export", "Export", {
-            let export_name = export_name.clone();
-            let model = (*model).clone();
-            move |_window, cx| {
-                let app = model.read(cx);
-                let text = transcript_export::format_transcript_markdown(
-                    app.viewed_session.as_ref(),
-                    &app.segments,
-                );
-                transcript_export::export_transcript(text, &export_name, cx);
-            }
-        }))
+        .child(render_toolbar_button(
+            "transcript-export",
+            "Export",
+            {
+                let export_name = export_name.clone();
+                let model = (*model).clone();
+                move |_window, cx| {
+                    let app = model.read(cx);
+                    let text = transcript_export::format_transcript_markdown(
+                        app.viewed_session.as_ref(),
+                        &app.segments,
+                    );
+                    transcript_export::export_transcript(text, &export_name, cx);
+                }
+            },
+            cx,
+        ))
         .into_any_element()
 }
 
@@ -1077,39 +1077,26 @@ fn render_toolbar_button(
     id: &'static str,
     label: &'static str,
     on_click: impl Fn(&mut Window, &mut gpui::App) + 'static,
+    cx: &App,
 ) -> impl IntoElement {
-    div()
-        .id(ElementId::Name(id.into()))
-        .px(px(12.0))
-        .py(px(6.0))
-        .rounded_full()
-        .bg(theme::record_idle())
-        .text_color(theme::text_primary())
-        .text_xs()
-        .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
-        .child(label)
+    Button::new(id)
+        .small()
+        .custom(button_variant(cx, theme::record_idle()))
+        .label(label)
         .on_click(move |_event, window, cx| on_click(window, cx))
 }
 
 fn render_back_button(
     id: &'static str,
     on_click: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
+    cx: &App,
 ) -> impl IntoElement {
-    div()
-        .id(ElementId::Name(id.into()))
-        .px(px(10.0))
-        .py(px(5.0))
-        .rounded_full()
-        .bg(theme::record_idle())
-        .text_color(theme::text_primary())
-        .text_xs()
-        .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
-        .child("← Library")
-        .on_click(move |_event, window, cx| {
-            on_click(window, cx);
-        })
+    Button::new(id)
+        .small()
+        .custom(button_variant(cx, theme::record_idle()))
+        .icon(IconName::ArrowLeft)
+        .label("Library")
+        .on_click(move |_event, window, cx| on_click(window, cx))
 }
 
 fn render_empty_library() -> impl IntoElement {
@@ -1141,6 +1128,7 @@ fn render_session_list(
     renaming: Rc<RefCell<Option<RenamingState>>>,
     on_rename: std::sync::Arc<dyn Fn(SessionId, &str, &mut Window, &mut gpui::App) + 'static>,
     view_entity_id: gpui::EntityId,
+    cx: &App,
 ) -> impl IntoElement {
     let mut list = div()
         .id(ElementId::Name("library-scroll".into()))
@@ -1161,6 +1149,7 @@ fn render_session_list(
             renaming.clone(),
             on_rename.clone(),
             view_entity_id,
+            cx,
         ));
     }
     list
@@ -1174,6 +1163,7 @@ fn render_session_row(
     renaming: Rc<RefCell<Option<RenamingState>>>,
     on_rename: std::sync::Arc<dyn Fn(SessionId, &str, &mut Window, &mut gpui::App) + 'static>,
     view_entity_id: gpui::EntityId,
+    cx: &App,
 ) -> impl IntoElement {
     let id = session.id;
     // Unique element id per row — GPUI requires every interactive child
@@ -1216,14 +1206,19 @@ fn render_session_row(
         );
         row = row.child(render_input_pill(input));
     } else {
-        let rename_button = render_toolbar_button("session-rename", "Rename", {
-            let renaming = renaming.clone();
-            let title = session.title.clone();
-            move |_window, cx| {
-                cx.stop_propagation();
-                start_rename(&renaming, id, &title, view_entity_id, cx);
-            }
-        });
+        let rename_button = render_toolbar_button(
+            "session-rename",
+            "Rename",
+            {
+                let renaming = renaming.clone();
+                let title = session.title.clone();
+                move |_window, cx| {
+                    cx.stop_propagation();
+                    start_rename(&renaming, id, &title, view_entity_id, cx);
+                }
+            },
+            cx,
+        );
         row = row
             .child(
                 div()

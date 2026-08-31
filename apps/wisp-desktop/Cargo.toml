@@ -41,5 +41,10 @@ uuid = { workspace = true }
 # macOS uses its dedicated workflow.
 gpui = { workspace = true }
 
+# GPUI component library by the Longbridge team (buttons, inputs, dialogs, ...)
+# plus its bundled Lucide icon assets.
+gpui-component = { workspace = true }
+gpui-component-assets = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }

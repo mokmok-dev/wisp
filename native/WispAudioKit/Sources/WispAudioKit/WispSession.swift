@@ -92,10 +92,6 @@ public final class WispSession: @unchecked Sendable {
     )
     private lazy var microphoneHandoff = makeAudioHandoff(source: .mic)
     private lazy var systemHandoff = makeAudioHandoff(source: .system)
-    /// Converts captured PCM to the 48 kHz input required by the Rust Opus
-    /// encoder before it crosses the FFI boundary via `onAudio`.
-    private let microphoneResampler = RealtimeResampler()
-    private let systemResampler = RealtimeResampler()
 
     private enum SysState {
         case idle
@@ -314,6 +310,8 @@ public final class WispSession: @unchecked Sendable {
         let transcriberRuntimeState = transcriptionRuntimeEnabled
         let sessionAudioClock = audioClock
         let onTranscriberErrorLocal = onTranscriberError
+        let onTerminalErrorLocal = onTerminalError
+        let onLogLocal = onLog
         let pipelineError: TranscriptionPipeline.OnError = { terminal, message in
             if terminal {
                 transcriberRuntimeState.withLock { $0 = false }
@@ -340,7 +338,15 @@ public final class WispSession: @unchecked Sendable {
                     confidenceMin: pipelineResult.confidenceMin
                 ))
             },
-            onError: pipelineError
+            onError: pipelineError,
+            onRecordingError: { message in
+                onTerminalErrorLocal(.mic, message)
+            },
+            onRecordingDrop: { frames in
+                onLogLocal(
+                    "[MIC] recording gap: dropped \(frames) frame(s) from the Ogg writer"
+                )
+            }
         )
         self.micPipeline = micPipeline
 
@@ -531,42 +537,37 @@ public final class WispSession: @unchecked Sendable {
     }
 
     private func consumeCaptured(_ captured: CapturedAudioBuffer) {
-        let channels = Int(captured.channels)
-        let sourceFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: captured.sampleRate,
-            channels: AVAudioChannelCount(channels),
-            interleaved: false
-        )
+        guard let buffer = captured.makePCMBuffer() else {
+            onAudioOverflow(captured.source, captured.frameCount)
+            return
+        }
 
         switch captured.source {
         case .mic:
-            // Recording is owned by the Rust capture backend; no Swift
-            // recording write occurs here.
-            break
+            micPipeline?.pushRecording(buffer)
         case .system:
-            // Recording is owned by the Rust capture backend. The system
-            // pipeline is still built lazily (below) as the analyzer host.
-            _ = sysState.withLock { state -> TranscriptionPipeline? in
+            let terminalError = onTerminalError
+            let recordingGapLog = onLog
+            let pipeline = sysState.withLock { state -> TranscriptionPipeline? in
                 switch state {
                 case .ready(let pipeline):
                     return pipeline
                 case .idle:
-                    guard let sourceFormat else {
-                        state = .failed
-                        onTerminalError(
-                            .system,
-                            "[SYS] recorder format unavailable"
-                        )
-                        return nil
-                    }
                     do {
                         let pipeline = try TranscriptionPipeline(
                             recordingOnlyLabel: "SYS",
-                            sourceFormat: sourceFormat,
+                            sourceFormat: buffer.format,
                             oggURL: systemOggURL,
                             onResult: makeSystemResultHandler(),
-                            onError: makePipelineErrorHandler()
+                            onError: makePipelineErrorHandler(),
+                            onRecordingError: { message in
+                                terminalError(.system, message)
+                            },
+                            onRecordingDrop: { frames in
+                                recordingGapLog(
+                                    "[SYS] recording gap: dropped \(frames) frame(s) from the Ogg writer"
+                                )
+                            }
                         )
                         state = .ready(pipeline)
                         return pipeline
@@ -582,6 +583,7 @@ public final class WispSession: @unchecked Sendable {
                     return nil
                 }
             }
+            pipeline?.pushRecording(buffer)
         }
 
         if feedsCapturedAudioDirectlyToAnalyzer {
@@ -623,19 +625,13 @@ public final class WispSession: @unchecked Sendable {
                     hostNanoseconds: captured.hostNanoseconds
                 )
             }
-            let resampler = captured.source == .mic ? microphoneResampler : systemResampler
-            let samples48k = resampler.resample(
-                captured.samples,
-                sampleRate: captured.sampleRate,
-                channels: channels
-            )
             onAudio(
                 captured.source,
                 sequence,
                 timestamp,
-                UInt32(RealtimeResampler.outputSampleRate.rounded()),
+                UInt32(captured.sampleRate.rounded()),
                 UInt32(captured.channels),
-                samples48k
+                captured.samples
             )
         }
     }
@@ -1524,126 +1520,6 @@ final class RealtimeAudioHandoff: @unchecked Sendable {
             }
         }
     }
-}
-
-/// Resamples interleaved `Float32` PCM down to the 48 kHz input required by
-/// the Rust Opus encoder. The converter is cached per (sample rate, channel
-/// count) and rebuilt when the device format changes. When the source is
-/// already 48 kHz the input is passed through unchanged with no copy.
-final class RealtimeResampler: @unchecked Sendable {
-    static let outputSampleRate: Double = 48000
-
-    private let state = OSAllocatedUnfairLock<State>(initialState: State())
-
-    private struct State {
-        var converter: AVAudioConverter?
-        var sourceFormat: AVAudioFormat?
-        var outputFormat: AVAudioFormat?
-    }
-
-    /// Converts one interleaved `Float32` chunk from `sampleRate` to 48 kHz,
-    /// returning interleaved `Float32`.
-    func resample(_ samples: [Float], sampleRate: Double, channels: Int) -> [Float] {
-        guard sampleRate.isFinite, sampleRate > 0, channels > 0 else { return samples }
-        if sampleRate == Self.outputSampleRate {
-            return samples
-        }
-        guard let sourceFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate,
-            channels: AVAudioChannelCount(channels),
-            interleaved: false
-        ), let outputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: Self.outputSampleRate,
-            channels: AVAudioChannelCount(channels),
-            interleaved: false
-        ) else {
-            return samples
-        }
-
-        let converter = state.withLock { state -> AVAudioConverter? in
-            if state.sourceFormat?.sampleRate == sourceFormat.sampleRate,
-               state.sourceFormat?.channelCount == sourceFormat.channelCount
-            {
-                return state.converter
-            }
-            guard let converter = AVAudioConverter(from: sourceFormat, to: outputFormat) else {
-                return nil
-            }
-            state.converter = converter
-            state.sourceFormat = sourceFormat
-            state.outputFormat = outputFormat
-            return converter
-        }
-        guard let converter else { return samples }
-
-        guard let inputBuffer = samples.withUnsafeBufferPointer({ ptr in
-            pcmBufferFromInterleaved(
-                interleavedSamples: ptr,
-                sampleRate: sampleRate,
-                channels: channels
-            )
-        }) else { return samples }
-
-        let inputFrames = samples.count / channels
-        let ratio = Self.outputSampleRate / sampleRate
-        let capacity = Int((Double(inputFrames) * ratio).rounded(.up))
-        guard capacity > 0, capacity <= Int(Int32.max),
-              let outputBuffer = AVAudioPCMBuffer(
-                  pcmFormat: outputFormat,
-                  frameCapacity: AVAudioFrameCount(capacity)
-              )
-        else { return samples }
-
-        var convertedFrames = 0
-        let consumed = ConverterInputFlag()
-        let status = converter.convert(
-            to: outputBuffer,
-            error: nil,
-            withInputFrom: { _, outStatus in
-                if consumed.value {
-                    outStatus.pointee = .noDataNow
-                    return nil
-                }
-                consumed.value = true
-                outStatus.pointee = .haveData
-                return inputBuffer
-            }
-        )
-        if status == .error {
-            return samples
-        }
-        convertedFrames = Int(outputBuffer.frameLength)
-        guard convertedFrames > 0 else { return samples }
-
-        return interleavedSamples(
-            from: outputBuffer,
-            frameCount: convertedFrames,
-            channels: channels
-        )
-    }
-
-    private func interleavedSamples(
-        from buffer: AVAudioPCMBuffer,
-        frameCount: Int,
-        channels: Int
-    ) -> [Float] {
-        guard let channelData = buffer.floatChannelData else { return [] }
-        var out = [Float](repeating: 0, count: frameCount * channels)
-        out.withUnsafeMutableBufferPointer { outBuf in
-            for channel in 0 ..< channels {
-                for frame in 0 ..< frameCount {
-                    outBuf[frame * channels + channel] = channelData[channel][frame]
-                }
-            }
-        }
-        return out
-    }
-}
-
-private final class ConverterInputFlag: @unchecked Sendable {
-    var value = false
 }
 
 struct PackedFloat32Layout {

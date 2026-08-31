@@ -512,26 +512,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bindgen"
-version = "0.72.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
-dependencies = [
- "bitflags 2.13.1",
- "cexpr",
- "clang-sys",
- "itertools 0.13.0",
- "log",
- "prettyplease",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 2.1.3",
- "shlex 1.3.0",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -898,15 +878,6 @@ dependencies = [
  "glob",
  "libc",
  "libloading",
-]
-
-[[package]]
-name = "cmake"
-version = "0.1.58"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -2182,7 +2153,7 @@ dependencies = [
  "as-raw-xcb-connection",
  "ashpd 0.11.1",
  "async-task",
- "bindgen 0.71.1",
+ "bindgen",
  "blade-graphics",
  "blade-macros",
  "blade-util",
@@ -2334,7 +2305,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05cb8912ae17371725132d2b7eec6797a255accc95d58ee5c1134b529810f14b"
 dependencies = [
  "anyhow",
- "bindgen 0.71.1",
+ "bindgen",
  "core-foundation 0.10.0",
  "core-video",
  "ctor",
@@ -5027,33 +4998,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "shiguredo_cmake"
-version = "4.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ebe8d4ddac00dfb93edcd3edc678a743cb61601a8b5431df23d18d37f9c0d63"
-dependencies = [
- "cmake",
- "shiguredo_toml",
-]
-
-[[package]]
-name = "shiguredo_opus"
-version = "2026.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3064a246b3e243aee5cacb327400754d7c0ce7a74244c3a524afe4d59d9553a9"
-dependencies = [
- "bindgen 0.72.1",
- "shiguredo_cmake",
- "shiguredo_toml",
-]
-
-[[package]]
-name = "shiguredo_toml"
-version = "2026.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b475c218cf15d056ed3e48c9e98693135b261b79530881e63b162650b236fdec"
-
-[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7031,7 +6975,6 @@ name = "wisp-audiokit"
 version = "0.0.19"
 dependencies = [
  "crossbeam-channel",
- "shiguredo_opus",
  "tempfile",
  "thiserror 2.0.20",
  "wisp-audiokit-sys",

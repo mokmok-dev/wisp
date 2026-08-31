@@ -17,7 +17,7 @@ use gpui::{
     ListState, ParentElement, Render, StatefulInteractiveElement, Styled, Window, div, list, px,
     rgb,
 };
-use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_component::button::{Button, ButtonCustomVariant, ButtonRounded, ButtonVariants};
 use gpui_component::{Colorize, IconName, Sizable};
 use wisp_audiokit::{Permission, PermissionStatus, SourceLabel};
 use wisp_core::{Session as StoredSession, SessionId};
@@ -788,6 +788,18 @@ fn button_variant(
         .active(fill.darken(0.08))
 }
 
+/// A `Button` using the app's flat pill style: custom fill and a fully
+/// rounded ("pill") corner radius, matching the original hand-rolled buttons.
+fn pill_button(
+    id: impl Into<ElementId>,
+    cx: &App,
+    fill: gpui::Rgba,
+) -> Button {
+    Button::new(id)
+        .custom(button_variant(cx, fill))
+        .rounded(ButtonRounded::Size(px(999.0)))
+}
+
 fn render_brand() -> impl IntoElement {
     div()
         .flex()
@@ -847,8 +859,7 @@ fn render_record_button(
         state,
         SessionState::Idle | SessionState::Recording { .. } | SessionState::Failed
     );
-    let mut button = Button::new("record-button")
-        .custom(button_variant(cx, fill))
+    let mut button = pill_button("record-button", cx, fill)
         .label(label)
         .child(div().size(px(8.0)).rounded_full().bg(dot_color));
     if interactive {
@@ -867,8 +878,7 @@ fn render_microphone_mute_button(
     } else {
         ("Mute mic", theme::mic_accent())
     };
-    Button::new("microphone-mute-button")
-        .custom(button_variant(cx, theme::record_idle()))
+    pill_button("microphone-mute-button", cx, theme::record_idle())
         .label(label)
         .child(div().size(px(8.0)).rounded_full().bg(dot_color))
         .on_click(move |_event, window, cx| on_click(window, cx))
@@ -881,6 +891,7 @@ fn render_transcript(
     cursor_visible: bool,
 ) -> impl IntoElement {
     let mut container = div()
+        .debug_selector(|| "transcript-scroll".into())
         .id(ElementId::Name("transcript-scroll".into()))
         .flex()
         .flex_col()
@@ -947,6 +958,7 @@ fn render_segment_row(
 ) -> impl IntoElement {
     let gap = if index > 0 { px(10.0) } else { px(0.0) };
     div()
+        .debug_selector(move || format!("segment-row-{index}"))
         .w_full()
         .pt(gap)
         .child(render_segment_card(seg, show_cursor, is_active))
@@ -1017,8 +1029,7 @@ fn render_new_session_button(
     on_click: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
     cx: &App,
 ) -> impl IntoElement {
-    Button::new("new-session-button")
-        .custom(button_variant(cx, theme::record_idle()))
+    pill_button("new-session-button", cx, theme::record_idle())
         .icon(IconName::Plus)
         .label("New Session")
         .on_click(move |_event, window, cx| on_click(window, cx))
@@ -1079,9 +1090,8 @@ fn render_toolbar_button(
     on_click: impl Fn(&mut Window, &mut gpui::App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
-    Button::new(id)
+    pill_button(id, cx, theme::record_idle())
         .small()
-        .custom(button_variant(cx, theme::record_idle()))
         .label(label)
         .on_click(move |_event, window, cx| on_click(window, cx))
 }
@@ -1091,9 +1101,8 @@ fn render_back_button(
     on_click: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static>,
     cx: &App,
 ) -> impl IntoElement {
-    Button::new(id)
+    pill_button(id, cx, theme::record_idle())
         .small()
-        .custom(button_variant(cx, theme::record_idle()))
         .icon(IconName::ArrowLeft)
         .label("Library")
         .on_click(move |_event, window, cx| on_click(window, cx))
@@ -1131,6 +1140,7 @@ fn render_session_list(
     cx: &App,
 ) -> impl IntoElement {
     let mut list = div()
+        .debug_selector(|| "library-scroll".into())
         .id(ElementId::Name("library-scroll".into()))
         .flex()
         .flex_col()
@@ -1183,6 +1193,7 @@ fn render_session_row(
         .and_then(|(rid, state)| (*rid == id).then(|| state.clone()));
 
     let mut row = div()
+        .debug_selector(move || format!("session-row-{}", id.as_i64()))
         .id(element_id)
         .flex()
         .items_center()
@@ -1510,4 +1521,164 @@ pub fn new_transcript_list_state() -> (ListState, Rc<RefCell<bool>>) {
         *follow_for_scroll.borrow_mut() = at_bottom;
     });
     (list, follow_transcript)
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+    use wisp_core::SessionId;
+
+    fn test_session(id: i64) -> StoredSession {
+        let now = chrono::Utc::now();
+        StoredSession {
+            id: SessionId::from(id),
+            started_at: now,
+            ended_at: Some(now),
+            title: format!("session {id}"),
+            mic_wav_path: format!("session-{id}/mic.ogg"),
+            system_wav_path: format!("session-{id}/system.ogg"),
+            notes: String::new(),
+        }
+    }
+
+    fn test_segment(text: &str) -> Segment {
+        Segment {
+            source: SourceLabel::Mic,
+            id: 0,
+            text: text.into(),
+            display_text: text.into(),
+            start_seconds: 0.0,
+            end_seconds: 1.0,
+            is_final: true,
+        }
+    }
+
+    fn noop_id() -> std::sync::Arc<dyn Fn(SessionId, &mut Window, &mut gpui::App) + 'static> {
+        std::sync::Arc::new(|_, _, _| {})
+    }
+
+    fn noop_rename()
+    -> std::sync::Arc<dyn Fn(SessionId, &str, &mut Window, &mut gpui::App) + 'static> {
+        std::sync::Arc::new(|_, _, _, _| {})
+    }
+
+    /// Minimal view that renders the session list (library page content area).
+    struct LibraryTestView {
+        sessions: Vec<StoredSession>,
+    }
+
+    impl Render for LibraryTestView {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> impl IntoElement {
+            let body = div()
+                .flex()
+                .flex_col()
+                .flex_grow()
+                .min_h_0()
+                .child(render_session_list(
+                    &self.sessions,
+                    noop_id(),
+                    Rc::new(RefCell::new(None)),
+                    noop_rename(),
+                    cx.entity_id(),
+                    cx,
+                ));
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(div().h(px(56.0)))
+                .child(body)
+                .child(div().h(px(32.0)))
+        }
+    }
+
+    /// Minimal view that renders the transcript list (history page content area).
+    struct HistoryTestView {
+        model: Entity<AppModel>,
+        list: ListState,
+        count: usize,
+    }
+
+    impl Render for HistoryTestView {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(div().h(px(56.0)))
+                .child(render_transcript(
+                    self.list.clone(),
+                    &self.model,
+                    self.count,
+                    false,
+                ))
+                .child(div().h(px(32.0)))
+        }
+    }
+
+    #[gpui::test]
+    fn library_and_history_content_tops_align(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let model = cx.new(|_| AppModel::new());
+        cx.update(|cx| {
+            model.update(cx, |m, _| {
+                m.segments = vec![test_segment("こんにちは")];
+            });
+        });
+
+        let size = gpui::size(px(900.0), px(640.0));
+        let origin = gpui::point(px(0.0), px(0.0));
+
+        // History / transcript page content.
+        let history_cx = cx.add_empty_window();
+        history_cx.draw(origin, size, |_, cx| {
+            cx.new(|_| HistoryTestView {
+                model: model.clone(),
+                list: ListState::new(1, ListAlignment::Top, px(100.0)),
+                count: 1,
+            })
+            .into_any_element()
+        });
+        let history_first = history_cx.debug_bounds("segment-row-0");
+        let history_cont = history_cx.debug_bounds("transcript-scroll");
+
+        // Library page content.
+        let library_cx = cx.add_empty_window();
+        library_cx.draw(origin, size, |_, cx| {
+            cx.new(|_| LibraryTestView {
+                sessions: vec![test_session(7)],
+            })
+            .into_any_element()
+        });
+        let library_first = library_cx.debug_bounds("session-row-7");
+        let library_cont = library_cx.debug_bounds("library-scroll");
+
+        let history_first = history_first.expect("history first row should be laid out");
+        let library_first = library_first.expect("library first row should be laid out");
+        let history_cont = history_cont.expect("history container should be laid out");
+        let library_cont = library_cont.expect("library container should be laid out");
+
+        assert_eq!(
+            library_cont.origin.y, history_cont.origin.y,
+            "scroll containers should start at the same y"
+        );
+        assert_eq!(
+            library_first.origin.y, history_first.origin.y,
+            "first content rows should start at the same y"
+        );
+        assert_eq!(
+            library_first.origin.y,
+            library_cont.origin.y + px(16.0),
+            "library should have 16px top padding"
+        );
+    }
 }

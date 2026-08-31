@@ -48,3 +48,5 @@ gpui-component-assets = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+gpui = { workspace = true, features = ["test-support"] }
+gpui-component = { workspace = true }

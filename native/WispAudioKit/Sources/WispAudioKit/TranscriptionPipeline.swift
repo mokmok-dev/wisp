@@ -28,6 +28,8 @@ public final class TranscriptionPipeline: @unchecked Sendable {
 
     public typealias OnResult = @Sendable (Result) -> Void
     public typealias OnError = @Sendable (_ terminal: Bool, _ message: String) -> Void
+    public typealias OnRecordingError = @Sendable (_ message: String) -> Void
+    public typealias OnRecordingDrop = @Sendable (_ droppedFrames: UInt64) -> Void
 
     public let label: String
     public let oggURL: URL
@@ -37,20 +39,20 @@ public final class TranscriptionPipeline: @unchecked Sendable {
     }
 
     private let sourceFormatLock: OSAllocatedUnfairLock<AVAudioFormat>
+    private let recorder: OpusOggRecorder
     private let analysis: AnalyzerCoordinator
 
-    /// Construct the analysis pipeline immediately, without doing any
-    /// analyzer or recorder work. This is used by lazy system capture so
-    /// staging starts before SpeechAnalyzer format negotiation can suspend.
-    ///
-    /// Ogg/Opus recording is owned by the Rust capture backend, so no Swift
-    /// recorder is created here.
+    /// Construct recording immediately, without doing any analyzer work.
+    /// This is used by lazy system capture so Ogg staging starts before
+    /// SpeechAnalyzer format negotiation can suspend.
     public init(
         recordingOnlyLabel label: String,
         sourceFormat: AVAudioFormat,
         oggURL: URL,
         onResult: @escaping OnResult,
-        onError: @escaping OnError = { _, _ in }
+        onError: @escaping OnError = { _, _ in },
+        onRecordingError: @escaping OnRecordingError = { wispLog($0) },
+        onRecordingDrop: @escaping OnRecordingDrop = { _ in }
     ) throws {
         self.label = label
         self.oggURL = oggURL
@@ -60,6 +62,12 @@ public final class TranscriptionPipeline: @unchecked Sendable {
             sourceFormat: sourceFormat,
             onResult: onResult,
             onError: onError
+        )
+        recorder = try OpusOggRecorder(
+            url: oggURL,
+            sourceFormat: sourceFormat,
+            onFatal: onRecordingError,
+            onDroppedFrames: onRecordingDrop
         )
         wispLog("[\(label)] recording pipeline ready")
         wispLog("[\(label)] Ogg/Opus: \(oggURL.path)")
@@ -73,14 +81,18 @@ public final class TranscriptionPipeline: @unchecked Sendable {
         transcriptionEnabled: Bool = true,
         allowRecordOnly: Bool = false,
         onResult: @escaping OnResult,
-        onError: @escaping OnError = { _, _ in }
+        onError: @escaping OnError = { _, _ in },
+        onRecordingError: @escaping OnRecordingError = { wispLog($0) },
+        onRecordingDrop: @escaping OnRecordingDrop = { _ in }
     ) async throws {
         try self.init(
             recordingOnlyLabel: label,
             sourceFormat: sourceFormat,
             oggURL: oggURL,
             onResult: onResult,
-            onError: onError
+            onError: onError,
+            onRecordingError: onRecordingError,
+            onRecordingDrop: onRecordingDrop
         )
         if transcriptionEnabled {
             _ = try await enableAnalysis(locale: locale, allowRecordOnly: allowRecordOnly)
@@ -113,12 +125,11 @@ public final class TranscriptionPipeline: @unchecked Sendable {
         }
     }
 
-    /// Queue capture PCM for Ogg/Opus recording.
-    ///
-    /// Recording is owned by the Rust capture backend; Swift only forwards the
-    /// same PCM to Rust through `onAudio`, so this is intentionally a no-op.
+    /// Queue capture PCM for Ogg/Opus recording. Analyzer input deliberately
+    /// has a separate entry point so capture can never bypass the Rust
+    /// `SessionOrchestrator`.
     public func pushRecording(_ buffer: AVAudioPCMBuffer) {
-        _ = buffer
+        recorder.push(buffer)
     }
 
     /// Submit one frame to SpeechAnalyzer. The v2 ABI calls this only after
@@ -151,9 +162,13 @@ public final class TranscriptionPipeline: @unchecked Sendable {
         await analysis.cancel()
     }
 
-    public func finishRecording() async {}
+    public func finishRecording() async {
+        await recorder.finish()
+    }
 
-    public func abortRecording() async {}
+    public func abortRecording() async {
+        await recorder.abort()
+    }
 
     public func finishAnalysis() async throws {
         try await analysis.finish()

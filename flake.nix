@@ -65,9 +65,6 @@
               packages = with pkgs; [
                 rustToolchain
                 sccache
-                # shiguredo_opus can build xiph/opus from source via CMake
-                # (its `source-build` feature) and needs the CMake toolchain.
-                cmake
               ];
 
               shellHook = ''

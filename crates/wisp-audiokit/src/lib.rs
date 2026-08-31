@@ -8,8 +8,6 @@ mod backend;
 mod error;
 #[cfg(target_os = "macos")]
 mod macos_backend;
-#[cfg(target_os = "macos")]
-mod recording;
 
 pub use backend::{
     Availability, BackendError, BackendErrorKind, BackendId, BackendResult, CaptureBackend,

@@ -6,6 +6,7 @@ members = [
   "crates/wisp-core",
   "crates/wisp-lifecycle",
   "crates/wisp-storage",
+  "crates/wisp-webview",
 ]
 resolver = "3"
 

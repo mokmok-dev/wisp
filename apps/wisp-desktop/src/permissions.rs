@@ -10,7 +10,7 @@
 use std::process::Command;
 
 use gpui::{App, AsyncApp, Entity};
-use wisp_audiokit::{Permission, PermissionStatus, check_permission, request_permission};
+use wisp_audiokit::{Permission, check_permission, request_permission};
 
 use crate::app::AppModel;
 
@@ -83,30 +83,4 @@ pub fn open_settings(perm: Permission) {
     // Best-effort: if `open` fails (e.g. URL scheme not registered) there's
     // nothing useful we can show the user without their attention here.
     let _ = Command::new("open").arg(url).spawn();
-}
-
-/// Human-readable label for an onboarding row.
-pub fn label(perm: Permission) -> &'static str {
-    match perm {
-        Permission::Microphone => "Microphone",
-        Permission::SpeechRecognition => "Speech Recognition",
-    }
-}
-
-/// One-sentence rationale shown under the row title.
-pub fn rationale(perm: Permission) -> &'static str {
-    match perm {
-        Permission::Microphone => "Capture your voice for on-device transcription.",
-        Permission::SpeechRecognition => "Run Apple's on-device speech model on captured audio.",
-    }
-}
-
-/// Short status label rendered on the right of an onboarding row.
-pub fn status_label(status: PermissionStatus) -> &'static str {
-    match status {
-        PermissionStatus::Undetermined => "Not requested",
-        PermissionStatus::Denied => "Denied",
-        PermissionStatus::Granted => "Granted",
-        PermissionStatus::Restricted => "Restricted",
-    }
 }

@@ -41,5 +41,10 @@ uuid = { workspace = true }
 # macOS uses its dedicated workflow.
 gpui = { workspace = true }
 
+# Wrys webview bridge (vendored from longbridge/gpui-kit `gpui-wry`) hosting
+# the Kumo/React UI, plus embedded-asset support for the built bundle.
+wisp-webview = { path = "../../crates/wisp-webview" }
+include_dir = "0.7"
+
 [dev-dependencies]
 tempfile = { workspace = true }

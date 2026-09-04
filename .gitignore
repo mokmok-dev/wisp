@@ -10,3 +10,8 @@ native/**/.swiftpm/
 /formal/tla/states/
 /formal/tla/MC*.out
 /formal/tla/SpecTE*
+# Web UI build artifacts (embedded into the desktop binary at compile time;
+# .gitkeep keeps `ui/dist` present so fresh checkouts compile).
+apps/wisp-desktop/ui/node_modules/
+apps/wisp-desktop/ui/dist/*
+!apps/wisp-desktop/ui/dist/.gitkeep

@@ -5,6 +5,7 @@ use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -20,7 +21,6 @@ use crate::library;
 use crate::library::SharedStorage;
 use crate::session_runner::Update;
 use crate::session_runner::Update::{Error, Event, RuntimeFailed, StartFailed, Started, Stopped};
-use crate::transcript_view::now;
 
 pub(crate) const RECOVERY_FILE_NAME: &str = "transcript-recovery.json";
 
@@ -78,7 +78,7 @@ pub fn apply_update(
             // A quit request can move Starting -> Stopping before the worker
             // reports Started. Do not regress the UI back to Recording; the
             // queued Stop still owns the transition.
-            model.set_state(SessionState::with_phase(next_phase, now()));
+            model.set_state(SessionState::with_phase(next_phase, Instant::now()));
         },
         Event { session_id, event } => {
             if model.accepts_worker_update(session_id) {

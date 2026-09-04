@@ -64,6 +64,21 @@ jobs:
 
       - uses: ./.github/actions/setup-nix
 
+      # The web UI (apps/wisp-desktop/ui) is embedded into the binary at
+      # compile time, so it has to be built before `cargo build`.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/wisp-desktop/ui/package-lock.json
+
+      - name: Build web UI (release)
+        working-directory: apps/wisp-desktop/ui
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
       - name: Build Wisp binaries (release)
         run: nix develop .#default --quiet --command cargo build -p wisp-desktop --release --locked
 

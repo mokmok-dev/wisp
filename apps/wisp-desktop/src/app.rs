@@ -538,24 +538,17 @@ impl AppModel {
         self.segments.push(segment);
     }
 
-    /// The most recent non-final segment, if any (used by the renderer to
-    /// draw the blinking ghost-text cursor on the active line).
+    /// The most recent non-final segment, if any.
+    ///
+    /// Kept for `formal`/lifecycle reasoning and tests; the web UI renders
+    /// partial segments based on `is_final` directly.
+    #[cfg(test)]
     pub fn active_segment_index(&self) -> Option<usize> {
         self.segments
             .iter()
             .enumerate()
             .rev()
             .find_map(|(i, s)| (!s.is_final).then_some(i))
-    }
-
-    /// Whether the 250ms UI tick should repaint (elapsed timer + cursor
-    /// blink). History and library are static between model updates.
-    pub fn needs_live_ui_tick(&self) -> bool {
-        if self.view != View::LiveSession {
-            return false;
-        }
-        matches!(self.state, SessionState::Recording { .. })
-            || self.active_segment_index().is_some()
     }
 
     pub fn setup_complete(&self) -> bool {
@@ -876,31 +869,6 @@ mod tests {
         assert!(m.segments.is_empty());
         assert!(m.viewed_session.is_none());
         assert!(m.current_session_id.is_none());
-    }
-
-    #[test]
-    fn needs_live_ui_tick_only_on_active_live_session() {
-        let mut m = AppModel::new();
-        m.view = View::History {
-            session_id: SessionId::from(1),
-        };
-        assert!(!m.needs_live_ui_tick());
-
-        m.view = View::LiveSession;
-        m.state = SessionState::Idle;
-        assert!(!m.needs_live_ui_tick());
-
-        m.ingest(Event::Result(r(SourceLabel::Mic, 1, "partial")));
-        assert!(m.needs_live_ui_tick());
-
-        m.finalize_all_segments();
-        m.state = SessionState::Idle;
-        assert!(!m.needs_live_ui_tick());
-
-        m.state = SessionState::Recording {
-            started_at: std::time::Instant::now(),
-        };
-        assert!(m.needs_live_ui_tick());
     }
 
     #[test]

@@ -1,0 +1,16 @@
+[package]
+name = "wisp-webview"
+description = "Wrys webview support for GPUI, vendored from longbridge/gpui-kit `gpui-wry` 0.6.0 and adapted to the official `gpui` crate."
+keywords = ["webview", "gpui", "wry"]
+publish = false
+edition.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1"
+gpui = { workspace = true }
+http = "1"
+wry = { version = "0.53.3", package = "lb-wry" }

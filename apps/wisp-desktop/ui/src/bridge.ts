@@ -1,24 +1,21 @@
 /**
- * Bridge to the Rust host over the loopback server.
+ * Bridge to the Rust host.
  *
- * Rust → JS: JSON payloads on an SSE stream (`GET /events`).
- * JS → Rust: JSON commands via `POST /cmd` (failures surface as HTTP 400s
- * logged by the host).
- *
- * In dev mode (`npm run dev`), the app is opened as
- * `<dev-url>?wisp=<encoded loopback root incl. token>`; the `wisp` query
- * parameter selects the bridge base URL and carries the token. In the
- * packaged app the page is served from the loopback origin itself.
+ * Rust → JS: the host evaluates `window.__wisp.onEvent("<json>")` where the
+ * argument is a JSON-encoded string. JS → Rust: `window.ipc.postMessage(json)`
+ * (wry IPC), drained by the host's UI pump.
  */
 
 import type { UiEvent, UiSnapshot } from "./types";
 
 type Listener = (event: UiEvent) => void;
 
-const params = new URLSearchParams(window.location.search);
-const base = params.get("wisp") ?? "";
-const token =
-  new URL(base || window.location.href, window.location.href).searchParams.get("token") ?? "";
+declare global {
+  interface Window {
+    ipc?: { postMessage(message: string): void };
+    __wisp?: { onEvent(raw: string): void };
+  }
+}
 
 const listeners = new Set<Listener>();
 
@@ -85,13 +82,22 @@ function dispatch(event: UiEvent): void {
   }
 }
 
+window.__wisp = {
+  onEvent(raw: string): void {
+    let event: UiEvent;
+    try {
+      event = JSON.parse(raw) as UiEvent;
+    } catch {
+      // Malformed payload — ignore.
+      return;
+    }
+    dispatch(event);
+  },
+};
+
 /** Forward uncaught JS errors to the host (logged on stderr while debugging). */
 function reportJsError(message: string): void {
-  void fetch(`${base}/cmd?token=${encodeURIComponent(token)}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ cmd: "__debugJsError", message }),
-  });
+  send({ cmd: "__debugJsError", message });
 }
 
 window.addEventListener("error", (event) => {
@@ -104,21 +110,7 @@ window.addEventListener("unhandledrejection", (event) => {
 /** Announce readiness; the host replies with a full snapshot. */
 export function boot(): void {
   bootedAt = Date.now();
-  const source = new EventSource(`${base}/events?token=${encodeURIComponent(token)}`);
-  source.onopen = () => {
-    send({ cmd: "ready" });
-  };
-  source.onmessage = (message) => {
-    try {
-      dispatch(JSON.parse(message.data) as UiEvent);
-    } catch {
-      // Malformed payload — ignore.
-    }
-  };
-  source.onerror = () => {
-    // EventSource reconnects automatically (the host process is going away
-    // only when the app quits).
-  };
+  send({ cmd: "ready" });
 }
 
 /** Milliseconds since the host pushed the current snapshot. */
@@ -132,15 +124,7 @@ export function sinceStatePush(): number {
 }
 
 export function send(command: Record<string, unknown>): void {
-  void fetch(`${base}/cmd?token=${encodeURIComponent(token)}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(command),
-  }).then((response) => {
-    if (!response.ok) {
-      reportJsError(`command ${String((command as { cmd?: string }).cmd)} failed: ${String(response.status)}`);
-    }
-  });
+  window.ipc?.postMessage(JSON.stringify(command));
 }
 
 export const commands = {

@@ -1,61 +1,18 @@
-//! Serialization of UI state pushed into the web UI, and the [`UiBridge`]
-//! entity that diffs + delivers those events.
+//! Serialization of UI state pushed into the embedded web UI, and the
+//! [`UiBridge`] entity that diffs + delivers those events.
 //!
-//! Rust → JS: events are JSON payloads broadcast on the [`EventBus`] and
-//! delivered to the UI over the loopback server's SSE stream
-//! (`GET /events`). The payload shapes are mirrored by
-//! `apps/wisp-desktop/ui/src/types.ts`.
+//! Rust → JS: events are JSON-encoded and delivered as
+//! `window.__wisp.onEvent("<json>")` script evaluations. The payload shapes
+//! are mirrored by `apps/wisp-desktop/ui/src/types.ts`.
 
 use std::hash::{Hash, Hasher};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
 
 use gpui::{App, Entity};
 use serde::Serialize;
 use wisp_audiokit::{PermissionStatus, SourceLabel};
+use wisp_webview::WebViewHandle;
 
 use crate::app::{AppModel, Permissions, SessionState, View};
-
-/// Fan-out hub for JSON events pushed from the host to connected web UIs
-/// (one subscriber per SSE connection).
-#[derive(Clone, Default)]
-pub struct EventBus {
-    inner: Arc<EventBusInner>,
-}
-
-#[derive(Default)]
-struct EventBusInner {
-    subscribers: Mutex<Vec<mpsc::Sender<String>>>,
-}
-
-impl EventBus {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Deliver one JSON payload to every live subscriber. Disconnected
-    /// receivers are pruned.
-    pub fn broadcast(
-        &self,
-        payload: &str,
-    ) {
-        let Ok(mut subscribers) = self.inner.subscribers.lock() else {
-            return;
-        };
-        let payload = payload.to_owned();
-        subscribers.retain(|tx| tx.send(payload.clone()).is_ok());
-    }
-
-    /// Register a new event stream. The returned channel receives every
-    /// payload broadcast afterwards.
-    pub fn subscribe(&self) -> mpsc::Receiver<String> {
-        let (tx, rx) = mpsc::channel();
-        if let Ok(mut subscribers) = self.inner.subscribers.lock() {
-            subscribers.push(tx);
-        }
-        rx
-    }
-}
 
 /// Static fallback so a serialization gap can never stall the UI.
 const EMPTY_JSON: &str = "{}";
@@ -291,27 +248,26 @@ fn library_signature(app: &AppModel) -> u64 {
     hasher.finish()
 }
 
-/// Bridges `AppModel` state into the web UI. Lives on the main thread as a
-/// GPUI entity; payloads are fanned out over the [`EventBus`] to the
-/// loopback server's SSE connections.
+/// Bridges `AppModel` state into the embedded webview. Lives on the main
+/// thread as a GPUI entity; the webview handle is UI-thread-local.
 pub struct UiBridge {
-    events: EventBus,
+    webview: WebViewHandle,
     transcript_signature: u64,
     library_signature: u64,
     booted: bool,
 }
 
 impl UiBridge {
-    pub fn new(events: EventBus) -> Self {
+    pub fn new(webview: WebViewHandle) -> Self {
         Self {
-            events,
+            webview,
             transcript_signature: 0,
             library_signature: 0,
             booted: false,
         }
     }
 
-    /// Send everything the UI needs after its event stream connects.
+    /// Send everything the UI needs after `window.__wisp` announces itself.
     /// Establishes the diff baselines, so later `push_changes` calls only
     /// send deltas.
     pub fn push_full_snapshot(
@@ -372,6 +328,13 @@ impl UiBridge {
         event: &E,
     ) {
         let json = serde_json::to_string(event).unwrap_or_else(|_| EMPTY_JSON.to_owned());
-        self.events.broadcast(&json);
+        // Deliver the JSON as a JS string literal (JSON strings are valid JS
+        // string literals) so no character in the payload can be interpreted
+        // as code, then parse it on the JS side.
+        let literal = serde_json::to_string(&json).unwrap_or_else(|_| EMPTY_JSON.to_owned());
+        let _ = self
+            .webview
+            .raw()
+            .evaluate_script(&format!("window.__wisp.onEvent({literal});"));
     }
 }

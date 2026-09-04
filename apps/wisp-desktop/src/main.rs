@@ -45,7 +45,6 @@ mod session_runner;
 mod session_updates;
 mod transcript_export;
 mod web_bridge;
-mod web_server;
 mod web_shell;
 
 use app::{AppError, AppModel, PendingSessionWrite, SessionState};
@@ -53,7 +52,7 @@ use app_menu::configure as configure_app_menu;
 use library::SharedStorage;
 use session_runner::{SessionRunner, SessionStart};
 use session_updates::apply_update;
-use web_bridge::{EventBus, UiBridge};
+use web_bridge::UiBridge;
 use web_shell::{CommandContext, UiCommand};
 
 /// How often we re-poll permission status from the OS while the
@@ -98,15 +97,8 @@ fn main() {
         // without a flash of the wrong content.
         permissions::refresh(&model, cx);
 
-        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<UiCommand>();
-        let bus = EventBus::new();
-        let server = web_server::spawn(cmd_tx, bus.clone(), ui_dev_url().is_some())
-            .expect("failed to start loopback web server");
-        // Handy while developing: the same UI can be opened in a browser.
-        if cfg!(debug_assertions) {
-            eprintln!("wisp-webview: UI at {}", server.url);
-        }
-        let (_window, bridge) = web_shell::open(cx, window_options, &server.url, ui_dev_url(), bus);
+        let (ipc_tx, ipc_rx) = std::sync::mpsc::channel::<UiCommand>();
+        let (_window, bridge) = web_shell::open(cx, window_options, ipc_tx, ui_dev_url());
 
         // Push model changes into the webview. The bridge diffs state so
         // each notify only sends what actually changed.
@@ -132,7 +124,7 @@ fn main() {
                 model: model.clone(),
                 recordings_dir,
                 bridge,
-                cmd_rx,
+                ipc_rx,
             },
         );
         spawn_permission_refresh(cx, model.clone());
@@ -152,7 +144,7 @@ struct PumpDeps {
     model: Entity<AppModel>,
     recordings_dir: PathBuf,
     bridge: Entity<UiBridge>,
-    cmd_rx: std::sync::mpsc::Receiver<UiCommand>,
+    ipc_rx: std::sync::mpsc::Receiver<UiCommand>,
 }
 
 /// Drain web-UI commands and session-runner updates into the model.
@@ -166,17 +158,17 @@ fn spawn_ui_pump(
         model,
         recordings_dir,
         bridge,
-        cmd_rx,
+        ipc_rx,
     } = deps;
 
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {
             Timer::after(PUMP_INTERVAL).await;
             let result = cx.update(|cx| {
-                // 1. Commands from the web UI arrive on the command
-                //    channel (the loopback server thread has no GPUI
-                //    context, so they hop through here).
-                while let Ok(command) = cmd_rx.try_recv() {
+                // 1. Commands from the web UI arrive on the IPC channel
+                //    (wry callbacks carry no GPUI context, so they hop
+                //    through here).
+                while let Ok(command) = ipc_rx.try_recv() {
                     let context = CommandContext {
                         runner: &runner,
                         model: &model,

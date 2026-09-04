@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { MicrophoneIcon, SidebarSimpleIcon, WaveformIcon } from "@phosphor-icons/react";
+import {
+  ClockCounterClockwiseIcon,
+  MicrophoneIcon,
+  SidebarSimpleIcon,
+} from "@phosphor-icons/react";
 import { Badge, Text, ToastProvider, useKumoToastManager } from "@cloudflare/kumo";
 import { Sidebar } from "@cloudflare/kumo/components/sidebar";
 import { commands, getSnapshot, subscribe } from "./bridge";
@@ -48,10 +52,9 @@ function useNotices(): void {
 }
 
 function WispSidebar({ snapshot }: { snapshot: UiSnapshot }): React.JSX.Element {
-  const { state, sessions } = snapshot;
+  const { state } = snapshot;
   const recording =
     state.phase === "recording" || state.phase === "starting" || state.phase === "stopping";
-  const activeSessionId = state.view === "history" ? currentHistoryId(state) : null;
 
   return (
     <Sidebar>
@@ -63,7 +66,7 @@ function WispSidebar({ snapshot }: { snapshot: UiSnapshot }): React.JSX.Element 
       </Sidebar.Header>
       <Sidebar.Content>
         <Sidebar.Group>
-          <Sidebar.GroupLabel>Actions</Sidebar.GroupLabel>
+          <Sidebar.GroupLabel>Menu</Sidebar.GroupLabel>
           <Sidebar.Menu>
             <Sidebar.MenuItem>
               <Sidebar.MenuButton
@@ -74,50 +77,32 @@ function WispSidebar({ snapshot }: { snapshot: UiSnapshot }): React.JSX.Element 
                 New Session
               </Sidebar.MenuButton>
             </Sidebar.MenuItem>
+            <Sidebar.MenuItem>
+              <Sidebar.MenuButton
+                icon={ClockCounterClockwiseIcon}
+                active={state.view !== "live"}
+                onClick={commands.backToLibrary}
+              >
+                Session History
+              </Sidebar.MenuButton>
+            </Sidebar.MenuItem>
           </Sidebar.Menu>
-        </Sidebar.Group>
-        <Sidebar.Group>
-          <Sidebar.GroupLabel>Sessions</Sidebar.GroupLabel>
-          {sessions.length === 0 ? (
-            <div className="px-2">
-              <Text variant="secondary" size="sm" as="p">
-                No saved sessions yet.
-              </Text>
-            </div>
-          ) : (
-            <Sidebar.Menu>
-              {sessions.map((session) => (
-                <Sidebar.MenuItem key={session.id}>
-                  <Sidebar.MenuButton
-                    icon={WaveformIcon}
-                    active={activeSessionId === session.id}
-                    onClick={() => commands.openHistory(session.id)}
-                  >
-                    <span className="truncate">{session.title}</span>
-                  </Sidebar.MenuButton>
-                </Sidebar.MenuItem>
-              ))}
-            </Sidebar.Menu>
-          )}
         </Sidebar.Group>
       </Sidebar.Content>
       <Sidebar.Footer>
-        <div className="flex flex-col gap-1.5">
-          <Sidebar.Trigger className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-kumo-default hover:bg-kumo-fill">
-            <SidebarSimpleIcon size={16} />
-            Toggle Sidebar
-          </Sidebar.Trigger>
+        {/* Kumo's footer is a single 48px row (h-12, overflow-hidden) —
+            stack nothing here. Icon-only trigger + truncating caption. */}
+        <Sidebar.Trigger title="Toggle sidebar">
+          <SidebarSimpleIcon size={16} />
+        </Sidebar.Trigger>
+        <span className="min-w-0 flex-1 truncate">
           <Text variant="secondary" size="xs" as="span">
             On-device · private by default
           </Text>
-        </div>
+        </span>
       </Sidebar.Footer>
     </Sidebar>
   );
-}
-
-function currentHistoryId(state: UiSnapshot["state"]): number | null {
-  return state.historySessionId ?? null;
 }
 
 export function App(): React.JSX.Element {

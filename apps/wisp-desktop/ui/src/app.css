@@ -1,0 +1,58 @@
+/* App-level styles that complement Kumo's tokens. */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+/* Blinking caret for the active (partial) transcript segment. */
+@keyframes wisp-caret-blink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  50%,
+  95% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.wisp-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--kumo-brand, currentColor);
+  animation: wisp-caret-blink 1s step-end infinite;
+}
+
+.wisp-partial {
+  opacity: 0.55;
+}
+
+/* Recording pulse dot. */
+@keyframes wisp-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.wisp-rec-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--kumo-danger, #f00);
+  animation: wisp-pulse 1.6s ease-in-out infinite;
+}

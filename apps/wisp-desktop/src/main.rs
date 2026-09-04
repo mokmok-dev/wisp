@@ -1,4 +1,4 @@
-//! Wisp desktop app — `GPUI` shell.
+//! Wisp desktop app — GPUI shell with an embedded web UI.
 //!
 //! Wires together the building blocks defined in the sibling modules:
 //!
@@ -6,17 +6,18 @@
 //!     the session-runner bridge writes.
 //!   * `session_runner::SessionRunner` — background OS thread that owns the
 //!     Swift `wisp_audiokit::Session` and surfaces events via a channel.
-//!   * `transcript_view::TranscriptView` — the GPUI render target.
+//!   * `web_shell` — the wry webview hosting the Kumo/React UI
+//!     (`apps/wisp-desktop/ui`), served offline over the `wisp://` scheme.
+//!   * `web_bridge` — serializes model state into webview events.
 //!   * `library` — bridges the in-memory transcript with `wisp_storage`
 //!     so sessions persist across restarts and can be reviewed later.
 //!
-//! Three `cx.spawn` async tasks plumb everything together:
+//! Two `cx.spawn` async tasks plumb everything together:
 //!
-//!   1. Drain `SessionRunner` updates into `AppModel` every ~33ms, doing
-//!      finalising the pre-allocated DB row when the worker stops.
-//!   2. Toggle the ghost-text cursor on the view every 500ms and refresh
-//!      the status bar's elapsed counter at 250ms so it stays smooth.
-//!   3. Re-poll permission status periodically.
+//!   1. Drain web-UI commands (`window.ipc.postMessage`) and `SessionRunner`
+//!      updates into `AppModel` every ~33ms, finalising the pre-allocated DB
+//!      row when the worker stops.
+//!   2. Re-poll permission status periodically.
 
 // We deliberately panic loudly on window-setup failures (clearer than a
 // silently-dropped Result hidden behind `?` in `main`).
@@ -29,7 +30,7 @@ use std::time::Duration;
 use chrono::Utc;
 use gpui::{
     App, AppContext, Application, AsyncApp, Bounds, Entity, Timer, TitlebarOptions, WindowBounds,
-    WindowHandle, WindowOptions, px, size,
+    WindowOptions, px, size,
 };
 use wisp_audiokit::SessionError;
 use wisp_core::SessionId;
@@ -42,18 +43,17 @@ mod library;
 mod permissions;
 mod session_runner;
 mod session_updates;
-mod title_input;
 mod transcript_export;
-mod transcript_view;
+mod web_bridge;
+mod web_shell;
 
 use app::{AppError, AppModel, PendingSessionWrite, SessionState};
 use app_menu::configure as configure_app_menu;
 use library::SharedStorage;
 use session_runner::{SessionRunner, SessionStart};
 use session_updates::apply_update;
-use transcript_view::{
-    TranscriptView, cursor_blink_period, new_transcript_list_state, ui_tick_period,
-};
+use web_bridge::UiBridge;
+use web_shell::{CommandContext, UiCommand};
 
 /// How often we re-poll permission status from the OS while the
 /// onboarding screen is up. The user might flip the toggle in System
@@ -62,11 +62,14 @@ use transcript_view::{
 /// responsive when they come back.
 const PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 
+/// Cadence of the main pump that drains web-UI commands and session
+/// updates into the model. 33ms ≈ one frame at 30fps; well under any
+/// perceptible threshold for button presses and transcript updates.
+const PUMP_INTERVAL: Duration = Duration::from_millis(33);
+
 fn main() {
     Application::new().run(|cx| {
         cx.activate(true);
-
-        title_input::init(cx);
 
         let data_dir = default_data_directory();
         let recordings_dir = data_dir.join("recordings");
@@ -94,192 +97,98 @@ fn main() {
         // without a flash of the wrong content.
         permissions::refresh(&model, cx);
 
-        let window = open_main_window(
-            cx,
-            window_options,
-            MainWindowDeps {
-                runner: runner.clone(),
-                storage: storage.clone(),
-                model: model.clone(),
-                recordings_dir: recordings_dir.clone(),
-            },
-        );
+        let (ipc_tx, ipc_rx) = std::sync::mpsc::channel::<UiCommand>();
+        let (_window, bridge) = web_shell::open(cx, window_options, ipc_tx, ui_dev_url());
+
+        // Push model changes into the webview. The bridge diffs state so
+        // each notify only sends what actually changed.
+        let bridge_for_observe = bridge.clone();
+        cx.observe(&model, move |model, cx| {
+            bridge_for_observe.update(cx, |b, cx| b.push_changes(&model, cx));
+        })
+        .detach();
 
         configure_app_menu(
             cx,
             runner.clone(),
             storage.clone(),
             model.clone(),
-            recordings_dir,
+            recordings_dir.clone(),
         );
 
-        spawn_session_update_pump(cx, runner, storage, model.clone());
-        spawn_cursor_blink(cx, window);
-        spawn_permission_refresh(cx, model);
+        spawn_ui_pump(
+            cx,
+            PumpDeps {
+                runner,
+                storage,
+                model: model.clone(),
+                recordings_dir,
+                bridge,
+                ipc_rx,
+            },
+        );
+        spawn_permission_refresh(cx, model.clone());
     });
 }
 
-struct MainWindowDeps {
+/// Base URL for the web UI when hot-reloading against a Vite dev server.
+fn ui_dev_url() -> Option<String> {
+    std::env::var("WISP_UI_DEV_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+}
+
+struct PumpDeps {
     runner: Arc<SessionRunner>,
     storage: SharedStorage,
     model: Entity<AppModel>,
     recordings_dir: PathBuf,
+    bridge: Entity<UiBridge>,
+    ipc_rx: std::sync::mpsc::Receiver<UiCommand>,
 }
 
-#[allow(clippy::too_many_lines)]
-fn open_main_window(
+/// Drain web-UI commands and session-runner updates into the model.
+fn spawn_ui_pump(
     cx: &mut App,
-    window_options: WindowOptions,
-    deps: MainWindowDeps,
-) -> WindowHandle<TranscriptView> {
-    let MainWindowDeps {
+    deps: PumpDeps,
+) {
+    let PumpDeps {
         runner,
         storage,
         model,
         recordings_dir,
+        bridge,
+        ipc_rx,
     } = deps;
-    cx.open_window(window_options, move |_, cx| {
-        cx.new(|cx| {
-            let model_for_toggle = model.clone();
-            let model_for_mute = model.clone();
-            let model_for_request = model.clone();
-            let model_for_new = model.clone();
-            let model_for_open_history = model.clone();
-            let model_for_back = model.clone();
-            let model_for_live_title = model.clone();
-            let model_for_rename = model.clone();
-            let storage_for_toggle = storage.clone();
-            let storage_for_open_history = storage.clone();
-            let storage_for_live_title = storage.clone();
-            let storage_for_rename = storage.clone();
-            let recordings_for_toggle = recordings_dir.clone();
-            let runner_for_toggle = runner.clone();
-            let runner_for_mute = runner.clone();
-            let (transcript_list, follow_transcript) = new_transcript_list_state();
-            let view = TranscriptView {
-                app: model.clone(),
-                cursor_visible: true,
-                live_title_state: std::rc::Rc::new(std::cell::RefCell::new(None)),
-                renaming: std::rc::Rc::new(std::cell::RefCell::new(None)),
-                transcript_list,
-                transcript_list_count: 0,
-                transcript_active_len: 0,
-                transcript_list_view: app::View::Library,
-                follow_transcript,
-                last_signature: (0, 0),
-                on_toggle_record: Arc::new(move |_window, cx| {
-                    toggle_recording(
-                        &runner_for_toggle,
-                        &model_for_toggle,
-                        &storage_for_toggle,
-                        &recordings_for_toggle,
-                        cx,
-                    );
-                }),
-                on_toggle_microphone_mute: Arc::new(move |_window, cx| {
-                    let muted = !model_for_mute.read(cx).microphone_muted;
-                    if runner_for_mute.set_microphone_muted(muted) {
-                        model_for_mute.update(cx, |model, cx| {
-                            if matches!(model.state, SessionState::Recording { .. }) {
-                                model.microphone_muted = muted;
-                                cx.notify();
-                            }
-                        });
-                    }
-                }),
-                on_request_permission: Arc::new(move |perm, _window, cx| {
-                    permissions::request(perm, model_for_request.clone(), cx);
-                }),
-                on_open_settings: Arc::new(move |perm, _window, _cx| {
-                    permissions::open_settings(perm);
-                    // The next periodic permission refresh picks up the
-                    // toggle once the user flips it in System Settings.
-                }),
-                on_new_session: Arc::new(move |_window, cx| {
-                    model_for_new.update(cx, |m, cx| {
-                        m.show_new_session();
-                        cx.notify();
-                    });
-                }),
-                on_open_history: Arc::new(move |session_id, _window, cx| {
-                    open_history(
-                        &storage_for_open_history,
-                        &model_for_open_history,
-                        session_id,
-                        cx,
-                    );
-                }),
-                on_back_to_library: Arc::new(move |_window, cx| {
-                    model_for_back.update(cx, |m, cx| {
-                        m.show_library();
-                        cx.notify();
-                    });
-                }),
-                on_live_title: Arc::new(move |text, _window, cx| {
-                    change_live_title(&model_for_live_title, &storage_for_live_title, cx, text);
-                }),
-                on_rename_session: Arc::new(move |session_id, text, _window, cx| {
-                    rename_session(&model_for_rename, &storage_for_rename, session_id, text, cx);
-                }),
-            };
-            // Re-render whenever the underlying model changes.
-            cx.observe(&view.app, |_, _, cx| cx.notify()).detach();
-            view
-        })
-    })
-    .expect("failed to open Wisp window")
-}
 
-/// Drain `SessionRunner` updates into the model every ~33ms.
-///
-/// The session row is allocated before the worker starts. `Stopped` writes
-/// finalised segments and stamps `ended_at`; `Error` removes a row whose
-/// audio session never started.
-fn spawn_session_update_pump(
-    cx: &mut App,
-    runner: Arc<SessionRunner>,
-    storage: SharedStorage,
-    model: Entity<AppModel>,
-) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {
-            Timer::after(Duration::from_millis(33)).await;
-            let updates = runner.drain_updates();
-            if updates.is_empty() {
-                continue;
-            }
-            let result = model.update(cx, |model, cx| {
-                for u in updates {
-                    apply_update(u, model, &storage);
+            Timer::after(PUMP_INTERVAL).await;
+            let result = cx.update(|cx| {
+                // 1. Commands from the web UI arrive on the IPC channel
+                //    (wry callbacks carry no GPUI context, so they hop
+                //    through here).
+                while let Ok(command) = ipc_rx.try_recv() {
+                    let context = CommandContext {
+                        runner: &runner,
+                        model: &model,
+                        storage: &storage,
+                        recordings_dir: &recordings_dir,
+                        bridge: &bridge,
+                    };
+                    web_shell::handle_command(command, &context, cx);
                 }
-                cx.notify();
-            });
-            if result.is_err() {
-                break;
-            }
-        }
-    })
-    .detach();
-}
 
-/// Toggle the ghost-text cursor and refresh the status-bar elapsed counter.
-fn spawn_cursor_blink(
-    cx: &mut App,
-    window: WindowHandle<TranscriptView>,
-) {
-    cx.spawn(async move |cx: &mut AsyncApp| {
-        let mut elapsed = Duration::ZERO;
-        loop {
-            Timer::after(ui_tick_period()).await;
-            elapsed += ui_tick_period();
-            let ticks = elapsed.as_millis() / cursor_blink_period().as_millis();
-            let blink = ticks.is_multiple_of(2);
-            let result = window.update(cx, |view, _, cx| {
-                if !view.app.read(cx).needs_live_ui_tick() {
-                    return;
+                // 2. Session runner updates (transcript events, lifecycle).
+                let updates = runner.drain_updates();
+                if !updates.is_empty() {
+                    model.update(cx, |model, cx| {
+                        for u in updates {
+                            apply_update(u, model, &storage);
+                        }
+                        cx.notify();
+                    });
                 }
-                view.cursor_visible = blink;
-                cx.notify();
             });
             if result.is_err() {
                 break;
@@ -425,7 +334,7 @@ pub(crate) fn toggle_recording(
     }
 }
 
-fn open_history(
+pub(crate) fn open_history(
     storage: &SharedStorage,
     model: &Entity<AppModel>,
     session_id: SessionId,
@@ -445,7 +354,7 @@ fn open_history(
     });
 }
 
-fn refresh_library(
+pub(crate) fn refresh_library(
     storage: &SharedStorage,
     model: &Entity<AppModel>,
     cx: &mut App,
@@ -470,7 +379,7 @@ fn refresh_library(
 /// timestamp when blank) is persisted so an unnamed session still shows a
 /// sensible library title. Mid-composition kana values are overwritten on the
 /// next edit or commit and never reach the final transcript.
-fn change_live_title(
+pub(crate) fn change_live_title(
     model: &Entity<AppModel>,
     storage: &SharedStorage,
     cx: &mut App,
@@ -499,7 +408,7 @@ fn change_live_title(
 
 /// Apply an inline rename from the library or history header. A blank title
 /// keeps the previous value, so clearing the field acts as a cancel.
-fn rename_session(
+pub(crate) fn rename_session(
     model: &Entity<AppModel>,
     storage: &SharedStorage,
     session_id: SessionId,

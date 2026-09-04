@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { MicrophoneIcon, WaveformIcon } from "@phosphor-icons/react";
+import { MicrophoneIcon, SidebarSimpleIcon, WaveformIcon } from "@phosphor-icons/react";
 import { Badge, Text, ToastProvider, useKumoToastManager } from "@cloudflare/kumo";
 import { Sidebar } from "@cloudflare/kumo/components/sidebar";
-import { commands, getSnapshot, isReady, subscribe } from "./bridge";
-import { emptySnapshot, type UiEvent, type UiSnapshot } from "./types";
+import { commands, getSnapshot, subscribe } from "./bridge";
+import { type UiEvent, type UiSnapshot } from "./types";
 import { Library } from "./screens/Library";
 import { LiveSession } from "./screens/LiveSession";
 import { History } from "./screens/History";
@@ -11,7 +11,7 @@ import { Onboarding } from "./screens/Onboarding";
 
 /** Subscribe the component tree to bridge events. */
 export function useSnapshot(): UiSnapshot {
-  const [snapshot, setSnapshot] = useState<UiSnapshot>(isReady() ? getSnapshot() : emptySnapshot());
+  const [snapshot, setSnapshot] = useState<UiSnapshot>(getSnapshot());
   useEffect(() => {
     const update = () => setSnapshot(getSnapshot());
     update();
@@ -102,9 +102,15 @@ function WispSidebar({ snapshot }: { snapshot: UiSnapshot }): React.JSX.Element 
         </Sidebar.Group>
       </Sidebar.Content>
       <Sidebar.Footer>
-        <Text variant="secondary" size="xs" as="span">
-          On-device · private by default
-        </Text>
+        <div className="flex flex-col gap-1.5">
+          <Sidebar.Trigger className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-kumo-default hover:bg-kumo-fill">
+            <SidebarSimpleIcon size={16} />
+            Toggle Sidebar
+          </Sidebar.Trigger>
+          <Text variant="secondary" size="xs" as="span">
+            On-device · private by default
+          </Text>
+        </div>
       </Sidebar.Footer>
     </Sidebar>
   );
@@ -116,31 +122,45 @@ function currentHistoryId(state: UiSnapshot["state"]): number | null {
 
 export function App(): React.JSX.Element {
   const snapshot = useSnapshot();
-  useNotices();
-  const { state } = snapshot;
-  const onboarding = !state.canRecord;
+  const onboarding = !snapshot.state.canRecord;
 
+  // Everything that consumes toasts must render inside <ToastProvider>.
   return (
     <ToastProvider>
-      {onboarding ? (
-        <Onboarding permissions={state.permissions} />
-      ) : (
-        <Sidebar.Provider contained defaultOpen>
-          <div className="flex h-full w-full overflow-hidden">
-            <WispSidebar snapshot={snapshot} />
-            <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-              {state.view === "live" ? (
-                <LiveSession snapshot={snapshot} />
-              ) : state.view === "history" ? (
-                <History snapshot={snapshot} />
-              ) : (
-                <Library snapshot={snapshot} />
-              )}
-            </main>
-          </div>
-        </Sidebar.Provider>
-      )}
+      <Shell snapshot={snapshot} onboarding={onboarding} />
     </ToastProvider>
+  );
+}
+
+function Shell({
+  snapshot,
+  onboarding,
+}: {
+  snapshot: UiSnapshot;
+  onboarding: boolean;
+}): React.JSX.Element {
+  useNotices();
+  const { state } = snapshot;
+
+  return onboarding ? (
+    <Onboarding permissions={state.permissions} />
+  ) : (
+    // h-dvh gives the Kumo provider wrapper a definite height so the
+    // h-full / flex-1 chain below can actually resolve and scroll.
+    <Sidebar.Provider contained defaultOpen className="h-dvh">
+      <div className="flex h-full w-full overflow-hidden">
+        <WispSidebar snapshot={snapshot} />
+        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {state.view === "live" ? (
+            <LiveSession snapshot={snapshot} />
+          ) : state.view === "history" ? (
+            <History snapshot={snapshot} />
+          ) : (
+            <Library snapshot={snapshot} />
+          )}
+        </main>
+      </div>
+    </Sidebar.Provider>
   );
 }
 

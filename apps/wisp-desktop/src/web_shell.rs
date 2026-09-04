@@ -1,123 +1,66 @@
-//! The web shell: hosts the Kumo/React UI inside a wry webview.
+//! The web shell: hosts the Kumo/React UI inside a wry webview pointing at
+//! the loopback server (`web_server.rs`).
 //!
 //! The webview fills the whole window content area (see `crates/wisp-webview`
-//! for the z-order rationale). Assets are served from the embedded
-//! `ui/dist` bundle over the custom `wisp://` scheme so the app works fully
-//! offline; `WISP_UI_DEV_URL` overrides the URL for Vite hot reload.
-//!
-//! JS → Rust commands arrive via wry IPC. The wry callbacks carry no GPUI
-//! context, so commands flow through a channel drained by the main pump in
-//! `main.rs`.
+//! for the z-order rationale). Assets and the command/event bridge are served
+//! by the loopback HTTP server; `WISP_UI_DEV_URL` overrides the URL for Vite
+//! hot reload (the dev origin receives the loopback root via a `wisp` query
+//! parameter).
 
 #![allow(clippy::expect_used)]
 // Window-setup failures panic loudly by design (same policy as `main.rs`):
 // a silently missing webview would be far harder to diagnose than a crash.
 
-use std::borrow::Cow;
 use std::cell::RefCell;
-use std::path::Path;
 use std::rc::Rc;
-use std::sync::mpsc::Sender;
 
 use gpui::{App, AppContext, Entity, IntoElement, ParentElement, Render, Styled, Window, div};
 use serde::Deserialize;
 use wisp_audiokit::Permission;
 use wisp_core::SessionId;
 use wisp_webview::wry::WebViewBuilder;
-use wisp_webview::wry::http::{self, Request, Response};
 use wisp_webview::{WebView, WebViewHandle};
 
 use crate::app::{AppModel, SessionState, View};
 use crate::library::SharedStorage;
 use crate::session_runner::SessionRunner;
 use crate::transcript_export::{self, suggested_export_name};
-use crate::web_bridge::UiBridge;
-
-/// The embedded UI bundle, built by `apps/wisp-desktop/ui` (`npm run build`).
-/// A fresh checkout without a UI build falls back to a placeholder page.
-static UI_ASSETS: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
-
-const FALLBACK_PAGE: &str = r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Wisp</title></head>
-<body style="font-family: system-ui; background:#0b0e13; color:#e8eaed; display:flex; height:100vh; align-items:center; justify-content:center;">
-  <div style="text-align:center;">
-    <h1>Wisp</h1>
-    <p>The web UI bundle is missing. Build it with:</p>
-    <pre><code>cd apps/wisp-desktop/ui &amp;&amp; npm install &amp;&amp; npm run build</code></pre>
-    <p>then restart the app.</p>
-  </div>
-</body></html>
-"#;
+use crate::web_bridge::{EventBus, UiBridge};
 
 /// Commands the web UI can send to the host.
+// `rename_all` only renames the *variants*; `rename_all_fields` (serde
+// 1.0.186+) is required so `session_id` matches the camelCase the UI sends.
 #[derive(Debug, Deserialize)]
-#[serde(tag = "cmd", rename_all = "camelCase")]
+#[serde(tag = "cmd", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum UiCommand {
     Ready,
     ToggleRecord,
     ToggleMute,
     NewSession,
-    OpenHistory { session_id: i64 },
+    OpenHistory {
+        session_id: i64,
+    },
     BackToLibrary,
-    SetLiveTitle { title: String },
-    RenameSession { session_id: i64, title: String },
-    RequestPermission { permission: String },
-    OpenSettings { permission: String },
+    SetLiveTitle {
+        title: String,
+    },
+    RenameSession {
+        session_id: i64,
+        title: String,
+    },
+    RequestPermission {
+        permission: String,
+    },
+    OpenSettings {
+        permission: String,
+    },
     CopyTranscript,
     ExportTranscript,
-}
-
-/// Parse one JSON-encoded [`UiCommand`] from the IPC channel.
-#[must_use]
-pub fn parse_command(body: &str) -> Option<UiCommand> {
-    serde_json::from_str(body).ok()
-}
-
-fn mime_for(path: &str) -> &'static str {
-    match path.rsplit('.').next() {
-        Some("html") => "text/html; charset=utf-8",
-        Some("js" | "mjs") => "text/javascript; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("json" | "map") => "application/json",
-        Some("svg") => "image/svg+xml",
-        Some("png") => "image/png",
-        Some("ico") => "image/x-icon",
-        Some("woff") => "font/woff",
-        Some("woff2") => "font/woff2",
-        _ => "application/octet-stream",
-    }
-}
-
-fn response(
-    status: u16,
-    mime: &'static str,
-    bytes: &'static [u8],
-) -> Response<Cow<'static, [u8]>> {
-    http::Response::builder()
-        .status(status)
-        .header(http::header::CONTENT_TYPE, mime)
-        .body(Cow::Borrowed(bytes))
-        .unwrap_or_else(|_| http::Response::new(Cow::Borrowed(&[])))
-}
-
-/// Serve the embedded UI bundle over `wisp://`.
-fn serve_ui(request: &Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
-    let raw = request.uri().path().trim_start_matches('/');
-    let path = if raw.is_empty() { "index.html" } else { raw };
-
-    if let Some(file) = UI_ASSETS.get_file(path) {
-        return response(200, mime_for(path), file.contents());
-    }
-
-    // SPA-style fallback: route-like paths get the app shell; anything that
-    // looks like a missing asset 404s so build errors surface clearly.
-    if !path.contains('.') {
-        return match UI_ASSETS.get_file("index.html") {
-            Some(file) => response(200, mime_for("index.html"), file.contents()),
-            None => response(200, mime_for("index.html"), FALLBACK_PAGE.as_bytes()),
-        };
-    }
-    response(404, "text/plain; charset=utf-8", b"not found\n")
+    /// Uncaught JS errors forwarded from the UI, surfaced on stderr.
+    #[serde(rename = "__debugJsError")]
+    DebugJsError {
+        message: String,
+    },
 }
 
 fn permission_from_name(name: &str) -> Option<Permission> {
@@ -133,7 +76,7 @@ pub struct CommandContext<'a> {
     pub runner: &'a SessionRunner,
     pub model: &'a Entity<AppModel>,
     pub storage: &'a SharedStorage,
-    pub recordings_dir: &'a Path,
+    pub recordings_dir: &'a std::path::Path,
     pub bridge: &'a Entity<UiBridge>,
 }
 
@@ -230,6 +173,9 @@ pub fn handle_command(
                 );
             });
         },
+        UiCommand::DebugJsError { message } => {
+            eprintln!("wisp-webview: js error: {message}");
+        },
     }
 }
 
@@ -250,32 +196,25 @@ impl Render for WebShellView {
 
 fn allow_navigation(
     url: &str,
+    allowed_prefix: &str,
     dev_url: Option<&str>,
 ) -> bool {
-    url.starts_with("wisp://") || dev_url.is_some_and(|base| url.starts_with(base))
+    url.starts_with(allowed_prefix) || dev_url.is_some_and(|base| url.starts_with(base))
 }
 
 fn build_webview(
     window: &mut Window,
     cx: &mut App,
-    ipc_tx: Sender<UiCommand>,
-    dev_url: Option<&str>,
+    url: String,
+    allowed_prefix: String,
+    dev_url: Option<String>,
 ) -> Entity<WebView> {
-    let navigation_url = dev_url.map_or_else(|| "wisp://app/index.html".to_owned(), str::to_owned);
-
     let mut builder = WebViewBuilder::new()
-        .with_custom_protocol("wisp".into(), |_, request| serve_ui(&request))
-        .with_ipc_handler(move |request| {
-            if let Some(command) = parse_command(request.body()) {
-                let _ = ipc_tx.send(command);
-            }
-        })
-        .with_navigation_handler({
-            let dev_url = dev_url.map(str::to_owned);
-            move |url| allow_navigation(&url, dev_url.as_deref())
+        .with_navigation_handler(move |candidate| {
+            allow_navigation(&candidate, &allowed_prefix, dev_url.as_deref())
         })
         .with_accept_first_mouse(true)
-        .with_url(navigation_url);
+        .with_url(url);
     if cfg!(debug_assertions) {
         builder = builder.with_devtools(true);
     }
@@ -290,26 +229,63 @@ fn build_webview(
 
 /// Open the main window hosting the web shell.
 ///
-/// Returns the window handle plus the [`UiBridge`] entity wired to the
-/// webview; the caller attaches observers and the command pump.
+/// `server_url` is the loopback root (including its token); `dev_url` is the
+/// optional `WISP_UI_DEV_URL`. Returns the window handle plus the
+/// [`UiBridge`] entity wired to the event bus; the caller attaches observers
+/// and the command pump.
 pub fn open(
     cx: &mut App,
     window_options: gpui::WindowOptions,
-    ipc_tx: Sender<UiCommand>,
+    server_url: &str,
     dev_url: Option<String>,
+    bus: EventBus,
 ) -> (gpui::WindowHandle<WebShellView>, Entity<UiBridge>) {
     let handle_slot = Rc::new(RefCell::new(None::<WebViewHandle>));
     let slot_for_view = handle_slot.clone();
 
+    // Allowed origins for in-page navigation: the loopback root and, in dev
+    // mode, the Vite dev server.
+    let rest = server_url.strip_prefix("http://").unwrap_or(server_url);
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let nav_prefix = format!("http://{authority}/");
+
+    let target_url = dev_url.clone().map_or_else(
+        || server_url.to_owned(),
+        |dev| format!("{dev}?wisp={}", urlencoding_lite(server_url)),
+    );
+
     let window = cx
         .open_window(window_options, move |window, cx| {
-            let webview = build_webview(window, cx, ipc_tx, dev_url.as_deref());
+            let webview = build_webview(window, cx, target_url, nav_prefix, dev_url);
             *slot_for_view.borrow_mut() = Some(webview.read(cx).handle());
             cx.new(|_| WebShellView { webview })
         })
         .expect("failed to open Wisp window");
 
-    let handle = handle_slot.borrow_mut().take().expect("wry webview handle");
-    let bridge = cx.new(|_| UiBridge::new(handle));
+    let _handle = handle_slot.borrow_mut().take().expect("wry webview handle");
+    let bridge = cx.new(|_| UiBridge::new(bus));
     (window, bridge)
+}
+
+/// Percent-encode the characters that must not appear raw in a query value.
+fn urlencoding_lite(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'.'
+            | b'_'
+            | b'~'
+            | b'/'
+            | b':'
+            | b'?'
+            | b'='
+            | b'&' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }

@@ -1,4 +1,7 @@
-/* App-level styles that complement Kumo's tokens. */
+/* Tailwind v4 build: app classes plus Kumo's compiled component styles. */
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+@import "@cloudflare/kumo/styles/tailwind";
+@import "tailwindcss";
 
 html,
 body,

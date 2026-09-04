@@ -1,21 +1,24 @@
 /**
- * Bridge to the Rust host.
+ * Bridge to the Rust host over the loopback server.
  *
- * Rust → JS: the host evaluates `window.__wisp.onEvent("<json>")` where the
- * argument is a JSON-encoded string. JS → Rust: `window.ipc.postMessage(json)`
- * (wry IPC), drained by the host's UI pump.
+ * Rust → JS: JSON payloads on an SSE stream (`GET /events`).
+ * JS → Rust: JSON commands via `POST /cmd` (failures surface as HTTP 400s
+ * logged by the host).
+ *
+ * In dev mode (`npm run dev`), the app is opened as
+ * `<dev-url>?wisp=<encoded loopback root incl. token>`; the `wisp` query
+ * parameter selects the bridge base URL and carries the token. In the
+ * packaged app the page is served from the loopback origin itself.
  */
 
 import type { UiEvent, UiSnapshot } from "./types";
 
 type Listener = (event: UiEvent) => void;
 
-declare global {
-  interface Window {
-    ipc?: { postMessage(message: string): void };
-    __wisp?: { onEvent(raw: string): void };
-  }
-}
+const params = new URLSearchParams(window.location.search);
+const base = params.get("wisp") ?? "";
+const token =
+  new URL(base || window.location.href, window.location.href).searchParams.get("token") ?? "";
 
 const listeners = new Set<Listener>();
 
@@ -44,17 +47,12 @@ let snapshot: UiSnapshot = {
   sessions: [],
 };
 
-let ready = false;
 let bootedAt = Date.now();
 let snapshotAt = Date.now();
 let stateAt = Date.now();
 
 export function getSnapshot(): UiSnapshot {
   return snapshot;
-}
-
-export function isReady(): boolean {
-  return ready;
 }
 
 export function subscribe(listener: Listener): () => void {
@@ -78,31 +76,49 @@ function dispatch(event: UiEvent): void {
     case "notice":
       break;
   }
+  snapshotAt = Date.now();
+  if (event.type === "state") {
+    stateAt = snapshotAt;
+  }
   for (const listener of listeners) {
     listener(event);
   }
 }
 
-window.__wisp = {
-  onEvent(raw: string): void {
-    let event: UiEvent;
-    try {
-      event = JSON.parse(raw) as UiEvent;
-    } catch {
-      return;
-    }
-    snapshotAt = Date.now();
-    if (event.type === "state") {
-      stateAt = Date.now();
-    }
-    dispatch(event);
-  },
-};
+/** Forward uncaught JS errors to the host (logged on stderr while debugging). */
+function reportJsError(message: string): void {
+  void fetch(`${base}/cmd?token=${encodeURIComponent(token)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ cmd: "__debugJsError", message }),
+  });
+}
+
+window.addEventListener("error", (event) => {
+  reportJsError(`${String(event.message)} @ ${String(event.filename)}:${String(event.lineno)}`);
+});
+window.addEventListener("unhandledrejection", (event) => {
+  reportJsError(`unhandledrejection: ${String(event.reason)}`);
+});
 
 /** Announce readiness; the host replies with a full snapshot. */
 export function boot(): void {
   bootedAt = Date.now();
-  send({ cmd: "ready" });
+  const source = new EventSource(`${base}/events?token=${encodeURIComponent(token)}`);
+  source.onopen = () => {
+    send({ cmd: "ready" });
+  };
+  source.onmessage = (message) => {
+    try {
+      dispatch(JSON.parse(message.data) as UiEvent);
+    } catch {
+      // Malformed payload — ignore.
+    }
+  };
+  source.onerror = () => {
+    // EventSource reconnects automatically (the host process is going away
+    // only when the app quits).
+  };
 }
 
 /** Milliseconds since the host pushed the current snapshot. */
@@ -116,7 +132,15 @@ export function sinceStatePush(): number {
 }
 
 export function send(command: Record<string, unknown>): void {
-  window.ipc?.postMessage(JSON.stringify(command));
+  void fetch(`${base}/cmd?token=${encodeURIComponent(token)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(command),
+  }).then((response) => {
+    if (!response.ok) {
+      reportJsError(`command ${String((command as { cmd?: string }).cmd)} failed: ${String(response.status)}`);
+    }
+  });
 }
 
 export const commands = {

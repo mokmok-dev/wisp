@@ -78,8 +78,8 @@ export function LiveSession({ snapshot }: { snapshot: UiSnapshot }): React.JSX.E
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
-        <TranscriptList segments={transcript} />
+      <div className="min-h-0 flex-1 overflow-hidden px-6 py-4">
+        <TranscriptList segments={transcript} follow />
       </div>
 
       <footer className="flex items-center justify-between border-t border-kumo-hairline px-6 py-2.5">

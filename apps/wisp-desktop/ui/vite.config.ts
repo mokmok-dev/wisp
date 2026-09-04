@@ -1,10 +1,11 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
-// The built bundle is served inside the desktop app from the custom
-// `wisp://` scheme, so asset URLs must stay relative to `index.html`.
+// The built bundle is served inside the desktop app from the loopback
+// server, so asset URLs must stay relative to `index.html`.
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   base: "./",
   server: {
     port: 5183,

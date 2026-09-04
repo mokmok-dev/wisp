@@ -65,7 +65,7 @@ function PermissionRow({
 
 export function Onboarding({ permissions }: { permissions: PermissionsState }): React.JSX.Element {
   return (
-    <div className="flex h-full w-full items-center justify-center bg-kumo-canvas p-8">
+    <div className="flex h-dvh w-full items-center justify-center bg-kumo-canvas p-8 overflow-y-auto">
       <div className="flex w-full max-w-xl flex-col gap-6">
         <div className="flex flex-col gap-1">
           <Text variant="heading" size="lg" as="h1">

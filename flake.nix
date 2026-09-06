@@ -102,9 +102,10 @@
           };
         };
 
+      # Nixpkgs 26.11+ and Determinate Nix no longer support Intel macOS
+      # hosts, so CI and local builds target Apple Silicon only.
       systems = [
         "aarch64-darwin"
-        "x86_64-darwin"
       ];
     };
 }

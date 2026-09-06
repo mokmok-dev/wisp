@@ -18,9 +18,6 @@ jobs:
       id-token: write
       contents: read
     with:
-      # Only Apple Silicon is exercised in CI. The flake still declares
-      # x86_64-darwin for local Intel hosts; flake-iter skips systems with
-      # no runner mapping.
       # macos-26 (Tahoe) matches the rest of this repo's macOS workflows —
       # wisp-desktop links against APIs that ship only there.
       runner-map: |

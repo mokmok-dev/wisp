@@ -130,20 +130,20 @@ pre-commit git hooks (`treefmt` + `clippy`) on entry. If you use
 [direnv](https://direnv.net/), the committed `.envrc` (`use flake`) does all of
 this on `cd`.
 
-The flake exposes the `wisp-desktop` package and the portable CI checks:
+The flake does **not** expose a `wisp-desktop` Nix package: the desktop binary
+needs host Xcode (`swift` for WispAudioKit, and the macOS SDK). Build it through
+the dev shell instead:
 
 ```bash
-nix build .#wisp-desktop
+nix develop -c cargo build -p wisp-desktop --release
 
-# Run the checks available for the current Nix platform
+# Formatting / hook checks available for the current Nix platform
 nix flake check
 ```
 
-On Linux, `nix flake check` runs the unified `treefmt` formatting check plus
-Crane-backed Clippy and tests for the workspace excluding `wisp-desktop`. On
-macOS, it runs `treefmt` and evaluates the `wisp-desktop` package; use the
-explicit Cargo commands under [Contributing](#contributing) for workspace-wide
-lint and test coverage.
+`nix flake check` runs the unified `treefmt` check (and related hook checks).
+Workspace Clippy and tests stay on `nix develop` / the CI `rust` job for the
+same Xcode reason.
 
 Formatting is unified through [treefmt-nix](https://github.com/numtide/treefmt-nix):
 `nix fmt` (or `treefmt` inside the dev shell) formats Nix (`nixfmt`), Rust
@@ -157,10 +157,6 @@ CI uses [Determinate CI](https://github.com/DeterminateSystems/ci) with
 Actions are pushed to and pulled from FlakeHub. Locally, `nix develop` / `nix
 build` pick up the same cache when authenticated to FlakeHub (for example via
 [Determinate Nix](https://docs.determinate.systems/)).
-
-Within a single flake evaluation, Crane reuses one `buildDepsOnly`
-(`cargoArtifacts`) derivation across package builds, so workspace dependencies
-are compiled once and reused.
 
 If you'd rather use Rust + Xcode directly:
 

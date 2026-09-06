@@ -124,8 +124,8 @@ pointing at the commands above. For hot reload during UI work, run
 `WISP_UI_DEV_URL=http://localhost:5183 cargo run -p wisp-desktop`.
 
 The `default` dev shell is turnkey on macOS: it provides the pinned Rust
-toolchain, `sccache`, the `treefmt` formatter, the `cachix` CLI, applies the
-macOS Xcode/`DEVELOPER_DIR` handling automatically, and installs the project's
+toolchain, `sccache`, the `treefmt` formatter, applies the macOS
+Xcode/`DEVELOPER_DIR` handling automatically, and installs the project's
 pre-commit git hooks (`treefmt` + `clippy`) on entry. If you use
 [direnv](https://direnv.net/), the committed `.envrc` (`use flake`) does all of
 this on `cd`.
@@ -152,21 +152,15 @@ pass, and the same configuration backs the `treefmt` flake check.
 
 ### Build caching
 
-The flake declares the [nix-community](https://nixos.org/manual/nix/stable/command-ref/conf-file#conf-substituters)
-binary cache in `nixConfig`, which (for trusted users) supplies prebuilt
-ancillary tooling from the wider Nix ecosystem — treefmt-nix, git-hooks.nix,
-and similar dependencies. It does **not** host this project's own Crane build
-outputs; to cache and share those, publish them to a project
-[Cachix](https://www.cachix.org/) cache. The default dev shell ships the
-`cachix` CLI, so once a cache exists you can opt in with:
+CI uses [Determinate CI](https://github.com/DeterminateSystems/ci) with
+[FlakeHub Cache](https://flakehub.com/cache) so flake outputs built in GitHub
+Actions are pushed to and pulled from FlakeHub. Locally, `nix develop` / `nix
+build` pick up the same cache when authenticated to FlakeHub (for example via
+[Determinate Nix](https://docs.determinate.systems/)).
 
-```bash
-cachix use <cache-name>
-```
-
-Within a single `nix flake check`, Crane reuses one `buildDepsOnly`
-(`cargoArtifacts`) derivation across the package, Clippy, and test checks, so
-the workspace dependencies are compiled once and reused.
+Within a single flake evaluation, Crane reuses one `buildDepsOnly`
+(`cargoArtifacts`) derivation across package builds, so workspace dependencies
+are compiled once and reused.
 
 If you'd rather use Rust + Xcode directly:
 

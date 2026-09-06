@@ -56,7 +56,7 @@
           # flake checks: a pure derivation build on macOS would need Xcode's
           # `metal` (gpui compiles shaders with it), which is unreachable from
           # inside a Nix sandbox. They are run through `nix develop` in CI
-          # instead (see .github/workflows/rust.yaml and rust-macos.yaml).
+          # instead (see the `rust` job in .github/workflows/ci.yaml).
 
           devShells = {
             default = pkgs.mkShellNoCC {

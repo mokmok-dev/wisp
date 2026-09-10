@@ -1,7 +1,6 @@
 {
   inputs = {
     nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1";
-    crane.url = "github:ipetkov/crane";
     flake-parts.url = "github:hercules-ci/flake-parts";
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
@@ -28,11 +27,6 @@
         }:
         let
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-          craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
-          wisp-desktop = import ./apps/wisp-desktop/package.nix {
-            lib = pkgs.lib;
-            inherit craneLib rustToolchain;
-          };
 
           darwinToolchainHook = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
             if [ -d /Applications/Xcode.app/Contents/Developer ]; then
@@ -52,11 +46,12 @@
             };
           };
 
-          # clippy and the workspace test are intentionally NOT exposed as
-          # flake checks: a pure derivation build on macOS would need Xcode's
-          # `metal` (gpui compiles shaders with it), which is unreachable from
-          # inside a Nix sandbox. They are run through `nix develop` in CI
-          # instead (see .github/workflows/rust.yaml and rust-macos.yaml).
+          # clippy, cargo test, and the desktop binary are intentionally NOT
+          # flake packages/checks: they need host Xcode (`swift` for
+          # WispAudioKit, `metal` for gpui shaders), which is unreachable from
+          # a pure Nix sandbox. Determinate CI builds every flake derivation,
+          # so those stay on `nix develop` (see the `rust` job and release
+          # workflow).
 
           devShells = {
             default = pkgs.mkShellNoCC {
@@ -73,8 +68,6 @@
               + darwinToolchainHook;
             };
           };
-
-          packages.wisp-desktop = wisp-desktop;
 
           pre-commit.settings = {
             hooks = {
@@ -102,9 +95,10 @@
           };
         };
 
+      # Nixpkgs 26.11+ and Determinate Nix no longer support Intel macOS
+      # hosts, so CI and local builds target Apple Silicon only.
       systems = [
         "aarch64-darwin"
-        "x86_64-darwin"
       ];
     };
 }

@@ -1,0 +1,37 @@
+name: ci
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  DeterminateCI:
+    uses: DeterminateSystems/ci/.github/workflows/workflow.yml@main
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      # macos-26 (Tahoe) matches the rest of this repo's macOS workflows —
+      # wisp-desktop links against APIs that ship only there.
+      runner-map: |
+        {
+          "aarch64-darwin": "macos-26"
+        }
+
+  # clippy and the workspace tests are not flake checks (a pure sandbox can't
+  # reach Xcode's `metal`, which gpui needs for shaders), so run them through
+  # `nix develop` against the host Xcode toolchain.
+  rust:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-nix
+      - run: nix develop .#default --quiet --command cargo clippy --workspace --all-targets --all-features -- --deny warnings
+      - run: nix develop .#default --quiet --command cargo test --workspace --locked

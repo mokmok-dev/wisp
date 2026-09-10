@@ -124,26 +124,26 @@ pointing at the commands above. For hot reload during UI work, run
 `WISP_UI_DEV_URL=http://localhost:5183 cargo run -p wisp-desktop`.
 
 The `default` dev shell is turnkey on macOS: it provides the pinned Rust
-toolchain, `sccache`, the `treefmt` formatter, the `cachix` CLI, applies the
-macOS Xcode/`DEVELOPER_DIR` handling automatically, and installs the project's
+toolchain, `sccache`, the `treefmt` formatter, applies the macOS
+Xcode/`DEVELOPER_DIR` handling automatically, and installs the project's
 pre-commit git hooks (`treefmt` + `clippy`) on entry. If you use
 [direnv](https://direnv.net/), the committed `.envrc` (`use flake`) does all of
 this on `cd`.
 
-The flake exposes the `wisp-desktop` package and the portable CI checks:
+The flake does **not** expose a `wisp-desktop` Nix package: the desktop binary
+needs host Xcode (`swift` for WispAudioKit, and the macOS SDK). Build it through
+the dev shell instead:
 
 ```bash
-nix build .#wisp-desktop
+nix develop -c cargo build -p wisp-desktop --release
 
-# Run the checks available for the current Nix platform
+# Formatting / hook checks available for the current Nix platform
 nix flake check
 ```
 
-On Linux, `nix flake check` runs the unified `treefmt` formatting check plus
-Crane-backed Clippy and tests for the workspace excluding `wisp-desktop`. On
-macOS, it runs `treefmt` and evaluates the `wisp-desktop` package; use the
-explicit Cargo commands under [Contributing](#contributing) for workspace-wide
-lint and test coverage.
+`nix flake check` runs the unified `treefmt` check (and related hook checks).
+Workspace Clippy and tests stay on `nix develop` / the CI `rust` job for the
+same Xcode reason.
 
 Formatting is unified through [treefmt-nix](https://github.com/numtide/treefmt-nix):
 `nix fmt` (or `treefmt` inside the dev shell) formats Nix (`nixfmt`), Rust
@@ -152,21 +152,11 @@ pass, and the same configuration backs the `treefmt` flake check.
 
 ### Build caching
 
-The flake declares the [nix-community](https://nixos.org/manual/nix/stable/command-ref/conf-file#conf-substituters)
-binary cache in `nixConfig`, which (for trusted users) supplies prebuilt
-ancillary tooling from the wider Nix ecosystem — treefmt-nix, git-hooks.nix,
-and similar dependencies. It does **not** host this project's own Crane build
-outputs; to cache and share those, publish them to a project
-[Cachix](https://www.cachix.org/) cache. The default dev shell ships the
-`cachix` CLI, so once a cache exists you can opt in with:
-
-```bash
-cachix use <cache-name>
-```
-
-Within a single `nix flake check`, Crane reuses one `buildDepsOnly`
-(`cargoArtifacts`) derivation across the package, Clippy, and test checks, so
-the workspace dependencies are compiled once and reused.
+CI uses [Determinate CI](https://github.com/DeterminateSystems/ci) with
+[FlakeHub Cache](https://flakehub.com/cache) so flake outputs built in GitHub
+Actions are pushed to and pulled from FlakeHub. Locally, `nix develop` / `nix
+build` pick up the same cache when authenticated to FlakeHub (for example via
+[Determinate Nix](https://docs.determinate.systems/)).
 
 If you'd rather use Rust + Xcode directly:
 

@@ -5993,9 +5993,9 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "shuttle"
-version = "0.9.3"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "786792d8bc94c770b53a938f0ae68726387a3a0a3762f9cc2c38d5e1bb40f0c0"
+checksum = "2ccb3ed84175141f15e06c048147da313c1b7bc171fcb0d623c2dc276951966b"
 dependencies = [
  "bitvec",
  "cfg-if",
@@ -6015,9 +6015,9 @@ dependencies = [
 
 [[package]]
 name = "shuttle-engine"
-version = "0.1.1"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb03d6daa3cf319f53bef382ee4431203c770912209703452033d19fb71e813b"
+checksum = "0ff11c5eb32e53fc4a4f15b4dab4ee13b4604db1feb97a989877001475a8efb8"
 dependencies = [
  "assoc",
  "bitvec",
@@ -6049,9 +6049,9 @@ dependencies = [
 
 [[package]]
 name = "shuttle-std"
-version = "0.1.1"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf4a3088fd2d19e5ebc24bc3779bc85a68228fafde2d87d138e475b8591dc721"
+checksum = "05fa35d22b2671e0184a13d0221055ae9e07a570862798e866118acd4be50f15"
 dependencies = [
  "assoc",
  "owo-colors",

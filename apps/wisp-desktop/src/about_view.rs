@@ -1,8 +1,17 @@
 //! Small "About Wisp" window opened from the application menu.
+//!
+//! Rendered with GPUI Component primitives so the window shares the app's
+//! theme tokens instead of hard-coded colours.
 
 use gpui::{
-    App, Bounds, Context, IntoElement, ParentElement, Render, Styled, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
+    App, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    actions, div, px, size,
+};
+use gpui_kit::component::{
+    ActiveTheme as _,
+    button::{Button, ButtonVariants as _},
+    h_flex, v_flex,
 };
 
 actions!(wisp_desktop, [CloseAbout]);
@@ -13,19 +22,18 @@ impl Render for AboutView {
     fn render(
         &mut self,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let app_version = env!("CARGO_PKG_VERSION");
         let audiokit_version = wisp_audiokit::version();
+        let muted = cx.theme().muted_foreground;
 
-        div()
-            .flex()
-            .flex_col()
+        v_flex()
             .size_full()
-            .bg(rgb(0x0b_0e13))
-            .text_color(rgb(0xe8_eaed))
             .p_6()
             .gap_3()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
             .child(
                 div()
                     .text_xl()
@@ -35,34 +43,27 @@ impl Render for AboutView {
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x8a_8f98))
+                    .text_color(muted)
                     .child(format!("Version {app_version}")),
             )
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x8a_8f98))
+                    .text_color(muted)
                     .child(format!("WispAudioKit {audiokit_version}")),
             )
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x5c_606b))
+                    .text_color(muted)
                     .child("On-device transcription on macOS; local Windows recording preview."),
             )
-            .child(div().flex_grow())
+            .child(div().flex_grow(1.0))
             .child(
-                div().flex().justify_end().child(
-                    div()
-                        .id("about-ok")
-                        .px_3()
-                        .py_1p5()
-                        .bg(rgb(0x13_171f))
-                        .border_1()
-                        .border_color(rgb(0x1f_242e))
-                        .rounded_md()
-                        .cursor_pointer()
-                        .child("OK")
+                h_flex().w_full().justify_end().child(
+                    Button::new("about-ok")
+                        .primary()
+                        .label("OK")
                         .on_click(|_, window, _| {
                             window.remove_window();
                         }),
@@ -76,7 +77,7 @@ impl Render for AboutView {
 
 pub fn open(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(360.0), px(240.0)), cx);
-    cx.open_window(
+    gpui_kit::open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
@@ -85,6 +86,7 @@ pub fn open(cx: &mut App) {
             }),
             ..Default::default()
         },
+        cx,
         |_, cx| cx.new(|_| AboutView),
     )
     .expect("failed to open About window");

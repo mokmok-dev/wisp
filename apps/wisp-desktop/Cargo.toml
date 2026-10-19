@@ -37,14 +37,10 @@ serde_json = { workspace = true }
 serde_norway = { workspace = true }
 uuid = { workspace = true }
 
-# GPU-accelerated UI framework by the Zed team. Linux CI excludes this crate;
-# macOS uses its dedicated workflow.
-gpui = { workspace = true }
-
-# Wrys webview bridge (vendored from longbridge/gpui-kit `gpui-wry`) hosting
-# the Kumo/React UI, plus embedded-asset support for the built bundle.
-wisp-webview = { path = "../../crates/wisp-webview" }
-include_dir = "0.7"
+# GPU-accelerated native UI: GPUI plus GPUI Component (the styled component
+# library from longbridge/gpui-kit) behind one dependency. macOS-only; Linux
+# CI excludes this crate.
+gpui-kit = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

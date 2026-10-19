@@ -149,6 +149,7 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
+    use proptest::prelude::*;
     use wisp_core::{NewSegment, NewSession, SourceLabel};
 
     use super::Storage;
@@ -378,5 +379,108 @@ mod tests {
             error,
             super::StorageError::SessionNotFound(id) if id == missing_id
         ));
+    }
+
+    #[test]
+    fn debug_rendering_names_the_storage_root() {
+        let storage = Storage::open_in_memory().expect("open");
+        let rendered = format!("{storage:?}");
+        assert!(
+            rendered.contains(":memory:"),
+            "unexpected debug output: {rendered}"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn sessions_roundtrip_arbitrary_text(
+            title in "[a-zA-Z0-9 _\\-]{0,80}",
+            notes in "[a-zA-Z0-9 _\\-]{0,120}",
+        ) {
+            let storage = Storage::open_in_memory().expect("open");
+            let sessions = storage.sessions();
+            let mut new = new_session();
+            new.title = title.clone();
+            let id = sessions.create(&new).expect("create");
+            sessions.update_notes(id, &notes).expect("update notes");
+
+            let stored = sessions.get(id).expect("get").expect("found");
+            prop_assert_eq!(&stored.title, &title);
+            prop_assert_eq!(&stored.notes, &notes);
+            prop_assert_eq!(sessions.list().expect("list").len(), 1);
+        }
+
+        #[test]
+        fn appended_segments_roundtrip_arbitrary_text(
+            texts in prop::collection::vec("[a-zA-Z0-9 _\\-]{0,60}", 1..=8),
+        ) {
+            let storage = Storage::open_in_memory().expect("open");
+            let session_id = storage
+                .sessions()
+                .create(&new_session())
+                .expect("create session");
+            let segments = storage.segments();
+            for (index, text) in texts.iter().enumerate() {
+                let index = u32::try_from(index).expect("test vector fits u32");
+                segments
+                    .append(&new_segment(session_id, index, text))
+                    .expect("append segment");
+            }
+
+            let stored = segments.list_by_session(session_id).expect("list");
+            prop_assert_eq!(stored.len(), texts.len());
+            for (stored, expected) in stored.iter().zip(texts.iter()) {
+                prop_assert_eq!(&stored.text, expected);
+            }
+        }
+
+        #[test]
+        fn finalise_replaces_the_snapshot_with_arbitrary_text(
+            texts in prop::collection::vec("[a-zA-Z0-9 _\\-]{0,60}", 1..=8),
+            replacement in "[a-zA-Z0-9 _\\-]{0,60}",
+        ) {
+            let storage = Storage::open_in_memory().expect("open");
+            let session_id = storage
+                .sessions()
+                .create(&new_session())
+                .expect("create session");
+            storage
+                .segments()
+                .append(&new_segment(session_id, 0, &replacement))
+                .expect("seed stale segment");
+            let ended_at = Utc.with_ymd_and_hms(2026, 7, 15, 11, 0, 0).unwrap();
+            let snapshot = texts
+                .iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    new_segment(
+                        session_id,
+                        u32::try_from(index).expect("test vector fits u32"),
+                        text,
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            storage
+                .finalise_session(session_id, &snapshot, ended_at)
+                .expect("finalise session");
+            let stored = storage
+                .segments()
+                .list_by_session(session_id)
+                .expect("list segments");
+            prop_assert_eq!(stored.len(), texts.len());
+            for (stored, expected) in stored.iter().zip(texts.iter()) {
+                prop_assert_eq!(&stored.text, expected);
+            }
+            prop_assert_eq!(
+                storage
+                    .sessions()
+                    .get(session_id)
+                    .expect("get session")
+                    .expect("session exists")
+                    .ended_at,
+                Some(ended_at)
+            );
+        }
     }
 }

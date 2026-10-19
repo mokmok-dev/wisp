@@ -13,3 +13,6 @@ workspace = true
 chrono = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

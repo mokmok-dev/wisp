@@ -125,7 +125,7 @@ The native UI is compiled into the binary, so `cargo run -p wisp-desktop` is
 enough.
 
 The `default` dev shell is turnkey on macOS: it provides the pinned Rust
-toolchain, `sccache`, the `treefmt` formatter, applies the macOS
+toolchain, `sccache`, `cargo-mutants`, the `treefmt` formatter, applies the macOS
 Xcode/`DEVELOPER_DIR` handling automatically, and installs the project's
 pre-commit git hooks (`treefmt` + `clippy`) on entry. If you use
 [direnv](https://direnv.net/), the committed `.envrc` (`use flake`) does all of
@@ -190,6 +190,30 @@ bash formal/check.sh
 See [`formal/README.md`](formal/README.md) for setup, verified properties, and
 the extension workflow.
 
+### Property-based and mutation testing
+
+The platform-agnostic, pure-logic crates (`wisp-core`, `wisp-lifecycle`, and
+`wisp-storage`) use [proptest](https://proptest-rs.github.io/proptest/) for
+property-based tests and [cargo-mutants](https://mutants.rs/) as a coverage
+gate. The gate is strict: mutation testing must report **zero missed mutants**
+in those crates. (Mutants whose replacement does not compile are reported as
+`unviable` by cargo-mutants and are not counted against the gate.)
+
+```bash
+# cargo-mutants is provided by the default Nix dev shell
+nix develop -c cargo mutants --workspace
+```
+
+[`.cargo/mutants.toml`](.cargo/mutants.toml) scopes the run to those crates.
+The desktop app shell and the macOS/Swift FFI crates are excluded because
+their behaviour is covered by the desktop test suite, `swift test`, and the
+formal Kani/Shuttle harnesses instead of Rust unit tests.
+
+The proptest suites exercise the same invariants the mutation gate pins down:
+audio-frame metadata consistency, source and transcript identifier
+round-trips, the live-session ownership state machine, and storage
+round-trips/finalisation snapshots.
+
 See `.github/workflows/release.yaml` for how the release `.app` bundle is produced — pushing a `v*` tag builds `Wisp.app` on a macOS 26 runner.
 
 ## Roadmap
@@ -211,6 +235,9 @@ nix flake check
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
+
+# Mutation gate for the pure-logic crates (cargo-mutants comes from the dev shell)
+cargo mutants --workspace
 
 # Formal lifecycle checks (requires cargo-kani)
 bash formal/check.sh

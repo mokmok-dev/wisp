@@ -10,3 +10,5 @@ native/**/.swiftpm/
 /formal/tla/states/
 /formal/tla/MC*.out
 /formal/tla/SpecTE*
+# cargo-mutants scratch output (mutants.out/, mutants.out.old/, ...).
+/mutants.out*

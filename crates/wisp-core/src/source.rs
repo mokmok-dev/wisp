@@ -111,4 +111,35 @@ mod tests {
             crate::SourceKind::SystemAudio
         );
     }
+
+    #[test]
+    fn display_matches_the_stable_string_form() {
+        assert_eq!(SourceLabel::Mic.to_string(), "mic");
+        assert_eq!(SourceLabel::System.to_string(), "system");
+        assert_eq!("mic".parse::<SourceLabel>().unwrap(), SourceLabel::Mic);
+        assert_eq!(
+            "system".parse::<SourceLabel>().unwrap(),
+            SourceLabel::System
+        );
+    }
+
+    #[test]
+    fn track_descriptors_describe_the_legacy_sources() {
+        assert_eq!(
+            SourceLabel::Mic.track_descriptor(),
+            crate::TrackDescriptor {
+                id: crate::TrackId::MICROPHONE,
+                source: crate::SourceKind::Microphone,
+                name: "mic".into(),
+            }
+        );
+        assert_eq!(
+            SourceLabel::System.track_descriptor(),
+            crate::TrackDescriptor {
+                id: crate::TrackId::SYSTEM,
+                source: crate::SourceKind::SystemAudio,
+                name: "system".into(),
+            }
+        );
+    }
 }

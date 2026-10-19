@@ -19,7 +19,13 @@ the same time and transcribes both on-device with Apple's `SpeechAnalyzer`.
 
 ## Screenshots
 
-![Wisp session library — past sessions and a New Session entry point](docs/screenshot.png)
+The native GPUI Component interface — the session library in light and dark
+appearance, the live recording screen, and a saved transcript.
+
+![Wisp session library — light appearance](docs/screenshot.png)
+![Wisp session library — dark appearance](docs/screenshot-dark.png)
+![Wisp live recording screen](docs/screenshot-live.png)
+![Wisp saved-session transcript with MIC/SYS labels](docs/screenshot-history.png)
 
 ## Architecture
 

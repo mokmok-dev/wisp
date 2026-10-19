@@ -13,6 +13,7 @@ use crate::app::{AppError, AppModel, SessionState, View};
 use crate::library::SharedStorage;
 use crate::session_runner::SessionRunner;
 use crate::session_updates::{apply_update, retry_pending_persistence, write_recovery_snapshot};
+use crate::settings::{self, ThemePreference};
 use crate::transcript_export::{self, suggested_export_name};
 
 actions!(
@@ -22,7 +23,11 @@ actions!(
         About,
         ToggleRecording,
         CopyTranscript,
-        ExportTranscript
+        ExportTranscript,
+        ToggleTheme,
+        FollowSystemAppearance,
+        LightAppearance,
+        DarkAppearance
     ]
 );
 
@@ -88,11 +93,36 @@ pub fn configure(
         transcript_export::export_transcript(text, &name, cx);
     });
 
+    // Light/dark appearance. The title-bar button and the menu entries all go
+    // through the same persisted preference, and rebuild the menu so the
+    // checks in the Appearance submenu stay current.
+    let model_for_theme = model.clone();
+    cx.on_action(move |_: &ToggleTheme, cx| {
+        settings::toggle(cx);
+        refresh_menus(cx, &model_for_theme);
+    });
+    let model_for_system = model.clone();
+    cx.on_action(move |_: &FollowSystemAppearance, cx| {
+        settings::set_system(cx);
+        refresh_menus(cx, &model_for_system);
+    });
+    let model_for_light = model.clone();
+    cx.on_action(move |_: &LightAppearance, cx| {
+        settings::set_light(cx);
+        refresh_menus(cx, &model_for_light);
+    });
+    let model_for_dark = model.clone();
+    cx.on_action(move |_: &DarkAppearance, cx| {
+        settings::set_dark(cx);
+        refresh_menus(cx, &model_for_dark);
+    });
+
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-r", ToggleRecording, None),
         KeyBinding::new("cmd-shift-c", CopyTranscript, None),
         KeyBinding::new("cmd-shift-e", ExportTranscript, None),
+        KeyBinding::new("cmd-shift-d", ToggleTheme, None),
     ]);
 
     // The recording item's label flips between "Start" and "Stop" with the
@@ -102,13 +132,15 @@ pub fn configure(
         let app = model.read(cx);
         recording_menu_label(app.state, app.has_pending_persistence())
     };
-    cx.set_menus(build_menus(last_label));
+    refresh_menus(cx, &model);
     cx.observe(&model, move |model, cx| {
-        let app = model.read(cx);
-        let label = recording_menu_label(app.state, app.has_pending_persistence());
+        let label = {
+            let app = model.read(cx);
+            recording_menu_label(app.state, app.has_pending_persistence())
+        };
         if label != last_label {
             last_label = label;
-            cx.set_menus(build_menus(label));
+            refresh_menus(cx, &model);
         }
     })
     .detach();
@@ -144,10 +176,32 @@ fn recording_menu_label(
     }
 }
 
-/// Build the application menu with the recording item carrying `record_label`.
-fn build_menus(record_label: &'static str) -> Vec<Menu> {
+/// Rebuild the native menu bar from the current recording label and theme
+/// preference. Called by the theme actions (to refresh the Appearance checks)
+/// and when the recording state changes.
+pub(crate) fn refresh_menus(
+    cx: &mut App,
+    model: &Entity<AppModel>,
+) {
+    let (record_label, theme) = {
+        let app = model.read(cx);
+        (
+            recording_menu_label(app.state, app.has_pending_persistence()),
+            settings::preference(cx),
+        )
+    };
+    cx.set_menus(build_menus(record_label, theme));
+}
+
+/// Build the application menu with the recording item carrying `record_label`
+/// and checkmarks for the active appearance preference.
+fn build_menus(
+    record_label: &'static str,
+    theme: ThemePreference,
+) -> Vec<Menu> {
     vec![Menu {
         name: "Wisp".into(),
+        disabled: false,
         items: vec![
             MenuItem::action("About Wisp", About),
             MenuItem::separator(),
@@ -155,6 +209,20 @@ fn build_menus(record_label: &'static str) -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Copy Transcript", CopyTranscript),
             MenuItem::action("Export Transcript…", ExportTranscript),
+            MenuItem::separator(),
+            MenuItem::action("Toggle Light/Dark Appearance", ToggleTheme),
+            MenuItem::submenu(Menu {
+                name: "Appearance".into(),
+                disabled: false,
+                items: vec![
+                    MenuItem::action("Follow System", FollowSystemAppearance)
+                        .checked(theme == ThemePreference::System),
+                    MenuItem::action("Light", LightAppearance)
+                        .checked(theme == ThemePreference::Light),
+                    MenuItem::action("Dark", DarkAppearance)
+                        .checked(theme == ThemePreference::Dark),
+                ],
+            }),
             MenuItem::separator(),
             MenuItem::action("Quit Wisp", Quit),
         ],

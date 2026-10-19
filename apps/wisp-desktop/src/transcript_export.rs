@@ -219,7 +219,7 @@ pub fn export_transcript(
             );
             return;
         }
-        let _ = cx.update(|cx| cx.reveal_path(&path));
+        cx.update(|cx| cx.reveal_path(&path));
     })
     .detach();
 }

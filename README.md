@@ -13,12 +13,19 @@ the same time and transcribes both on-device with Apple's `SpeechAnalyzer`.
   is uploaded; there is no online transcription service involved.
 - **On-device transcription** — Uses [`SpeechAnalyzer`](https://developer.apple.com/documentation/speech), the new API in Apple's Speech framework. Both the microphone and the far side of the call are transcribed locally.
 - **System audio + microphone capture** — Uses macOS 14.2+ [Core Audio Process Taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps). Each source is captured as a separate track.
-- **Built in Rust with a GPU-rendered shell** — The window is built on [GPUI](https://www.gpui.rs/), the framework that powers the [Zed](https://zed.dev/) editor, and hosts the interface as an embedded web UI rendered with [Kumo](https://kumo-ui.com/) (Cloudflare's React component system) inside a [wry](https://github.com/tauri-apps/wry) webview. The bundle is served offline over a custom `wisp://` scheme; no network is used at runtime.
+- **Built in Rust with a native GPU-rendered UI** — The window is built on [GPUI](https://www.gpui.rs/), the framework that powers the [Zed](https://zed.dev/) editor, with the interface composed from [GPUI Component](https://gpui-kit.com/) ([longbridge/gpui-kit](https://github.com/longbridge/gpui-kit)). The UI is native — no embedded browser and no web assets — and no network is used at runtime.
+- **Light and dark appearance** — Follows the macOS appearance by default. Switch from the title-bar button, <kbd>⌘⇧D</kbd>, or the app menu's Appearance submenu (Follow System / Light / Dark); the choice is persisted in `settings.json` beside the local data.
 - **Simple local storage** — Recordings are stored as Ogg/Opus and metadata as SQLite under `$WISP_DATA_DIR`, or `$HOME/Library/Application Support/dev.mokmok.wisp/` when the override is unset. Completed transcripts can be copied as plain text or exported as Markdown.
 
 ## Screenshots
 
-![Wisp session library — past sessions and a New Session entry point](docs/screenshot.png)
+The native GPUI Component interface — the session library in light and dark
+appearance, the live recording screen, and a saved transcript.
+
+![Wisp session library — light appearance](docs/screenshot.png)
+![Wisp session library — dark appearance](docs/screenshot-dark.png)
+![Wisp live recording screen](docs/screenshot-live.png)
+![Wisp saved-session transcript with MIC/SYS labels](docs/screenshot-history.png)
 
 ## Architecture
 
@@ -26,9 +33,7 @@ Wisp is a small Cargo workspace with cleanly separated concerns:
 
 | Crate / target | Responsibility |
 | --- | --- |
-| `apps/wisp-desktop` | GPUI desktop shell. Handles setup, recording controls, session history, and transcript export. The UI itself is a React app (`apps/wisp-desktop/ui`) hosted in an embedded webview. |
-| `apps/wisp-desktop/ui` | The web UI: Vite + React + [Kumo](https://kumo-ui.com/) components, bridged to the Rust host over IPC. |
-| `crates/wisp-webview` | Vendored `gpui-wry` (from [longbridge/gpui-kit](https://github.com/longbridge/gpui-kit)) adapted to the official `gpui` crate: wry webview support for GPUI. |
+| `apps/wisp-desktop` | GPUI desktop shell. The native UI is built with [GPUI Component](https://gpui-kit.com/) ([longbridge/gpui-kit](https://github.com/longbridge/gpui-kit)) and handles setup, recording controls, session history, and transcript export. |
 | `crates/wisp-core` | Shared, platform-agnostic types (`Session`, `Segment`, IDs, `SourceLabel`). |
 | `crates/wisp-audiokit` | macOS audio/transcription backends and the backend-neutral session orchestrator. |
 | `crates/wisp-audiokit-sys` | Raw C ABI bindings to the macOS `WispAudioKit` library. |
@@ -102,6 +107,7 @@ The application menu also provides these shortcuts:
 | Start / stop recording | <kbd>⌘R</kbd> |
 | Copy transcript | <kbd>⌘⇧C</kbd> |
 | Export transcript | <kbd>⌘⇧E</kbd> |
+| Toggle light/dark appearance | <kbd>⌘⇧D</kbd> |
 
 ## Build & run
 
@@ -111,17 +117,12 @@ A [Nix](https://nixos.org/) flake is included, so the dev environment is one com
 # Enter the dev shell
 nix develop
 
-# Build the web UI (embedded into the binary at compile time)
-cd apps/wisp-desktop/ui && npm install && npm run build && cd -
-
 # Run a debug build
 cargo run -p wisp-desktop
 ```
 
-Without the UI build step the app still runs and shows a placeholder page
-pointing at the commands above. For hot reload during UI work, run
-`npm run dev` in `apps/wisp-desktop/ui` and launch the app with
-`WISP_UI_DEV_URL=http://localhost:5183 cargo run -p wisp-desktop`.
+The native UI is compiled into the binary, so `cargo run -p wisp-desktop` is
+enough.
 
 The `default` dev shell is turnkey on macOS: it provides the pinned Rust
 toolchain, `sccache`, the `treefmt` formatter, applies the macOS

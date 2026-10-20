@@ -424,6 +424,8 @@ impl TranscriptEvent {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
         AudioFormat, AudioFrame, AudioFrameError, AudioSamples, MonotonicTimestamp, SampleFormat,
         SourceKind, TrackId, TranscriptEvent, TranscriptSegment, TranscriptSegmentId,
@@ -564,5 +566,365 @@ mod tests {
         );
         assert!(!partial.is_final());
         assert!(final_event.is_final());
+    }
+
+    #[test]
+    fn track_ids_expose_their_value() {
+        assert_eq!(TrackId::new(42).get(), 42);
+        assert_eq!(TrackId::MICROPHONE.get(), 1);
+        assert_eq!(TrackId::SYSTEM.get(), 2);
+    }
+
+    #[test]
+    fn monotonic_timestamp_roundtrips_its_duration() {
+        let value = Duration::from_millis(12_345);
+        assert_eq!(
+            MonotonicTimestamp::from_duration(value).as_duration(),
+            value
+        );
+        assert_eq!(MonotonicTimestamp::default().as_duration(), Duration::ZERO);
+    }
+
+    #[test]
+    fn audio_format_constructor_sets_f32_sample_format() {
+        let format = AudioFormat::f32(48_000, 2);
+        assert_eq!(format.sample_rate, 48_000);
+        assert_eq!(format.channels, 2);
+        assert_eq!(format.sample_format, SampleFormat::F32);
+    }
+
+    #[test]
+    fn audio_samples_report_their_shape() {
+        let payloads = [
+            AudioSamples::I16(vec![1, 2, 3, 4, 5]),
+            AudioSamples::U16(vec![1, 2, 3, 4, 5]),
+            AudioSamples::I32(vec![1, 2, 3, 4, 5]),
+            AudioSamples::U32(vec![1, 2, 3, 4, 5]),
+            AudioSamples::F32(vec![1.0, 2.0, 3.0, 4.0, 5.0]),
+            AudioSamples::F64(vec![1.0, 2.0, 3.0, 4.0, 5.0]),
+            AudioSamples::Bytes(vec![1, 2, 3, 4, 5]),
+        ];
+        for samples in &payloads {
+            assert_eq!(samples.len(), 5);
+            assert!(!samples.is_empty());
+        }
+
+        let empty = [
+            AudioSamples::I16(Vec::new()),
+            AudioSamples::U16(Vec::new()),
+            AudioSamples::I32(Vec::new()),
+            AudioSamples::U32(Vec::new()),
+            AudioSamples::F32(Vec::new()),
+            AudioSamples::F64(Vec::new()),
+            AudioSamples::Bytes(Vec::new()),
+        ];
+        for samples in &empty {
+            assert_eq!(samples.len(), 0);
+            assert!(samples.is_empty());
+        }
+    }
+
+    #[test]
+    fn as_f32_exposes_only_f32_payloads() {
+        let payload = vec![0.25, -3.5, 7.75];
+        let samples = AudioSamples::F32(payload.clone());
+        assert_eq!(samples.as_f32(), Some(payload.as_slice()));
+
+        let others = [
+            AudioSamples::I16(vec![1]),
+            AudioSamples::U16(vec![1]),
+            AudioSamples::I32(vec![1]),
+            AudioSamples::U32(vec![1]),
+            AudioSamples::F64(vec![1.0]),
+            AudioSamples::Bytes(vec![1]),
+        ];
+        for other in &others {
+            assert_eq!(other.as_f32(), None);
+        }
+    }
+
+    #[test]
+    fn sample_format_matches_the_payload_variant() {
+        let cases = [
+            (AudioSamples::I16(vec![1]), Some(SampleFormat::I16)),
+            (AudioSamples::U16(vec![1]), Some(SampleFormat::U16)),
+            (AudioSamples::I32(vec![1]), Some(SampleFormat::I32)),
+            (AudioSamples::U32(vec![1]), Some(SampleFormat::U32)),
+            (AudioSamples::F32(vec![1.0]), Some(SampleFormat::F32)),
+            (AudioSamples::F64(vec![1.0]), Some(SampleFormat::F64)),
+            (AudioSamples::Bytes(vec![1]), None),
+        ];
+        for (samples, expected) in cases {
+            assert_eq!(samples.sample_format(), expected);
+        }
+    }
+
+    #[test]
+    fn frame_accessors_report_constructed_metadata() {
+        let timestamp = MonotonicTimestamp::from_duration(Duration::from_secs(3));
+        let frame = AudioFrame::try_new(
+            TrackId::new(9),
+            SourceKind::ApplicationAudio,
+            42,
+            timestamp,
+            AudioFormat::f32(48_000, 2),
+            5,
+            AudioSamples::F32(vec![0.5; 10]),
+        )
+        .unwrap();
+
+        assert_eq!(frame.track_id().get(), 9);
+        assert_eq!(frame.source(), &SourceKind::ApplicationAudio);
+        assert_eq!(frame.sequence(), 42);
+        assert_eq!(frame.timestamp(), timestamp);
+        assert_eq!(frame.format(), &AudioFormat::f32(48_000, 2));
+        assert_eq!(frame.frame_count(), 5);
+        assert_eq!(frame.samples(), &AudioSamples::F32(vec![0.5; 10]));
+        assert_eq!(frame.into_samples(), AudioSamples::F32(vec![0.5; 10]));
+    }
+
+    #[test]
+    fn opaque_payloads_require_the_other_sample_format() {
+        let frame = AudioFrame::try_new(
+            TrackId::SYSTEM,
+            SourceKind::SystemAudio,
+            0,
+            MonotonicTimestamp::default(),
+            AudioFormat {
+                sample_rate: 48_000,
+                channels: 2,
+                sample_format: SampleFormat::Other("s16le-planar".into()),
+            },
+            3,
+            AudioSamples::Bytes(vec![1, 2, 3, 4]),
+        )
+        .unwrap();
+
+        assert_eq!(frame.frame_count(), 3);
+        assert_eq!(frame.samples().len(), 4);
+        assert_eq!(frame.samples().sample_format(), None);
+        assert_eq!(frame.samples().as_f32(), None);
+    }
+
+    #[test]
+    fn transcript_segment_ids_expose_their_value() {
+        assert_eq!(TranscriptSegmentId::new(42).get(), 42);
+    }
+
+    #[test]
+    fn transcript_events_expose_their_segment() {
+        let segment = TranscriptSegment {
+            track_id: TrackId::MICROPHONE,
+            segment_id: TranscriptSegmentId::new(7),
+            text: "hello".into(),
+            start_seconds: 1.5,
+            end_seconds: 2.5,
+            confidence_mean: Some(0.9),
+            confidence_min: Some(0.8),
+        };
+        let partial = TranscriptEvent::Partial(segment.clone());
+        let final_event = TranscriptEvent::Final(segment.clone());
+
+        assert_eq!(partial.segment(), &segment);
+        assert_eq!(final_event.segment(), &segment);
+        assert!(!partial.is_final());
+        assert!(final_event.is_final());
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use std::time::Duration;
+
+    use proptest::prelude::*;
+
+    use super::{
+        AudioFormat, AudioFrame, AudioFrameError, AudioSamples, MonotonicTimestamp, SampleFormat,
+        SourceKind, TrackId,
+    };
+
+    /// A typed payload, its matching declared format, and the channels/frame
+    /// count that the payload implies.
+    fn typed_payload() -> impl Strategy<Value = (u16, u32, SampleFormat, AudioSamples)> {
+        (1u16..=8, 1u32..=16, 0usize..6).prop_map(|(channels, frame_count, variant)| {
+            let len = usize::try_from(u64::from(frame_count) * u64::from(channels))
+                .expect("test payload length fits usize");
+            let samples = match variant {
+                0 => AudioSamples::I16(
+                    (0..len)
+                        .map(|i| i16::try_from(i).expect("test payload fits i16") * 3 - 7)
+                        .collect(),
+                ),
+                1 => AudioSamples::U16(
+                    (0..len)
+                        .map(|i| u16::try_from(i).expect("test payload fits u16") * 3 + 1)
+                        .collect(),
+                ),
+                2 => AudioSamples::I32(
+                    (0..len)
+                        .map(|i| i32::try_from(i).expect("test payload fits i32") * 5 - 3)
+                        .collect(),
+                ),
+                3 => AudioSamples::U32(
+                    (0..len)
+                        .map(|i| u32::try_from(i).expect("test payload fits u32") * 7 + 2)
+                        .collect(),
+                ),
+                4 => AudioSamples::F32(
+                    (0..len)
+                        .map(|i| {
+                            f32::from(u16::try_from(i).expect("test payload fits u16"))
+                                .mul_add(0.5, -3.25)
+                        })
+                        .collect(),
+                ),
+                _ => AudioSamples::F64(
+                    (0..len)
+                        .map(|i| {
+                            f64::from(u32::try_from(i).expect("test payload fits u32"))
+                                .mul_add(0.25, -2.5)
+                        })
+                        .collect(),
+                ),
+            };
+            let format = match variant {
+                0 => SampleFormat::I16,
+                1 => SampleFormat::U16,
+                2 => SampleFormat::I32,
+                3 => SampleFormat::U32,
+                4 => SampleFormat::F32,
+                _ => SampleFormat::F64,
+            };
+            (channels, frame_count, format, samples)
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn consistent_typed_payloads_roundtrip_through_a_frame(
+            track in any::<u32>(),
+            sequence in any::<u64>(),
+            millis in any::<u64>(),
+            sample_rate in 1u32..=384_000,
+            (channels, frame_count, sample_format, payload) in typed_payload(),
+        ) {
+            let timestamp = MonotonicTimestamp::from_duration(Duration::from_millis(millis));
+            let format = AudioFormat {
+                sample_rate,
+                channels,
+                sample_format: sample_format.clone(),
+            };
+            let frame = AudioFrame::try_new(
+                TrackId::new(track),
+                SourceKind::Loopback,
+                sequence,
+                timestamp,
+                format.clone(),
+                frame_count,
+                payload.clone(),
+            )
+            .expect("consistent metadata must construct a frame");
+
+            prop_assert_eq!(frame.track_id(), TrackId::new(track));
+            prop_assert_eq!(frame.source(), &SourceKind::Loopback);
+            prop_assert_eq!(frame.sequence(), sequence);
+            prop_assert_eq!(frame.timestamp().as_duration(), Duration::from_millis(millis));
+            prop_assert_eq!(frame.format(), &format);
+            prop_assert_eq!(frame.frame_count(), frame_count);
+            prop_assert_eq!(frame.samples(), &payload);
+            prop_assert_eq!(frame.samples().sample_format(), Some(sample_format));
+            prop_assert_eq!(frame.into_samples(), payload);
+        }
+
+        #[test]
+        fn mismatched_sample_and_frame_counts_are_rejected(
+            channels in 1u16..=8,
+            frame_count in 1u32..=16,
+            extra in 1usize..=8,
+        ) {
+            let expected = usize::try_from(u64::from(frame_count) * u64::from(channels))
+                .expect("test payload length fits usize");
+            let actual = expected + extra;
+            let error = AudioFrame::try_new(
+                TrackId::MICROPHONE,
+                SourceKind::Microphone,
+                0,
+                MonotonicTimestamp::default(),
+                AudioFormat::f32(48_000, channels),
+                frame_count,
+                AudioSamples::F32(vec![0.0; actual]),
+            )
+            .expect_err("mismatched payload must be rejected");
+
+            prop_assert_eq!(
+                error,
+                AudioFrameError::SampleCountMismatch {
+                    samples: actual,
+                    expected_samples: expected,
+                    frame_count,
+                    channels,
+                }
+            );
+        }
+
+        #[test]
+        fn f32_frames_derive_the_exact_frame_count(
+            track in any::<u32>(),
+            sequence in any::<u64>(),
+            sample_rate in 1u32..=192_000,
+            channels in 1u16..=8,
+            frame_count in 1u32..=32,
+        ) {
+            let len = usize::try_from(u64::from(frame_count) * u64::from(channels))
+                .expect("test payload length fits usize");
+            let samples: Vec<f32> = (0..len)
+                .map(|i| {
+                    f32::from(u16::try_from(i % 100).expect("index fits u16")).mul_add(0.5, -7.25)
+                })
+                .collect();
+            let frame = AudioFrame::from_f32(
+                TrackId::new(track),
+                SourceKind::ApplicationAudio,
+                sequence,
+                MonotonicTimestamp::default(),
+                sample_rate,
+                channels,
+                samples.clone(),
+            )
+            .expect("interleaved f32 payload must construct a frame");
+
+            prop_assert_eq!(frame.frame_count(), frame_count);
+            prop_assert_eq!(frame.samples().as_f32(), Some(samples.as_slice()));
+            prop_assert_eq!(frame.format(), &AudioFormat::f32(sample_rate, channels));
+        }
+
+        #[test]
+        fn opaque_payloads_keep_the_declared_frame_count(
+            name in "[a-z0-9-]{1,12}",
+            frame_count in 1u32..=16,
+            bytes in prop::collection::vec(any::<u8>(), 1..=64),
+            channels in 1u16..=8,
+            sample_rate in 1u32..=96_000,
+        ) {
+            let frame = AudioFrame::try_new(
+                TrackId::SYSTEM,
+                SourceKind::SystemAudio,
+                u64::from(frame_count),
+                MonotonicTimestamp::default(),
+                AudioFormat {
+                    sample_rate,
+                    channels,
+                    sample_format: SampleFormat::Other(name),
+                },
+                frame_count,
+                AudioSamples::Bytes(bytes.clone()),
+            )
+            .expect("opaque payload with SampleFormat::Other must be accepted");
+
+            prop_assert_eq!(frame.frame_count(), frame_count);
+            prop_assert_eq!(frame.samples().len(), bytes.len());
+            prop_assert_eq!(frame.samples().sample_format(), None);
+            prop_assert_eq!(frame.samples().as_f32(), None);
+        }
     }
 }

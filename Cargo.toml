@@ -20,6 +20,9 @@ crossbeam-channel = "0.5.15"
 # local machine with only the Command Line Tools can build and run the
 # desktop app.
 gpui-kit = "0.7.3"
+# Property-based testing for the pure-logic crates. Kept in the workspace so
+# every crate pins the same version.
+proptest = "1.12.0"
 rusqlite = { version = "0.40.0", features = ["bundled", "chrono"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

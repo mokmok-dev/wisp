@@ -58,6 +58,10 @@
               inputsFrom = [ config.pre-commit.devShell ];
 
               packages = with pkgs; [
+                # Mutation testing for the pure-logic crates (see
+                # .cargo/mutants.toml). The `mutants` CI job runs this
+                # straight from the dev shell.
+                cargo-mutants
                 rustToolchain
                 sccache
               ];

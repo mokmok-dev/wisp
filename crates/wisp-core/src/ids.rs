@@ -59,3 +59,30 @@ impl std::fmt::Display for SegmentId {
         write!(f, "{}", self.0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SegmentId, SessionId};
+
+    /// Covers every integer shape the `SQLite` layer can hand back, including
+    /// the values mutation testing substitutes for dedicated accessors.
+    const RAW_IDS: [i64; 6] = [0, 1, 42, -3, i64::MAX, i64::MIN];
+
+    #[test]
+    fn session_ids_roundtrip_and_display_decimal() {
+        for raw in RAW_IDS {
+            let id = SessionId::from(raw);
+            assert_eq!(id.as_i64(), raw);
+            assert_eq!(id.to_string(), raw.to_string());
+        }
+    }
+
+    #[test]
+    fn segment_ids_roundtrip_and_display_decimal() {
+        for raw in RAW_IDS {
+            let id = SegmentId::from(raw);
+            assert_eq!(id.as_i64(), raw);
+            assert_eq!(id.to_string(), raw.to_string());
+        }
+    }
+}

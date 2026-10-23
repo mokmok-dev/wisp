@@ -19,7 +19,7 @@ crossbeam-channel = "0.5.15"
 # at runtime instead of invoking Xcode's `metal` compiler at build time, so a
 # local machine with only the Command Line Tools can build and run the
 # desktop app.
-gpui-kit = "0.7.3"
+gpui-kit = "0.8.0"
 # Property-based testing for the pure-logic crates. Kept in the workspace so
 # every crate pins the same version.
 proptest = "1.12.0"

@@ -698,7 +698,7 @@ fn arm_lossy_wake<T, K>(
 
 #[cfg(target_os = "macos")]
 fn saturating_atomic_increment(value: &std::sync::atomic::AtomicU64) {
-    let _ = value.fetch_update(
+    let _ = value.try_update(
         std::sync::atomic::Ordering::Relaxed,
         std::sync::atomic::Ordering::Relaxed,
         |current| Some(current.saturating_add(1)),

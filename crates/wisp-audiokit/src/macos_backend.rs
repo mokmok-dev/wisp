@@ -1633,7 +1633,7 @@ mod tests {
         let error = session.start().unwrap_err();
 
         assert!(error.to_string().contains("microphone permission"));
-        assert!(lock_calls(&calls).is_empty());
+        assert_eq!(*lock_calls(&calls), Vec::<&'static str>::new());
     }
 
     #[test]

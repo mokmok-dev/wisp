@@ -297,12 +297,12 @@ mod tests {
                 actual
             } if expected == session_id && actual == other_id
         ));
-        assert!(
+        assert_eq!(
             storage
                 .segments()
                 .list_by_session(other_id)
-                .expect("list other segments")
-                .is_empty()
+                .expect("list other segments"),
+            Vec::new()
         );
         assert!(
             storage
@@ -347,12 +347,12 @@ mod tests {
         assert_eq!(stored.len(), 2);
         assert_eq!(stored[0].text, "replacement");
         assert_eq!(stored[1].text, "new tail");
-        assert!(
+        assert_eq!(
             storage
                 .segments()
                 .search("old", 10)
-                .expect("search replaced snapshot")
-                .is_empty()
+                .expect("search replaced snapshot"),
+            Vec::new()
         );
         assert_eq!(
             storage

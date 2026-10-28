@@ -1096,7 +1096,10 @@ mod tests {
         assert_eq!(model.state, SessionState::Starting);
         assert_eq!(model.current_session_id, Some(current_id));
         assert_eq!(model.linked_session_id, Some(current_id));
-        assert!(model.segments.is_empty());
+        assert!(
+            model.segments.is_empty(),
+            "a new live session starts with an empty transcript"
+        );
     }
 
     #[test]

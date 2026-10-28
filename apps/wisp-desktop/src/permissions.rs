@@ -58,7 +58,7 @@ pub fn request(
             .background_executor()
             .spawn(async move { request_permission(perm) })
             .await;
-        let _ = model.update(cx, |m, cx| {
+        model.update(cx, |m, cx| {
             m.permissions.set_status(perm, status);
             m.permissions.pending = None;
             cx.notify();

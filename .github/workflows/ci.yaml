@@ -35,3 +35,15 @@ jobs:
       - uses: ./.github/actions/setup-nix
       - run: nix develop .#default --quiet --command cargo clippy --workspace --all-targets --all-features -- --deny warnings
       - run: nix develop .#default --quiet --command cargo test --workspace --locked
+
+  # Mutation gate for the pure-logic crates; `.cargo/mutants.toml` scopes the
+  # run and CI fails if any mutant survives the test suite. cargo-mutants is
+  # provided by the Nix dev shell, so the gate uses the same pinned toolchain
+  # as every other Rust job.
+  mutants:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-nix
+      - name: Run mutation tests
+        run: nix develop .#default --quiet --command cargo mutants --workspace --no-times --colors never

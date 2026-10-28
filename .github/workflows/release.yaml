@@ -64,21 +64,6 @@ jobs:
 
       - uses: ./.github/actions/setup-nix
 
-      # The web UI (apps/wisp-desktop/ui) is embedded into the binary at
-      # compile time, so it has to be built before `cargo build`.
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/wisp-desktop/ui/package-lock.json
-
-      - name: Build web UI (release)
-        working-directory: apps/wisp-desktop/ui
-        run: |
-          set -euo pipefail
-          npm ci
-          npm run build
-
       - name: Build Wisp binaries (release)
         run: nix develop .#default --quiet --command cargo build -p wisp-desktop --release --locked
 
@@ -272,7 +257,7 @@ jobs:
 
       - name: Save pending notarization
         if: ${{ steps.signing.outputs.mode == 'developer-id' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wisp-notary-app-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.notary.outputs.state_dir }}
@@ -281,7 +266,7 @@ jobs:
 
       - name: Upload ad-hoc test app artifact
         if: ${{ steps.signing.outputs.mode == 'adhoc' && github.event_name == 'workflow_dispatch' && inputs.artifact_only }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wisp-macos-app-${{ github.sha }}
           path: |
@@ -292,7 +277,7 @@ jobs:
 
       - name: Publish ad-hoc release
         if: ${{ steps.signing.outputs.mode == 'adhoc' && (github.event_name != 'workflow_dispatch' || !inputs.artifact_only) }}
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ${{ steps.meta.outputs.tag }}

@@ -273,3 +273,321 @@ mod proofs {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::{Phase, Reducer, UpdateContext, ViewOwner, WorkerUpdate, can_replace_transcript};
+
+    const SESSION: i64 = 7;
+
+    const ALL_PHASES: [Phase; 5] = [
+        Phase::Idle,
+        Phase::Starting,
+        Phase::Recording,
+        Phase::Stopping,
+        Phase::Failed,
+    ];
+    const ALL_VIEWS: [ViewOwner; 3] = [ViewOwner::Library, ViewOwner::Live, ViewOwner::History];
+
+    fn any_phase() -> impl Strategy<Value = Phase> {
+        prop_oneof![
+            Just(Phase::Idle),
+            Just(Phase::Starting),
+            Just(Phase::Recording),
+            Just(Phase::Stopping),
+            Just(Phase::Failed),
+        ]
+    }
+
+    fn any_view() -> impl Strategy<Value = ViewOwner> {
+        prop_oneof![
+            Just(ViewOwner::Library),
+            Just(ViewOwner::Live),
+            Just(ViewOwner::History),
+        ]
+    }
+
+    #[test]
+    fn phase_activity_marks_worker_ownership() {
+        let expected = [
+            (Phase::Idle, false),
+            (Phase::Starting, true),
+            (Phase::Recording, true),
+            (Phase::Stopping, true),
+            (Phase::Failed, false),
+        ];
+        for (phase, active) in expected {
+            assert_eq!(phase.is_active(), active, "phase {phase:?}");
+        }
+    }
+
+    #[test]
+    fn stopped_requests_are_preserved_by_late_started_updates() {
+        let expected = [
+            (Phase::Idle, Phase::Idle),
+            (Phase::Starting, Phase::Recording),
+            (Phase::Recording, Phase::Recording),
+            (Phase::Stopping, Phase::Stopping),
+            (Phase::Failed, Phase::Failed),
+        ];
+        for (phase, started) in expected {
+            assert_eq!(phase.worker_started(), started, "phase {phase:?}");
+        }
+    }
+
+    #[test]
+    fn stop_requests_only_affect_active_phases() {
+        let expected = [
+            (Phase::Idle, Phase::Idle),
+            (Phase::Starting, Phase::Stopping),
+            (Phase::Recording, Phase::Stopping),
+            (Phase::Stopping, Phase::Stopping),
+            (Phase::Failed, Phase::Failed),
+        ];
+        for (phase, stopped) in expected {
+            let stopped_phase = phase.request_stop();
+            assert_eq!(stopped_phase, stopped, "phase {phase:?}");
+            assert_eq!(stopped_phase.request_stop(), stopped_phase, "idempotent");
+        }
+    }
+
+    #[test]
+    fn update_context_requires_live_ownership_to_accept() {
+        let live = UpdateContext {
+            phase: Phase::Recording,
+            view: ViewOwner::Live,
+            current_session_id: Some(SESSION),
+        };
+        assert!(live.accepts(SESSION));
+        assert!(!live.accepts(SESSION + 1));
+
+        for phase in ALL_PHASES {
+            for view in ALL_VIEWS {
+                for current_session_id in [None, Some(SESSION), Some(SESSION + 1)] {
+                    let context = UpdateContext {
+                        phase,
+                        view,
+                        current_session_id,
+                    };
+                    let expected = phase.is_active()
+                        && view == ViewOwner::Live
+                        && current_session_id == Some(SESSION);
+                    assert_eq!(context.accepts(SESSION), expected, "context {context:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn next_phase_maps_every_accepted_worker_update() {
+        let recording = UpdateContext {
+            phase: Phase::Recording,
+            view: ViewOwner::Live,
+            current_session_id: Some(SESSION),
+        };
+        assert_eq!(
+            recording.next_phase(SESSION, WorkerUpdate::Started),
+            Some(Phase::Recording)
+        );
+        assert_eq!(
+            recording.next_phase(SESSION, WorkerUpdate::Event),
+            Some(Phase::Recording)
+        );
+        for terminal in [
+            WorkerUpdate::Stopped,
+            WorkerUpdate::StartFailed,
+            WorkerUpdate::Error,
+        ] {
+            assert_eq!(recording.next_phase(SESSION, terminal), Some(Phase::Idle));
+        }
+        assert_eq!(recording.next_phase(SESSION + 1, WorkerUpdate::Event), None);
+
+        let starting = UpdateContext {
+            phase: Phase::Starting,
+            ..recording
+        };
+        assert_eq!(
+            starting.next_phase(SESSION, WorkerUpdate::Started),
+            Some(Phase::Recording)
+        );
+    }
+
+    #[test]
+    fn context_invariant_requires_live_ownership_while_active() {
+        let contexts = [
+            (
+                UpdateContext {
+                    phase: Phase::Idle,
+                    view: ViewOwner::Library,
+                    current_session_id: None,
+                },
+                true,
+            ),
+            (
+                UpdateContext {
+                    phase: Phase::Recording,
+                    view: ViewOwner::Live,
+                    current_session_id: Some(SESSION),
+                },
+                true,
+            ),
+            (
+                UpdateContext {
+                    phase: Phase::Recording,
+                    view: ViewOwner::Library,
+                    current_session_id: Some(SESSION),
+                },
+                false,
+            ),
+            (
+                UpdateContext {
+                    phase: Phase::Recording,
+                    view: ViewOwner::Live,
+                    current_session_id: None,
+                },
+                false,
+            ),
+        ];
+        for (context, expected) in contexts {
+            assert_eq!(context.invariant_holds(), expected, "context {context:?}");
+        }
+    }
+
+    #[test]
+    fn reducer_applies_live_updates_and_counts_them() {
+        let mut reducer = Reducer::new(SESSION);
+        assert_eq!(
+            reducer.context(),
+            UpdateContext {
+                phase: Phase::Starting,
+                view: ViewOwner::Live,
+                current_session_id: Some(SESSION),
+            }
+        );
+        assert_eq!(reducer.applied_events(), 0);
+        assert_eq!(reducer.terminal_updates(), 0);
+
+        assert!(!reducer.apply(SESSION + 1, WorkerUpdate::Event));
+        assert_eq!(reducer.applied_events(), 0);
+
+        assert!(reducer.apply(SESSION, WorkerUpdate::Started));
+        assert_eq!(reducer.context().phase, Phase::Recording);
+        assert!(reducer.apply(SESSION, WorkerUpdate::Event));
+        assert!(reducer.apply(SESSION, WorkerUpdate::Event));
+        assert_eq!(reducer.applied_events(), 2);
+
+        reducer.request_stop();
+        assert_eq!(reducer.context().phase, Phase::Stopping);
+        assert!(reducer.apply(SESSION, WorkerUpdate::Started));
+        assert_eq!(reducer.context().phase, Phase::Stopping);
+
+        assert!(reducer.apply(SESSION, WorkerUpdate::Stopped));
+        assert_eq!(
+            reducer.context(),
+            UpdateContext {
+                phase: Phase::Idle,
+                view: ViewOwner::Live,
+                current_session_id: None,
+            }
+        );
+        assert_eq!(reducer.terminal_updates(), 1);
+
+        assert!(!reducer.apply(SESSION, WorkerUpdate::Error));
+        assert_eq!(reducer.terminal_updates(), 1);
+    }
+
+    #[test]
+    fn terminal_updates_release_the_live_session() {
+        for terminal in [
+            WorkerUpdate::Stopped,
+            WorkerUpdate::StartFailed,
+            WorkerUpdate::Error,
+        ] {
+            let mut reducer = Reducer::new(SESSION);
+            assert!(reducer.apply(SESSION, terminal), "update {terminal:?}");
+            assert_eq!(reducer.context().phase, Phase::Idle);
+            assert_eq!(reducer.context().current_session_id, None);
+            assert_eq!(reducer.terminal_updates(), 1);
+            assert!(!reducer.apply(SESSION, terminal), "update {terminal:?}");
+        }
+    }
+
+    #[test]
+    fn can_replace_transcript_requires_every_owner_to_settle() {
+        for phase in ALL_PHASES {
+            for pending_persistence in [false, true] {
+                for retained_output in [false, true] {
+                    let expected = !phase.is_active() && !pending_persistence && !retained_output;
+                    assert_eq!(
+                        can_replace_transcript(phase, pending_persistence, retained_output),
+                        expected,
+                        "phase {phase:?}, pending {pending_persistence}, output {retained_output}"
+                    );
+                }
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn accepts_agrees_with_the_transition_guard(
+            phase in any_phase(),
+            view in any_view(),
+            current_session_id in any::<Option<i64>>(),
+            update_session_id in any::<i64>(),
+        ) {
+            let context = UpdateContext {
+                phase,
+                view,
+                current_session_id,
+            };
+            let expected = phase.is_active()
+                && view == ViewOwner::Live
+                && current_session_id == Some(update_session_id);
+            prop_assert_eq!(context.accepts(update_session_id), expected);
+            prop_assert_eq!(
+                context.next_phase(update_session_id, WorkerUpdate::Event).is_some(),
+                expected
+            );
+        }
+
+        #[test]
+        fn invariant_matches_the_ownership_definition(
+            phase in any_phase(),
+            view in any_view(),
+            current_session_id in any::<Option<i64>>(),
+        ) {
+            let context = UpdateContext {
+                phase,
+                view,
+                current_session_id,
+            };
+            let expected = !phase.is_active()
+                || (view == ViewOwner::Live && current_session_id.is_some());
+            prop_assert_eq!(context.invariant_holds(), expected);
+        }
+
+        #[test]
+        fn stop_is_idempotent_for_every_phase(phase in any_phase()) {
+            let stopped = phase.request_stop();
+            prop_assert_eq!(stopped.request_stop(), stopped);
+            if phase.is_active() {
+                prop_assert_eq!(stopped, Phase::Stopping);
+            } else {
+                prop_assert_eq!(stopped, phase);
+            }
+        }
+
+        #[test]
+        fn started_updates_never_leave_active_ownership(phase in any_phase()) {
+            let started = phase.worker_started();
+            if phase.is_active() && phase != Phase::Stopping {
+                prop_assert_eq!(started, Phase::Recording);
+            } else {
+                prop_assert_eq!(started, phase);
+            }
+        }
+    }
+}

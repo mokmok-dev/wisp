@@ -6,20 +6,23 @@ members = [
   "crates/wisp-core",
   "crates/wisp-lifecycle",
   "crates/wisp-storage",
-  "crates/wisp-webview",
 ]
 resolver = "3"
 
 [workspace.dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 crossbeam-channel = "0.5.15"
-# `runtime_shaders` makes GPUI compile its Metal shaders on the GPU at
-# runtime instead of invoking Xcode's `metal` compiler at build time. That
-# lets a local dev machine with only the Command Line Tools build and run
-# the desktop app (the Swift/audio toolchain works fine with CLT; only full
-# Xcode ships the `metal` binary). Build-time shader compilation is still
-# used by the release pipeline, which runs on a full Xcode runner.
-gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+# GPUI Kit bundles the pinned upstream GPUI snapshot (published as
+# `gpui-pre`), GPUI Base, the styled GPUI Component library, and its default
+# icon assets behind a single dependency. Its platform dependency enables
+# `font-kit` and `runtime_shaders`: GPUI compiles its Metal shaders on the GPU
+# at runtime instead of invoking Xcode's `metal` compiler at build time, so a
+# local machine with only the Command Line Tools can build and run the
+# desktop app.
+gpui-kit = "0.7.3"
+# Property-based testing for the pure-logic crates. Kept in the workspace so
+# every crate pins the same version.
+proptest = "1.12.0"
 rusqlite = { version = "0.40.0", features = ["bundled", "chrono"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

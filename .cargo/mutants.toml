@@ -1,0 +1,29 @@
+# cargo-mutants configuration (https://mutants.rs/).
+#
+# Mutation testing is the quality gate for the platform-agnostic, pure-logic
+# crates: `wisp-core`, `wisp-lifecycle`, and `wisp-storage`. Every mutant in
+# those crates must be caught by the test suite; run
+#
+#     cargo mutants --workspace
+#
+# and require the "missed" set to be empty.
+#
+# The remaining workspace members are intentionally out of scope:
+#
+# - `apps/wisp-desktop` is UI/event plumbing. Mutating it would rebuild the
+#   GUI stack once per mutant, and its behaviour is covered by the desktop test
+#   suite plus manual QA rather than a strict mutation score.
+# - `crates/wisp-audiokit` / `crates/wisp-audiokit-sys` are thin `unsafe` FFI
+#   wrappers around the Swift framework, which is tested with `swift test`.
+exclude_globs = [
+  "apps/**",
+  "crates/wisp-audiokit/**",
+  "crates/wisp-audiokit-sys/**",
+]
+
+# Kani proof harnesses live behind `#[cfg(kani)]`, so `cargo test` never
+# compiles them and no test can catch a mutation there. The proofs themselves
+# are exercised by `formal/check.sh`.
+exclude_re = [
+  "proofs::",
+]

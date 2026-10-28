@@ -8,4 +8,5 @@ publish = false
 workspace = true
 
 [dev-dependencies]
+proptest = { workspace = true }
 shuttle = "0.9.1"

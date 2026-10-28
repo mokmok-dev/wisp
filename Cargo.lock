@@ -8186,7 +8186,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-audiokit"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "crossbeam-channel",
  "tempfile",
@@ -8197,11 +8197,11 @@ dependencies = [
 
 [[package]]
 name = "wisp-audiokit-sys"
-version = "0.0.19"
+version = "0.0.20"
 
 [[package]]
 name = "wisp-core"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "chrono",
  "proptest",
@@ -8211,7 +8211,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-desktop"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "chrono",
  "gpui-kit",
@@ -8228,7 +8228,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-lifecycle"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "proptest",
  "shuttle",
@@ -8236,7 +8236,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-storage"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "chrono",
  "proptest",

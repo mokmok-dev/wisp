@@ -866,7 +866,10 @@ mod tests {
 
         assert_eq!(m.view, View::LiveSession);
         assert_eq!(m.state, SessionState::Starting);
-        assert!(m.segments.is_empty());
+        assert!(
+            m.segments.is_empty(),
+            "a new live session starts with an empty transcript"
+        );
         assert!(m.viewed_session.is_none());
         assert!(m.current_session_id.is_none());
     }
@@ -910,7 +913,10 @@ mod tests {
 
         assert_eq!(m.view, View::LiveSession);
         assert_eq!(m.state, SessionState::Starting);
-        assert!(m.segments.is_empty());
+        assert!(
+            m.segments.is_empty(),
+            "a new live session starts with an empty transcript"
+        );
         assert!(m.viewed_session.is_none());
         assert!(m.current_session_id.is_none());
     }
@@ -930,11 +936,11 @@ mod tests {
         let mut m = AppModel::new();
         m.live_title = "Q3 planning".into();
         m.show_library();
-        assert!(m.live_title.is_empty());
+        assert_eq!(m.live_title, "");
 
         m.live_title = "Q3 planning".into();
         m.show_new_session();
-        assert!(m.live_title.is_empty());
+        assert_eq!(m.live_title, "");
     }
 
     #[cfg(target_os = "macos")]

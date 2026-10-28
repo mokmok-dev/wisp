@@ -620,7 +620,7 @@ mod tests {
         ];
         for samples in &empty {
             assert_eq!(samples.len(), 0);
-            assert!(samples.is_empty());
+            assert!(samples.is_empty(), "empty audio must report empty");
         }
     }
 

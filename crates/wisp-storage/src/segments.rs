@@ -238,6 +238,6 @@ mod tests {
             .unwrap();
         assert_eq!(segments.list_by_session(sid).unwrap().len(), 1);
         storage.sessions().delete(sid).expect("delete session");
-        assert!(segments.list_by_session(sid).unwrap().is_empty());
+        assert_eq!(segments.list_by_session(sid).unwrap(), Vec::new());
     }
 }

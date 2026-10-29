@@ -34,6 +34,7 @@
       </a>
       <nav class="nav-links">
         <a href="#features">Features</a>
+        <a href="#screenshots">Screenshots</a>
         <a href="#how">How it works</a>
         <a href="#privacy">Privacy</a>
         <a href="https://github.com/mokmok-dev/wisp" target="_blank" rel="noopener">GitHub</a>
@@ -88,7 +89,7 @@
         <div class="shot">
           <div class="shot-frame">
             <video
-              poster="screenshot.png"
+              poster="screenshot-dark.png"
               width="1200"
               height="864"
               autoplay
@@ -101,7 +102,7 @@
               <source src="screenshot.webm" type="video/webm" />
               <source src="screenshot.mp4" type="video/mp4" />
               <img
-                src="screenshot.png"
+                src="screenshot-dark.png"
                 alt="The Wisp main window with a library of past sessions."
                 width="1200"
                 height="864"
@@ -109,6 +110,57 @@
               />
             </video>
           </div>
+        </div>
+      </section>
+
+      <!-- Screenshots -->
+      <section id="screenshots" class="section">
+        <div class="section-head">
+          <h2>A closer look</h2>
+          <p>Both appearances, the live recording screen, and a saved transcript.</p>
+        </div>
+
+        <div class="shots">
+          <figure class="shot-card">
+            <img
+              src="screenshot.png"
+              alt="Wisp session library in light appearance"
+              width="1600"
+              height="1170"
+              loading="lazy"
+            />
+            <figcaption>Session library, light appearance</figcaption>
+          </figure>
+          <figure class="shot-card">
+            <img
+              src="screenshot-dark.png"
+              alt="Wisp session library in dark appearance"
+              width="1600"
+              height="1170"
+              loading="lazy"
+            />
+            <figcaption>Session library, dark appearance</figcaption>
+          </figure>
+          <figure class="shot-card">
+            <img
+              src="screenshot-live.png"
+              alt="Wisp live recording screen with the transcript area empty"
+              width="1600"
+              height="1170"
+              loading="lazy"
+            />
+            <figcaption>Live recording</figcaption>
+          </figure>
+          <figure class="shot-card">
+            <img
+              src="screenshot-history.png"
+              alt="Saved Wisp session transcript with MIC and SYS labels"
+              width="1600"
+              height="1189"
+              loading="lazy"
+            />
+            <figcaption>Saved transcript</figcaption>
+          </figure>
         </div>
       </section>
 
@@ -193,7 +245,7 @@
             </div>
             <h3>Simple local storage</h3>
             <p>
-              Recordings save as WAV, metadata as SQLite. Browse past sessions in
+              Recordings save as Ogg/Opus, metadata as SQLite. Browse past sessions in
               the library — easy to export and analyze later.
             </p>
           </article>
@@ -250,7 +302,7 @@
               <h3>Merge &amp; store locally</h3>
               <p>
                 Mic and system segments merge into a single timeline, then persist
-                as WAV + SQLite under your Application Support folder.
+                as Ogg/Opus + SQLite under your Application Support folder.
               </p>
             </div>
           </li>
@@ -263,7 +315,7 @@
  Microphone input ───────┘        │              ▲
                                   └─► SpeechAnalyzer
                                           │
-                                          └─► WAV + SQLite (local)
+                                          └─► Ogg/Opus + SQLite (local)
 </pre>
         </div>
       </section>
@@ -284,7 +336,7 @@
           <div class="privacy-stats">
             <div><strong>0</strong><span>bytes uploaded</span></div>
             <div><strong>100%</strong><span>on-device</span></div>
-            <div><strong>WAV + SQLite</strong><span>open, local formats</span></div>
+            <div><strong>Ogg/Opus + SQLite</strong><span>open, local formats</span></div>
           </div>
         </div>
       </section>

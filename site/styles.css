@@ -261,6 +261,32 @@ main {
   border-radius: 10px;
 }
 
+/* Screenshot gallery */
+.shots {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 18px;
+}
+.shot-card {
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+}
+.shot-card img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+.shot-card figcaption {
+  padding: 10px 6px 2px;
+  font-size: 0.86rem;
+  color: var(--text-3);
+  text-align: center;
+}
+
 /* ---------- Sections ---------- */
 .section {
   max-width: var(--maxw);
@@ -521,7 +547,8 @@ main {
   }
 }
 @media (max-width: 560px) {
-  .grid {
+  .grid,
+  .shots {
     grid-template-columns: 1fr;
   }
   .section {

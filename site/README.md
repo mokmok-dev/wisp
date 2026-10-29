@@ -19,7 +19,10 @@ python3 -m http.server -d site 8000
 | `favicon.svg`   | Blue-dot mark matching the app's `Wisp` wordmark.              |
 | `screenshot.mp4`| Hero loop (H.264, autoplays muted).                            |
 | `screenshot.webm`| Hero loop (VP9), preferred by browsers that support it.       |
-| `screenshot.png`| Poster frame & OG image (kept in sync with `docs/screenshot.png`). |
+| `screenshot.png`| Session library in light appearance. Also the OG image. Kept in sync with `docs/screenshot.png`. |
+| `screenshot-dark.png`| Session library in dark appearance. Also the hero poster. |
+| `screenshot-live.png`| Live recording screen.                                     |
+| `screenshot-history.png`| Saved transcript with MIC/SYS labels.                   |
 | `CNAME`         | Custom domain for GitHub Pages (`wisp.mokmok.dev`).            |
 
 ## Deployment

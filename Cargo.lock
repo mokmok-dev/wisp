@@ -5961,9 +5961,9 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "shuttle"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "781e1c7db5a7036b8debea4f67c1393deeeca1962df400515efa5c615256be27"
+checksum = "90f796ae4996c3fbf039c26d69536f8e112f49fd5e9a25fd353fe4787134b7cb"
 dependencies = [
  "bitvec",
  "cfg-if",
@@ -5983,9 +5983,9 @@ dependencies = [
 
 [[package]]
 name = "shuttle-engine"
-version = "0.1.5"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ff11c5eb32e53fc4a4f15b4dab4ee13b4604db1feb97a989877001475a8efb8"
+checksum = "4cf6dad68d0b9d252e56ba6374e05b542b659ee076cf7f319f7c1312d5879d65"
 dependencies = [
  "assoc",
  "bitvec",
@@ -6443,7 +6443,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

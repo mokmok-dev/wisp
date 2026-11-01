@@ -121,6 +121,9 @@
                 cccc
                 rustToolchain
                 sccache
+                # A host SwiftFormat on the macOS runner shadows the flake's
+                # 0.62.1 in PATH, so the lint applies a newer rule set.
+                swiftformat
               ];
 
               shellHook = ''

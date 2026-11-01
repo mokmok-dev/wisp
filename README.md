@@ -81,7 +81,7 @@ Microphone input ───────┘        │                            
 
 - **macOS 26 (Tahoe)** — Wisp relies on `SpeechAnalyzer`, Core Audio Process Taps, and the new Metal Toolchain, so macOS 26 is required.
 - **Xcode 26** — for the Swift 6.0 / macOS 26 SDK.
-- **Rust 1.97.1** — pinned in `rust-toolchain.toml`.
+- **Rust 1.99.1** — pinned in `rust-toolchain.toml`.
 - Microphone and speech-recognition permissions. macOS will prompt on first launch.
 
 ## Setup and usage
@@ -127,7 +127,7 @@ enough.
 The `default` dev shell is turnkey on macOS: it provides the pinned Rust
 toolchain, `sccache`, `cargo-mutants`, the `treefmt` formatter, applies the macOS
 Xcode/`DEVELOPER_DIR` handling automatically, and installs the project's
-pre-commit git hooks (`treefmt` + `clippy`) on entry. If you use
+pre-commit `treefmt` hook on entry. If you use
 [direnv](https://direnv.net/), the committed `.envrc` (`use flake`) does all of
 this on `cd`.
 
@@ -224,8 +224,14 @@ See `.github/workflows/release.yaml` for how the release `.app` bundle is produc
 
 ## Contributing
 
-Issues and pull requests are welcome. Before sending a PR, run the checks that
-apply to your platform:
+Issues and pull requests are welcome. Before sending a PR, run
+`./scripts/check`, the single local entry point for these checks. It runs
+formatting, lints, and tests, and stops at the first failure.
+`./scripts/check --full` adds the mutation gate. On a Linux host,
+`./scripts/check --pure` checks only `wisp-core`, `wisp-lifecycle`, and
+`wisp-storage`. The individual commands below remain available for targeted
+checks. See [`docs/verification.md`](docs/verification.md) for what each gate
+proves and which checks still need a person on macOS.
 
 ```bash
 # Nix checks (the check set is platform-dependent; see Build & run)

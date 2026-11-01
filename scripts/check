@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." || exit 1
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/check [--pure | --full]
+
+Run the local Wisp checks. The script stops at the first failing stage.
+
+  (no flag)  Format, lint, and test the whole workspace. Requires macOS and Xcode.
+  --pure     Format, lint, and test wisp-core, wisp-lifecycle, and wisp-storage only. Runs on Linux.
+  --full     The whole workspace plus the cargo-mutants gate. Requires macOS and Xcode.
+
+Exit codes
+  10  formatting failed
+  11  lints failed
+  12  tests failed
+  13  mutants failed
+  2   usage error
+EOF
+}
+
+# Not set -e: each stage maps a failure to a stable exit code.
+run_stage() {
+  local code=$1
+  local label=$2
+  shift 2
+  echo "==> $label"
+  "$@"
+  local status=$?
+  if ((status != 0)); then
+    echo "scripts/check: $label failed with exit $status. Stopping with check exit $code." >&2
+    exit "$code"
+  fi
+}
+
+mode=""
+for arg in "$@"; do
+  case $arg in
+    --pure | --full)
+      next=${arg#--}
+      if [[ -n $mode && $mode != "$next" ]]; then
+        echo "scripts/check: --pure and --full are mutually exclusive." >&2
+        exit 2
+      fi
+      mode=$next
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+mode=${mode:-default}
+
+fmt_args=(--all)
+clippy_args=(--workspace --all-targets --all-features)
+test_args=(--workspace)
+if [[ $mode == pure ]]; then
+  fmt_args=(-p wisp-core -p wisp-lifecycle -p wisp-storage)
+  clippy_args=(-p wisp-core -p wisp-lifecycle -p wisp-storage --all-targets --all-features)
+  test_args=(-p wisp-core -p wisp-lifecycle -p wisp-storage)
+fi
+
+run_stage 10 "cargo fmt" cargo fmt "${fmt_args[@]}" -- --check
+run_stage 11 "cargo clippy" cargo clippy "${clippy_args[@]}" -- --deny warnings
+run_stage 12 "cargo test" cargo test "${test_args[@]}" --locked
+
+if [[ $mode == full ]]; then
+  run_stage 13 "cargo mutants" cargo mutants --workspace --no-times --colors never
+fi
+
+echo "==> all checks passed"

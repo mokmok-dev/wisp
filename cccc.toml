@@ -1,0 +1,9 @@
+# Cognitive complexity is reported alongside the gate but not enforced: the
+# SonarSource nesting bonus makes it a readability signal rather than a hard
+# structural bound.
+max-cyclomatic = 10
+
+# The Swift bridge is measured by `swift test` and reviewed on macOS. cccc's
+# Swift grammar cannot fully parse WispSession.swift or OpusOggRecorder.swift,
+# so a complexity gate over those files would score partial trees.
+languages = ["rust"]

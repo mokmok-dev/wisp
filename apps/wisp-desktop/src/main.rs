@@ -52,7 +52,7 @@ mod settings;
 mod transcript_export;
 mod transcript_view;
 
-use app::{AppError, AppModel, PendingSessionWrite, SessionState};
+use app::{AppError, AppModel, PendingSessionWrite, SessionState, View};
 use app_menu::configure as configure_app_menu;
 use app_view::{AppDeps, AppView};
 use library::SharedStorage;
@@ -336,6 +336,7 @@ pub(crate) fn refresh_library(
     model: &Entity<AppModel>,
     cx: &mut App,
 ) {
+    let query = model.read(cx).library_query.clone();
     let Ok(store) = storage.lock() else {
         return;
     };
@@ -347,6 +348,132 @@ pub(crate) fn refresh_library(
         m.set_library(list);
         cx.notify();
     });
+    if !query.trim().is_empty() {
+        search_library(storage, model, &query, cx);
+    }
+}
+
+/// Run a transcript search and replace the library filter.
+///
+/// The query is stored verbatim so the field and the filter agree. Only the
+/// storage call sees the trimmed form.
+pub(crate) fn search_library(
+    storage: &SharedStorage,
+    model: &Entity<AppModel>,
+    query: &str,
+    cx: &mut App,
+) {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        model.update(cx, |m, cx| {
+            m.set_library_search(query.to_string(), None);
+            cx.notify();
+        });
+        return;
+    }
+
+    let mut hits = Vec::new();
+    let mut failure = None;
+    if let Ok(store) = storage.lock() {
+        match store.segments().search_text(trimmed, 200) {
+            Ok(segments) => {
+                for segment in segments {
+                    if !hits.contains(&segment.session_id) {
+                        hits.push(segment.session_id);
+                    }
+                }
+            },
+            Err(source) => failure = Some(source.to_string()),
+        }
+    }
+    model.update(cx, |m, cx| {
+        m.set_library_search(query.to_string(), Some(hits));
+        if let Some(failure) = failure {
+            m.last_error = Some(AppError::Persistence(format!(
+                "transcript search failed: {failure}"
+            )));
+        }
+        cx.notify();
+    });
+}
+
+/// Delete a saved session and its recording directory.
+///
+/// The database row goes first. A file-removal failure leaves an orphaned
+/// directory, which costs disk but cannot leave a library row pointing at
+/// missing audio.
+pub(crate) fn delete_session(
+    storage: &SharedStorage,
+    recordings_dir: &std::path::Path,
+    model: &Entity<AppModel>,
+    session_id: SessionId,
+    cx: &mut App,
+) {
+    let Ok(store) = storage.lock() else {
+        model.update(cx, |m, cx| {
+            m.cancel_delete();
+            m.last_error = Some(AppError::Persistence(
+                "storage is unavailable; the session was not deleted".into(),
+            ));
+            cx.notify();
+        });
+        return;
+    };
+    let session = match store.sessions().get(session_id) {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            drop(store);
+            refresh_library(storage, model, cx);
+            model.update(cx, |m, cx| {
+                m.cancel_delete();
+                cx.notify();
+            });
+            return;
+        },
+        Err(source) => {
+            drop(store);
+            model.update(cx, |m, cx| {
+                m.cancel_delete();
+                m.last_error = Some(AppError::Persistence(format!(
+                    "could not read the session before deleting it: {source}"
+                )));
+                cx.notify();
+            });
+            return;
+        },
+    };
+    let storage_root = store.root().to_path_buf();
+    let delete_result = store.sessions().delete(session_id);
+    drop(store);
+
+    match delete_result {
+        Ok(()) => {
+            let file_error =
+                library::remove_session_recordings(&storage_root, recordings_dir, &session).err();
+            refresh_library(storage, model, cx);
+            model.update(cx, |m, cx| {
+                if m.view == (View::History { session_id }) {
+                    m.show_library();
+                }
+                m.cancel_delete();
+                if let Some(error) = file_error {
+                    m.last_error = Some(AppError::Persistence(format!(
+                        "session deleted, but its recordings could not be removed: {error}"
+                    )));
+                }
+                cx.notify();
+            });
+        },
+        Err(source) => {
+            model.update(cx, |m, cx| {
+                m.cancel_delete();
+                m.last_error = Some(AppError::Persistence(format!(
+                    "could not delete the session: {source}"
+                )));
+                cx.notify();
+            });
+        },
+    }
 }
 
 /// Track the live-session title as it is edited in the recording top bar.

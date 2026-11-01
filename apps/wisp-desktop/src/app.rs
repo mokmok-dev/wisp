@@ -258,6 +258,13 @@ pub struct AppModel {
     pub recent_log: VecDeque<String>,
     pub last_error: Option<AppError>,
     pub permissions: Permissions,
+    /// User-typed transcript search. Empty shows every session.
+    pub library_query: String,
+    /// Session ids matching [`library_query`], in relevance order. `None`
+    /// means no query is active and the library is unfiltered.
+    pub library_hits: Option<Vec<SessionId>>,
+    /// Session waiting for the second click on Delete.
+    pub pending_delete: Option<SessionId>,
 }
 
 impl AppModel {
@@ -314,6 +321,9 @@ impl AppModel {
             recent_log: VecDeque::new(),
             last_error: None,
             permissions: Permissions::unknown(),
+            library_query: String::new(),
+            library_hits: None,
+            pending_delete: None,
         }
     }
 
@@ -342,6 +352,35 @@ impl AppModel {
         self.library = sessions;
     }
 
+    /// Replace the active transcript search. An empty query clears the
+    /// filter so the library shows every session again.
+    pub fn set_library_search(
+        &mut self,
+        query: String,
+        hits: Option<Vec<SessionId>>,
+    ) {
+        self.library_query = query;
+        self.library_hits = hits;
+    }
+
+    /// Drop the last failure so its banner disappears. The session state is
+    /// left untouched; a failed live view still offers Retry.
+    pub fn clear_error(&mut self) {
+        self.last_error = None;
+    }
+
+    /// Arm the inline delete confirmation for one library row.
+    pub fn request_delete(
+        &mut self,
+        session_id: SessionId,
+    ) {
+        self.pending_delete = Some(session_id);
+    }
+
+    pub fn cancel_delete(&mut self) {
+        self.pending_delete = None;
+    }
+
     /// Move to the library screen and drop any live/historical segments so
     /// the next view enter starts from a clean slate. Navigation is ignored
     /// while a worker session is active; otherwise its future events could be
@@ -362,6 +401,7 @@ impl AppModel {
         self.current_session_dir_name = None;
         self.current_output_dir = None;
         self.last_error = None;
+        self.pending_delete = None;
     }
 
     /// Move to the live recording screen in idle state. Used by the
@@ -384,6 +424,7 @@ impl AppModel {
         self.current_session_dir_name = None;
         self.current_output_dir = None;
         self.last_error = None;
+        self.pending_delete = None;
     }
 
     /// Move to a historical session's read-only transcript view. The
@@ -408,6 +449,7 @@ impl AppModel {
         self.current_session_started_at = None;
         self.current_session_dir_name = None;
         self.current_output_dir = None;
+        self.pending_delete = None;
         // Historical segments are already finalized.
         self.finalize_all_segments();
         for seg in &mut self.segments {

@@ -52,12 +52,9 @@ impl Render for AboutView {
                     .text_color(muted)
                     .child(format!("WispAudioKit {audiokit_version}")),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("On-device transcription on macOS; local Windows recording preview."),
-            )
+            .child(div().text_sm().text_color(muted).child(
+                "On-device transcription on macOS 26. Recordings and transcripts stay on this Mac.",
+            ))
             .child(div().flex_grow(1.0))
             .child(
                 h_flex().w_full().justify_end().child(

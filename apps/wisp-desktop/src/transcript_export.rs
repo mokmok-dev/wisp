@@ -193,14 +193,15 @@ pub fn copy_transcript_to_clipboard(
 /// [`format_transcript_markdown`] (frontmatter envelope + body). Building it
 /// in the caller keeps this function free of the app model, so no `Segment`
 /// or `Session` needs to be cloned across the async boundary — only the
-/// finished string is moved. An empty `text` is a no-op.
+/// finished string is moved. Returns `false` when there is nothing to export,
+/// so the caller can report the real outcome instead of a started dialog.
 pub fn export_transcript(
     text: String,
     suggested_name: &str,
     cx: &mut App,
-) {
+) -> bool {
     if text.is_empty() {
-        return;
+        return false;
     }
 
     let directory = default_export_directory();
@@ -222,6 +223,7 @@ pub fn export_transcript(
         cx.update(|cx| cx.reveal_path(&path));
     })
     .detach();
+    true
 }
 
 /// Default folder for the save dialog — `~/Downloads` when available.

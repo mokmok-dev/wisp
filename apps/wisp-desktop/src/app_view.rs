@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px,
 };
@@ -24,7 +24,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{InputEvent, InputState},
+    input::{Input, InputEvent, InputState},
     notification::Notification,
     sidebar::{
         Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu,
@@ -66,6 +66,8 @@ pub(crate) struct AppView {
     pub(crate) live_title_input: Entity<InputState>,
     /// History rename field. Committed on Enter or blur.
     pub(crate) history_title_input: Entity<InputState>,
+    /// Library transcript search. Empty shows every session.
+    pub(crate) library_search_input: Entity<InputState>,
     /// Scroll position of the transcript list, shared by live and history.
     pub(crate) transcript_scroll: ScrollHandle,
     /// Sidebar collapse state.
@@ -101,6 +103,8 @@ impl AppView {
             cx.new(|cx| InputState::new(window, cx).placeholder("Untitled session"));
         let history_title_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Untitled session"));
+        let library_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search transcripts"));
         let transcript_scroll = ScrollHandle::new();
 
         // Keep the model's tree in sync when either title field changes. The
@@ -130,6 +134,18 @@ impl AppView {
                     this.commit_history_rename(window, cx);
                 },
                 InputEvent::Change | InputEvent::Focus => {},
+            },
+        )
+        .detach();
+
+        cx.subscribe_in(
+            &library_search_input,
+            window,
+            |this: &mut Self, input, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let query = input.read(cx).value().to_string();
+                    this.set_library_query(&query, cx);
+                }
             },
         )
         .detach();
@@ -190,6 +206,7 @@ impl AppView {
             recordings_dir,
             live_title_input,
             history_title_input,
+            library_search_input,
             transcript_scroll,
             sidebar_collapsed: false,
             synced_view: Some(initial_view),
@@ -316,11 +333,24 @@ impl AppView {
                 suggested_export_name(session.map(|s| s.title.as_str()), "transcript"),
             )
         };
-        transcript_export::export_transcript(text, &name, cx);
-        window.push_notification(
-            Notification::success("Export started — choose a location in the save dialog."),
-            cx,
-        );
+        if text.is_empty() {
+            window.push_notification(
+                Notification::error("There is no transcript to export yet."),
+                cx,
+            );
+            return;
+        }
+        if transcript_export::export_transcript(text, &name, cx) {
+            window.push_notification(
+                Notification::success("Choose where to save the Markdown file."),
+                cx,
+            );
+        } else {
+            window.push_notification(
+                Notification::error("The transcript could not be exported."),
+                cx,
+            );
+        }
     }
 
     pub(crate) fn request_permission(
@@ -333,6 +363,64 @@ impl AppView {
 
     pub(crate) fn open_permission_settings(permission: Permission) {
         permissions::open_settings(permission);
+    }
+
+    /// Apply a transcript search. Empty input restores the full library.
+    pub(crate) fn set_library_query(
+        &mut self,
+        query: &str,
+        cx: &mut Context<Self>,
+    ) {
+        crate::search_library(&self.storage, &self.model, query, cx);
+    }
+
+    /// Clear the search field and the active filter.
+    pub(crate) fn clear_library_search(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.library_search_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.set_library_query("", cx);
+    }
+
+    /// Arm the two-step delete for one row.
+    pub(crate) fn request_delete(
+        &mut self,
+        session_id: SessionId,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.update(cx, |model, cx| {
+            model.request_delete(session_id);
+            cx.notify();
+        });
+    }
+
+    pub(crate) fn cancel_delete(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.update(cx, |model, cx| {
+            model.cancel_delete();
+            cx.notify();
+        });
+    }
+
+    /// Delete the armed session after the user confirms. The host removes
+    /// the database row and its recording directory.
+    pub(crate) fn confirm_delete(
+        &mut self,
+        session_id: SessionId,
+        cx: &mut Context<Self>,
+    ) {
+        crate::delete_session(
+            &self.storage,
+            &self.recordings_dir,
+            &self.model,
+            session_id,
+            cx,
+        );
     }
 
     /// Copy model titles into the title inputs when the screen or its data
@@ -438,6 +526,96 @@ impl AppView {
                         .on_click(cx.listener(|_this, _, _window, cx| settings::toggle(cx))),
                 ),
             )
+    }
+
+    /// One line for failures and degraded capture. Returns `None` when the
+    /// user has nothing to act on.
+    fn render_status_strip(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let app = self.model.read(cx);
+        let (title, detail) = if let Some(error) = &app.last_error {
+            ("The last action failed.", error.to_string())
+        } else if app.has_pending_persistence() {
+            (
+                "A session still needs to be saved.",
+                "Press ⌘R to retry.".to_string(),
+            )
+        } else if app.state.is_active() && !app.permissions.speech.is_granted() {
+            (
+                "Recording without transcription.",
+                "Speech Recognition is not granted. Audio is still being saved.".to_string(),
+            )
+        } else {
+            return None;
+        };
+
+        let accent = if app.last_error.is_some() {
+            cx.theme().danger
+        } else {
+            cx.theme().warning
+        };
+        let action = if app.last_error.is_some() {
+            Some(
+                Button::new("status-dismiss")
+                    .ghost()
+                    .small()
+                    .label("Dismiss")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.model.update(cx, |model, cx| {
+                            model.clear_error();
+                            cx.notify();
+                        });
+                    })),
+            )
+        } else if app.state.is_active() && !app.permissions.speech.is_granted() {
+            Some(
+                Button::new("status-open-settings")
+                    .secondary()
+                    .small()
+                    .label("Open Settings")
+                    .on_click(|_, _, _| {
+                        AppView::open_permission_settings(Permission::SpeechRecognition);
+                    }),
+            )
+        } else {
+            None
+        };
+
+        let row = h_flex()
+            .w_full()
+            .gap_3()
+            .items_center()
+            .px_6()
+            .py_2()
+            .bg(cx.theme().secondary)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(div().w(px(3.0)).h(px(28.0)).rounded_full().bg(accent))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(detail),
+                    ),
+            );
+        let row = match action {
+            Some(action) => row.child(action),
+            None => row,
+        };
+        Some(row.into_any_element())
     }
 
     fn render_sidebar(
@@ -687,10 +865,18 @@ impl AppView {
     ) -> impl IntoElement {
         let app = self.model.read(cx);
         let sessions = &app.library;
-        let pending = app.has_pending_persistence();
-        let count = sessions.len();
+        let total = sessions.len();
+        let query_active = !app.library_query.trim().is_empty();
+        let visible: Vec<&wisp_core::Session> = match &app.library_hits {
+            Some(hits) => hits
+                .iter()
+                .filter_map(|id| sessions.iter().find(|session| session.id == *id))
+                .collect(),
+            None => sessions.iter().collect(),
+        };
+        let count = visible.len();
 
-        let list = if sessions.is_empty() {
+        let list = if total == 0 {
             v_flex()
                 .flex_1()
                 .items_center()
@@ -728,9 +914,43 @@ impl AppView {
                         .on_click(cx.listener(|this, _, _, cx| this.new_session(cx))),
                 )
                 .into_any_element()
+        } else if visible.is_empty() {
+            v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .child(
+                    Icon::new(AppIcon::Search)
+                        .with_size(px(40.0))
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("No sessions match"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!(
+                            "Nothing in the saved transcripts matches \"{}\".",
+                            app.library_query.trim()
+                        )),
+                )
+                .child(
+                    Button::new("library-clear-search")
+                        .secondary()
+                        .label("Clear Search")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.clear_library_search(window, cx);
+                        })),
+                )
+                .into_any_element()
         } else {
             let mut rows = v_flex().w_full().gap_1();
-            for session in sessions {
+            for session in &visible {
                 let duration = session
                     .ended_at
                     .map(|ended| (ended - session.started_at).num_seconds());
@@ -783,6 +1003,53 @@ impl AppView {
                                             .rounded_full()
                                             .child(div().text_xs().child("live")),
                                     )
+                                })
+                                .when(session.ended_at.is_some(), |this| {
+                                    if app.pending_delete == Some(session.id) {
+                                        this.child(
+                                            h_flex()
+                                                .gap_1()
+                                                .items_center()
+                                                .child(
+                                                    Button::new(format!(
+                                                        "delete-session-{}",
+                                                        session.id.as_i64()
+                                                    ))
+                                                    .danger()
+                                                    .small()
+                                                    .label("Delete")
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.confirm_delete(session_id, cx);
+                                                    })),
+                                                )
+                                                .child(
+                                                    Button::new(format!(
+                                                        "cancel-delete-{}",
+                                                        session.id.as_i64()
+                                                    ))
+                                                    .secondary()
+                                                    .small()
+                                                    .label("Cancel")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.cancel_delete(cx);
+                                                    })),
+                                                ),
+                                        )
+                                    } else {
+                                        this.child(
+                                            Button::new(format!(
+                                                "request-delete-{}",
+                                                session.id.as_i64()
+                                            ))
+                                            .ghost()
+                                            .small()
+                                            .icon(AppIcon::Trash)
+                                            .tooltip("Delete session")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.request_delete(session_id, cx);
+                                            })),
+                                        )
+                                    }
                                 }),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -828,40 +1095,34 @@ impl AppView {
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(if count == 0 {
+                                    .child(if total == 0 {
                                         "Recordings and transcripts stay on this Mac.".to_string()
-                                    } else if count == 1 {
+                                    } else if query_active {
+                                        format!("{count} of {total} sessions match.")
+                                    } else if total == 1 {
                                         "1 session saved locally.".to_string()
                                     } else {
-                                        format!("{count} sessions saved locally.")
+                                        format!("{total} sessions saved locally.")
                                     }),
                             ),
                     )
                     .child(
-                        Button::new("library-record")
-                            .primary()
-                            .icon(AppIcon::Plus)
-                            .label("New Session")
-                            .on_click(cx.listener(|this, _, _, cx| this.new_session(cx))),
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(div().w(px(220.0)).child(
+                                Input::new(&self.library_search_input).prefix(AppIcon::Search),
+                            ))
+                            .child(
+                                Button::new("library-record")
+                                    .primary()
+                                    .icon(AppIcon::Plus)
+                                    .label("New Session")
+                                    .on_click(cx.listener(|this, _, _, cx| this.new_session(cx))),
+                            ),
                     ),
             )
             .child(v_flex().flex_1().min_h_0().px_6().py_4().child(list))
-            .when(pending, |this| {
-                this.child(
-                    div()
-                        .w_full()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .px_6()
-                        .py_3()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(
-                            "A session still needs to be saved. Press ⌘R or use the menu to \
-                             retry before starting a new recording.",
-                        ),
-                )
-            })
             .child(
                 div()
                     .w_full()
@@ -906,6 +1167,7 @@ impl Render for AppView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_title_bar(cx))
+            .children(self.render_status_strip(cx))
             .child(content)
     }
 }

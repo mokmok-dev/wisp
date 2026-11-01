@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use gpui::{App, Entity, KeyBinding, Menu, MenuItem, actions};
+use gpui_kit::component::{WindowExt as _, notification::Notification};
 
 use crate::about_view;
 use crate::app::{AppError, AppModel, SessionState, View};
@@ -69,29 +70,7 @@ pub fn configure(
         );
     });
 
-    let model_for_copy = model.clone();
-    cx.on_action(move |_: &CopyTranscript, cx| {
-        let app = model_for_copy.read(cx);
-        if !matches!(app.view, View::LiveSession | View::History { .. }) {
-            return;
-        }
-        transcript_export::copy_transcript_to_clipboard(&app.segments, cx);
-    });
-
-    let model_for_export = model.clone();
-    cx.on_action(move |_: &ExportTranscript, cx| {
-        let app = model_for_export.read(cx);
-        if !matches!(app.view, View::LiveSession | View::History { .. }) {
-            return;
-        }
-        let session = app.viewed_session.as_ref();
-        let text = transcript_export::format_transcript_markdown(session, &app.segments);
-        let name = suggested_export_name(session.map(|s| s.title.as_str()), "transcript");
-        // `app` (and thus its immutable borrow of `cx`) is no longer used
-        // after this point, so `export_transcript` can borrow `cx` mutably
-        // without cloning any segments or the session.
-        transcript_export::export_transcript(text, &name, cx);
-    });
+    install_transcript_actions(cx, model.clone());
 
     // Light/dark appearance. The title-bar button and the menu entries all go
     // through the same persisted preference, and rebuild the menu so the
@@ -157,6 +136,74 @@ pub fn configure(
         );
         async move {}
     });
+}
+
+/// Copy and export act on the transcript shown in the live or history view.
+/// Menu actions run without a window argument, so feedback goes to the
+/// frontmost window when one exists.
+fn install_transcript_actions(
+    cx: &mut App,
+    model: Entity<AppModel>,
+) {
+    let model_for_copy = model.clone();
+    cx.on_action(move |_: &CopyTranscript, cx| {
+        let copied = {
+            let app = model_for_copy.read(cx);
+            if !matches!(app.view, View::LiveSession | View::History { .. }) {
+                return;
+            }
+            transcript_export::copy_transcript_to_clipboard(&app.segments, cx)
+        };
+        push_notification(
+            cx,
+            if copied {
+                Notification::success("Transcript copied to the clipboard.")
+            } else {
+                Notification::error("There is no transcript to copy yet.")
+            },
+        );
+    });
+
+    cx.on_action(move |_: &ExportTranscript, cx| {
+        let (text, name) = {
+            let app = model.read(cx);
+            if !matches!(app.view, View::LiveSession | View::History { .. }) {
+                return;
+            }
+            let session = app.viewed_session.as_ref();
+            (
+                transcript_export::format_transcript_markdown(session, &app.segments),
+                suggested_export_name(session.map(|s| s.title.as_str()), "transcript"),
+            )
+        };
+        if text.is_empty() {
+            push_notification(
+                cx,
+                Notification::error("There is no transcript to export yet."),
+            );
+            return;
+        }
+        let started = transcript_export::export_transcript(text, &name, cx);
+        push_notification(
+            cx,
+            if started {
+                Notification::success("Choose where to save the Markdown file.")
+            } else {
+                Notification::error("The transcript could not be exported.")
+            },
+        );
+    });
+}
+
+/// Route menu feedback to the frontmost window. Menu actions run without a
+/// window argument, and the app may have no window open at all.
+fn push_notification(
+    cx: &mut App,
+    note: Notification,
+) {
+    if let Some(handle) = cx.active_window() {
+        let _ = handle.update(cx, |_, window, cx| window.push_notification(note, cx));
+    }
 }
 
 /// The recording menu item's label for the given session state: "Stop" while

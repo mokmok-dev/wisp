@@ -588,53 +588,7 @@ impl AppView {
             Permission::SpeechRecognition => permissions.speech,
         };
         let pending = permissions.pending == Some(permission);
-
-        let status_tag = if pending {
-            Tag::info()
-                .small()
-                .rounded_full()
-                .child(div().text_xs().child("Waiting…"))
-        } else {
-            match status {
-                PermissionStatus::Granted => Tag::success()
-                    .small()
-                    .rounded_full()
-                    .child(div().text_xs().child("Granted")),
-                PermissionStatus::Denied => Tag::danger()
-                    .small()
-                    .rounded_full()
-                    .child(div().text_xs().child("Denied")),
-                PermissionStatus::Restricted => Tag::warning()
-                    .small()
-                    .rounded_full()
-                    .child(div().text_xs().child("Restricted")),
-                PermissionStatus::Undetermined => Tag::secondary()
-                    .small()
-                    .rounded_full()
-                    .child(div().text_xs().child("Not requested")),
-            }
-        };
-
-        let action = match status {
-            PermissionStatus::Granted => None,
-            PermissionStatus::Denied | PermissionStatus::Restricted => Some(
-                Button::new(format!("open-settings-{}", permission_label(permission)))
-                    .secondary()
-                    .label("Open Settings")
-                    .on_click(move |_, _, _| {
-                        AppView::open_permission_settings(permission);
-                    }),
-            ),
-            PermissionStatus::Undetermined => Some(
-                Button::new(format!("grant-{}", permission_label(permission)))
-                    .primary()
-                    .loading(pending)
-                    .label("Grant")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.request_permission(permission, cx);
-                    })),
-            ),
-        };
+        let status_tag = permission_status_tag(status, pending);
 
         let row = h_flex()
             .gap_4()
@@ -674,7 +628,7 @@ impl AppView {
                     ),
             );
 
-        match action {
+        match permission_action(permission, status, pending, cx) {
             Some(action) => row.child(action).into_any_element(),
             None => row.into_any_element(),
         }
@@ -924,6 +878,55 @@ fn permission_label(permission: Permission) -> &'static str {
     match permission {
         Permission::Microphone => "microphone",
         Permission::SpeechRecognition => "speech",
+    }
+}
+
+fn permission_status_tag(
+    status: PermissionStatus,
+    pending: bool,
+) -> Tag {
+    if pending {
+        return Tag::info()
+            .small()
+            .rounded_full()
+            .child(div().text_xs().child("Waiting…"));
+    }
+    let (tag, label) = match status {
+        PermissionStatus::Granted => (Tag::success(), "Granted"),
+        PermissionStatus::Denied => (Tag::danger(), "Denied"),
+        PermissionStatus::Restricted => (Tag::warning(), "Restricted"),
+        PermissionStatus::Undetermined => (Tag::secondary(), "Not requested"),
+    };
+    tag.small()
+        .rounded_full()
+        .child(div().text_xs().child(label))
+}
+
+fn permission_action(
+    permission: Permission,
+    status: PermissionStatus,
+    pending: bool,
+    cx: &mut Context<AppView>,
+) -> Option<Button> {
+    match status {
+        PermissionStatus::Granted => None,
+        PermissionStatus::Denied | PermissionStatus::Restricted => Some(
+            Button::new(format!("open-settings-{}", permission_label(permission)))
+                .secondary()
+                .label("Open Settings")
+                .on_click(move |_, _, _| {
+                    AppView::open_permission_settings(permission);
+                }),
+        ),
+        PermissionStatus::Undetermined => Some(
+            Button::new(format!("grant-{}", permission_label(permission)))
+                .primary()
+                .loading(pending)
+                .label("Grant")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.request_permission(permission, cx);
+                })),
+        ),
     }
 }
 

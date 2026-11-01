@@ -18,7 +18,6 @@ use gpui_kit::component::{
 use crate::app::SessionState;
 use crate::app_view::{self, AppView};
 
-#[allow(clippy::too_many_lines)] // one declarative screen tree
 pub(crate) fn render(
     view: &AppView,
     cx: &mut Context<AppView>,
@@ -26,96 +25,10 @@ pub(crate) fn render(
     let app = view.model.read(cx);
     let phase = app.state;
     let active = matches!(phase, SessionState::Recording { .. });
-    let busy = matches!(phase, SessionState::Starting | SessionState::Stopping);
     let pending = app.has_pending_persistence();
-    let failed = matches!(phase, SessionState::Failed);
-    let can_start = matches!(phase, SessionState::Idle) && !pending;
     let muted = app.microphone_muted;
     let elapsed = app_view::elapsed_clock(phase);
     let title_editable = matches!(phase, SessionState::Idle | SessionState::Recording { .. });
-
-    let phase_label = if pending {
-        "Unsaved".to_string()
-    } else {
-        match phase {
-            SessionState::Idle => "Ready",
-            SessionState::Starting => "Starting…",
-            SessionState::Recording { .. } => "Recording",
-            SessionState::Stopping => "Finishing…",
-            SessionState::Failed => "Failed",
-        }
-        .to_string()
-    };
-
-    let phase_tag = if pending || failed || active {
-        Tag::danger()
-            .small()
-            .rounded_full()
-            .child(div().text_xs().child(phase_label))
-    } else if busy {
-        Tag::info()
-            .small()
-            .rounded_full()
-            .child(div().text_xs().child(phase_label))
-    } else {
-        Tag::secondary()
-            .small()
-            .rounded_full()
-            .child(div().text_xs().child(phase_label))
-    };
-
-    let record_label = if failed {
-        "Retry"
-    } else if active {
-        "Stop"
-    } else if busy {
-        "…"
-    } else {
-        "Record"
-    };
-    let record_icon = if failed {
-        AppIcon::RefreshCw
-    } else if active {
-        AppIcon::Square
-    } else {
-        AppIcon::Mic
-    };
-    let record_button = if active {
-        Button::new("live-record")
-            .secondary()
-            .icon(record_icon)
-            .label(record_label)
-            .loading(busy)
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_record(cx)))
-    } else {
-        Button::new("live-record")
-            .primary()
-            .icon(record_icon)
-            .label(record_label)
-            .loading(busy)
-            .tooltip(if can_start || failed {
-                "Start recording (⌘R)"
-            } else {
-                "Recording controls (⌘R)"
-            })
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_record(cx)))
-    };
-
-    let mute_button = if muted {
-        Button::new("live-mute")
-            .primary()
-            .icon(AppIcon::Mic)
-            .label("Unmute")
-            .tooltip("Unmute microphone")
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx)))
-    } else {
-        Button::new("live-mute")
-            .secondary()
-            .icon(AppIcon::Mic)
-            .label("Mute")
-            .tooltip("Mute microphone")
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx)))
-    };
 
     let transcript = app_view::render_transcript(view, true, cx);
     let title_input = Input::new(&view.live_title_input).disabled(!title_editable);
@@ -142,15 +55,15 @@ pub(crate) fn render(
                         .when(active, |this| {
                             this.child(div().size(px(8.0)).rounded_full().bg(cx.theme().danger))
                         })
-                        .child(phase_tag)
+                        .child(phase_tag(phase, pending))
                         .child(
                             div()
                                 .text_lg()
                                 .font_family(cx.theme().mono_font_family.clone())
                                 .child(elapsed),
                         )
-                        .child(record_button)
-                        .when(active, |this| this.child(mute_button)),
+                        .child(record_button(phase, pending, cx))
+                        .when(active, |this| this.child(mute_button(muted, cx))),
                 ),
         )
         .child(app_view::screen_body().child(transcript))
@@ -160,4 +73,95 @@ pub(crate) fn render(
                 .child("⌘R to start / stop"),
         )
         .into_any_element()
+}
+
+fn phase_label(
+    phase: SessionState,
+    pending: bool,
+) -> String {
+    if pending {
+        return "Unsaved".to_string();
+    }
+    match phase {
+        SessionState::Idle => "Ready",
+        SessionState::Starting => "Starting…",
+        SessionState::Recording { .. } => "Recording",
+        SessionState::Stopping => "Finishing…",
+        SessionState::Failed => "Failed",
+    }
+    .to_string()
+}
+
+fn phase_tag(
+    phase: SessionState,
+    pending: bool,
+) -> Tag {
+    let label = phase_label(phase, pending);
+    let tag = if pending || matches!(phase, SessionState::Recording { .. } | SessionState::Failed) {
+        Tag::danger()
+    } else if matches!(phase, SessionState::Starting | SessionState::Stopping) {
+        Tag::info()
+    } else {
+        Tag::secondary()
+    };
+    tag.small()
+        .rounded_full()
+        .child(div().text_xs().child(label))
+}
+
+fn record_control(phase: SessionState) -> (&'static str, AppIcon) {
+    match phase {
+        SessionState::Failed => ("Retry", AppIcon::RefreshCw),
+        SessionState::Recording { .. } => ("Stop", AppIcon::Square),
+        SessionState::Starting | SessionState::Stopping => ("…", AppIcon::Mic),
+        SessionState::Idle => ("Record", AppIcon::Mic),
+    }
+}
+
+fn record_button(
+    phase: SessionState,
+    pending: bool,
+    cx: &mut Context<AppView>,
+) -> Button {
+    let (label, icon) = record_control(phase);
+    let active = matches!(phase, SessionState::Recording { .. });
+    let busy = matches!(phase, SessionState::Starting | SessionState::Stopping);
+    let can_start = matches!(phase, SessionState::Idle) && !pending;
+    let failed = matches!(phase, SessionState::Failed);
+    let button = if active {
+        Button::new("live-record").secondary()
+    } else {
+        Button::new("live-record")
+            .primary()
+            .tooltip(if can_start || failed {
+                "Start recording (⌘R)"
+            } else {
+                "Recording controls (⌘R)"
+            })
+    };
+    button
+        .icon(icon)
+        .label(label)
+        .loading(busy)
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_record(cx)))
+}
+
+fn mute_button(
+    muted: bool,
+    cx: &mut Context<AppView>,
+) -> Button {
+    let button = if muted {
+        Button::new("live-mute")
+            .primary()
+            .label("Unmute")
+            .tooltip("Unmute microphone")
+    } else {
+        Button::new("live-mute")
+            .secondary()
+            .label("Mute")
+            .tooltip("Mute microphone")
+    };
+    button
+        .icon(AppIcon::Mic)
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx)))
 }

@@ -31,9 +31,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use gpui::{App, AppContext as _, AsyncApp, Bounds, Entity, WindowBounds, WindowOptions, px, size};
-use wisp_audiokit::SessionError;
+use wisp_audiokit::{SessionConfig, SessionError};
 use wisp_core::SessionId;
 use wisp_storage::Storage;
 
@@ -52,7 +52,7 @@ mod settings;
 mod transcript_export;
 mod transcript_view;
 
-use app::{AppError, AppModel, PendingSessionWrite, SessionState};
+use app::{AppError, AppModel, PendingSessionWrite, SessionState, View};
 use app_menu::configure as configure_app_menu;
 use app_view::{AppDeps, AppView};
 use library::SharedStorage;
@@ -195,7 +195,6 @@ fn spawn_permission_refresh(
     .detach();
 }
 
-#[allow(clippy::too_many_lines)] // start/stop state machine, kept linear for clarity
 pub(crate) fn toggle_recording(
     runner: &SessionRunner,
     model: &gpui::Entity<AppModel>,
@@ -224,78 +223,16 @@ pub(crate) fn toggle_recording(
     }
     match state {
         SessionState::Idle | SessionState::Failed => {
-            if !setup_complete {
-                return;
-            }
-            // Per-session subdirectory so each recording's Ogg files stay
-            // grouped and we can show them as a single library row.
-            let started_at = Utc::now();
-            let dir_name = library::session_dir_name(started_at);
-            let session_dir = recordings_dir.join(&dir_name);
-            let title = {
-                let trimmed = live_title.trim();
-                if trimmed.is_empty() {
-                    library::default_title(started_at)
-                } else {
-                    trimmed.to_owned()
-                }
-            };
-            let session_id =
-                match storage
-                    .lock()
-                    .map_err(|error| error.to_string())
-                    .and_then(|store| {
-                        library::create_session(&store, started_at, &dir_name, &title)
-                            .map_err(|error| error.to_string())
-                    }) {
-                    Ok(session_id) => session_id,
-                    Err(error) => {
-                        model.update(cx, |m, cx| {
-                            m.begin_session();
-                            m.fail(AppError::Persistence(format!(
-                                "could not create the session record: {error}"
-                            )));
-                            cx.notify();
-                        });
-                        return;
-                    },
-                };
-            let did_begin = model.update(cx, |m, cx| {
-                let did_begin = m.begin_session_start();
-                if did_begin {
-                    m.current_session_id = Some(session_id);
-                    m.linked_session_id = Some(session_id);
-                    m.current_session_started_at = Some(started_at);
-                    m.current_session_dir_name = Some(dir_name.clone());
-                    m.current_output_dir = Some(session_dir.clone());
-                    m.live_title = title;
-                    cx.notify();
-                }
-                did_begin
-            });
-            if !did_begin {
-                if let Ok(store) = storage.lock() {
-                    let _ = store.sessions().delete(session_id);
-                }
-                return;
-            }
-            let session = SessionStart {
-                session_id,
-                started_at,
-                dir_name,
-            };
-            if !runner.start(session_dir, config, session) {
-                model.update(cx, |m, cx| {
-                    if m.current_session_id == Some(session_id) {
-                        m.pending_session_write = Some(PendingSessionWrite::Delete);
-                        if session_updates::retry_pending_persistence(m, storage) {
-                            m.fail(SessionError::Start(
-                                "session runner is no longer available".into(),
-                            ));
-                        }
-                        cx.notify();
-                    }
-                });
+            if setup_complete {
+                start_recording(
+                    runner,
+                    model,
+                    storage,
+                    recordings_dir,
+                    config,
+                    &live_title,
+                    cx,
+                );
             }
         },
         SessionState::Recording { .. } => {
@@ -309,6 +246,109 @@ pub(crate) fn toggle_recording(
             // ignore taps while a transition is in flight
         },
     }
+}
+
+fn start_recording(
+    runner: &SessionRunner,
+    model: &gpui::Entity<AppModel>,
+    storage: &SharedStorage,
+    recordings_dir: &std::path::Path,
+    config: SessionConfig,
+    live_title: &str,
+    cx: &mut gpui::App,
+) {
+    // Per-session subdirectory so each recording's Ogg files stay
+    // grouped and we can show them as a single library row.
+    let started_at = Utc::now();
+    let dir_name = library::session_dir_name(started_at);
+    let session_dir = recordings_dir.join(&dir_name);
+    let title = session_title(live_title, started_at);
+    let session_id = match create_session_row(storage, started_at, &dir_name, &title) {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            model.update(cx, |m, cx| {
+                m.begin_session();
+                m.fail(AppError::Persistence(format!(
+                    "could not create the session record: {error}"
+                )));
+                cx.notify();
+            });
+            return;
+        },
+    };
+    let did_begin = model.update(cx, |m, cx| {
+        let did_begin = m.begin_session_start();
+        if did_begin {
+            m.current_session_id = Some(session_id);
+            m.linked_session_id = Some(session_id);
+            m.current_session_started_at = Some(started_at);
+            m.current_session_dir_name = Some(dir_name.clone());
+            m.current_output_dir = Some(session_dir.clone());
+            m.live_title = title;
+            cx.notify();
+        }
+        did_begin
+    });
+    if !did_begin {
+        if let Ok(store) = storage.lock() {
+            let _ = store.sessions().delete(session_id);
+        }
+        return;
+    }
+    let session = SessionStart {
+        session_id,
+        started_at,
+        dir_name,
+    };
+    if !runner.start(session_dir, config, session) {
+        abandon_unstarted_recording(model, storage, session_id, cx);
+    }
+}
+
+fn session_title(
+    live_title: &str,
+    started_at: DateTime<Utc>,
+) -> String {
+    let trimmed = live_title.trim();
+    if trimmed.is_empty() {
+        library::default_title(started_at)
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn create_session_row(
+    storage: &SharedStorage,
+    started_at: DateTime<Utc>,
+    dir_name: &str,
+    title: &str,
+) -> Result<SessionId, String> {
+    storage
+        .lock()
+        .map_err(|error| error.to_string())
+        .and_then(|store| {
+            library::create_session(&store, started_at, dir_name, title)
+                .map_err(|error| error.to_string())
+        })
+}
+
+fn abandon_unstarted_recording(
+    model: &gpui::Entity<AppModel>,
+    storage: &SharedStorage,
+    session_id: SessionId,
+    cx: &mut gpui::App,
+) {
+    model.update(cx, |m, cx| {
+        if m.current_session_id == Some(session_id) {
+            m.pending_session_write = Some(PendingSessionWrite::Delete);
+            if session_updates::retry_pending_persistence(m, storage) {
+                m.fail(SessionError::Start(
+                    "session runner is no longer available".into(),
+                ));
+            }
+            cx.notify();
+        }
+    });
 }
 
 pub(crate) fn open_history(
@@ -336,6 +376,7 @@ pub(crate) fn refresh_library(
     model: &Entity<AppModel>,
     cx: &mut App,
 ) {
+    let query = model.read(cx).library_query.clone();
     let Ok(store) = storage.lock() else {
         return;
     };
@@ -347,6 +388,132 @@ pub(crate) fn refresh_library(
         m.set_library(list);
         cx.notify();
     });
+    if !query.trim().is_empty() {
+        search_library(storage, model, &query, cx);
+    }
+}
+
+/// Run a transcript search and replace the library filter.
+///
+/// The query is stored verbatim so the field and the filter agree. Only the
+/// storage call sees the trimmed form.
+pub(crate) fn search_library(
+    storage: &SharedStorage,
+    model: &Entity<AppModel>,
+    query: &str,
+    cx: &mut App,
+) {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        model.update(cx, |m, cx| {
+            m.set_library_search(query.to_string(), None);
+            cx.notify();
+        });
+        return;
+    }
+
+    let mut hits = Vec::new();
+    let mut failure = None;
+    if let Ok(store) = storage.lock() {
+        match store.segments().search_text(trimmed, 200) {
+            Ok(segments) => {
+                for segment in segments {
+                    if !hits.contains(&segment.session_id) {
+                        hits.push(segment.session_id);
+                    }
+                }
+            },
+            Err(source) => failure = Some(source.to_string()),
+        }
+    }
+    model.update(cx, |m, cx| {
+        m.set_library_search(query.to_string(), Some(hits));
+        if let Some(failure) = failure {
+            m.last_error = Some(AppError::Persistence(format!(
+                "transcript search failed: {failure}"
+            )));
+        }
+        cx.notify();
+    });
+}
+
+/// Delete a saved session and its recording directory.
+///
+/// The database row goes first. A file-removal failure leaves an orphaned
+/// directory, which costs disk but cannot leave a library row pointing at
+/// missing audio.
+pub(crate) fn delete_session(
+    storage: &SharedStorage,
+    recordings_dir: &std::path::Path,
+    model: &Entity<AppModel>,
+    session_id: SessionId,
+    cx: &mut App,
+) {
+    let Ok(store) = storage.lock() else {
+        model.update(cx, |m, cx| {
+            m.cancel_delete();
+            m.last_error = Some(AppError::Persistence(
+                "storage is unavailable; the session was not deleted".into(),
+            ));
+            cx.notify();
+        });
+        return;
+    };
+    let session = match store.sessions().get(session_id) {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            drop(store);
+            refresh_library(storage, model, cx);
+            model.update(cx, |m, cx| {
+                m.cancel_delete();
+                cx.notify();
+            });
+            return;
+        },
+        Err(source) => {
+            drop(store);
+            model.update(cx, |m, cx| {
+                m.cancel_delete();
+                m.last_error = Some(AppError::Persistence(format!(
+                    "could not read the session before deleting it: {source}"
+                )));
+                cx.notify();
+            });
+            return;
+        },
+    };
+    let storage_root = store.root().to_path_buf();
+    let delete_result = store.sessions().delete(session_id);
+    drop(store);
+
+    match delete_result {
+        Ok(()) => {
+            let file_error =
+                library::remove_session_recordings(&storage_root, recordings_dir, &session).err();
+            refresh_library(storage, model, cx);
+            model.update(cx, |m, cx| {
+                if m.view == (View::History { session_id }) {
+                    m.show_library();
+                }
+                m.cancel_delete();
+                if let Some(error) = file_error {
+                    m.last_error = Some(AppError::Persistence(format!(
+                        "session deleted, but its recordings could not be removed: {error}"
+                    )));
+                }
+                cx.notify();
+            });
+        },
+        Err(source) => {
+            model.update(cx, |m, cx| {
+                m.cancel_delete();
+                m.last_error = Some(AppError::Persistence(format!(
+                    "could not delete the session: {source}"
+                )));
+                cx.notify();
+            });
+        },
+    }
 }
 
 /// Track the live-session title as it is edited in the recording top bar.

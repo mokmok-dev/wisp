@@ -28,6 +28,47 @@
         let
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
+          # cccc is built with the workspace toolchain rather than nixpkgs'
+          # Rust: its own manifest requires Rust 1.95 and this keeps the binary
+          # reproducible against the version the rest of the repo pins.
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
+          };
+
+          cccc = rustPlatform.buildRustPackage rec {
+            pname = "cccc";
+            version = "1.8.5";
+
+            src = pkgs.fetchFromGitHub {
+              owner = "moznion";
+              repo = "cccc";
+              tag = "v${version}";
+              hash = "sha256-8QfPfyg7Y05wbiWnLyGLpDe4F1SkvTJuZPLn+5ZQIpw=";
+            };
+
+            # The Kotlin adapter pulls its grammar from a git dependency, which
+            # crates.io cannot publish and this repo does not analyze.
+            cargoBuildFlags = [ "--no-default-features" ];
+            cargoHash = "sha256-iWzC0LORv4uxacv8DrMlVB8XUK4cktrazoAv+IQYwGg=";
+
+            # cccc's Ruby adapter runs bindgen over Ruby's vendored Prism C
+            # source.
+            nativeBuildInputs = [ pkgs.libclang ];
+            LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
+
+            # Upstream's cache tests shell out to git inside a work tree; the
+            # build sandbox provides neither.
+            doCheck = false;
+
+            meta = {
+              description = "Cognitive and cyclomatic complexity measurement";
+              homepage = "https://github.com/moznion/cccc";
+              license = pkgs.lib.licenses.mit;
+              mainProgram = "cccc";
+            };
+          };
+
           darwinToolchainHook = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
             if [ -d /Applications/Xcode.app/Contents/Developer ]; then
               export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
@@ -53,6 +94,21 @@
           # so those stay on `nix develop` (see the `rust` job and release
           # workflow).
 
+          packages = {
+            inherit cccc;
+          };
+
+          checks.complexity =
+            pkgs.runCommandLocal "cccc-complexity"
+              {
+                nativeBuildInputs = [ cccc ];
+              }
+              ''
+                cd ${./.}
+                cccc --no-cache --table .
+                touch "$out"
+              '';
+
           devShells = {
             default = pkgs.mkShellNoCC {
               inputsFrom = [ config.pre-commit.devShell ];
@@ -62,8 +118,12 @@
                 # .cargo/mutants.toml). The `mutants` CI job runs this
                 # straight from the dev shell.
                 cargo-mutants
+                cccc
                 rustToolchain
                 sccache
+                # A host SwiftFormat on the macOS runner shadows the flake's
+                # 0.62.1 in PATH, so the lint applies a newer rule set.
+                swiftformat
               ];
 
               shellHook = ''

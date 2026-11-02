@@ -1,6 +1,6 @@
 # Pin clippy's MSRV to the toolchain channel so version-gated lints (e.g.
 # `missing_const_for_fn`) behave deterministically across machines.
-msrv = "1.97.1"
+msrv = "1.99.1"
 
 # Allow the panicking shortcuts inside tests only; production code is held to
 # the stricter `deny` levels configured in the workspace lints table.

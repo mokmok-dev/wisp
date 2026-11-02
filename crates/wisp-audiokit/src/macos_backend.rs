@@ -792,6 +792,11 @@ enum MacosLifecycle {
     Stopped,
 }
 
+enum PumpStep {
+    Done(Option<Event>),
+    Again,
+}
+
 enum MacosProviderKind {
     SpeechAnalyzer,
 }
@@ -1091,7 +1096,6 @@ impl MacosSession {
 
     /// Poll for a compatibility event through [`SessionOrchestrator`].
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn recv_timeout(
         &mut self,
         timeout: Duration,
@@ -1099,7 +1103,7 @@ impl MacosSession {
         if let Some(event) = self.startup_events.pop_front() {
             return Some(event);
         }
-        if let Some(event) = lock_shared(&self.shared).compatibility_events.pop_front() {
+        if let Some(event) = self.take_compatibility_event() {
             return Some(event);
         }
         if matches!(
@@ -1114,122 +1118,149 @@ impl MacosSession {
         loop {
             let remaining = timeout.saturating_sub(started_at.elapsed());
             if !first_poll && remaining.is_zero() {
-                return lock_shared(&self.shared).compatibility_events.pop_front();
+                return self.take_compatibility_event();
             }
             first_poll = false;
-            match self.orchestrator.pump_once(remaining) {
-                Ok(Some(OrchestratorEvent::Capture(CaptureEvent::Samples(_)))) => {},
-                Ok(Some(OrchestratorEvent::Capture(event))) => {
-                    let terminal = matches!(
-                        event,
-                        CaptureEvent::Error {
-                            recoverable: false,
-                            ..
-                        }
-                    );
-                    let output = capture_event_to_compat(event);
-                    if terminal {
-                        let _ = self.shutdown_abort_bounded();
-                        self.runtime_failure = Some(SessionError::Start(match &output {
-                            Event::Log(message) => message.clone(),
-                            Event::Result(_) => "macOS capture failed".into(),
-                        }));
-                    }
-                    return Some(output);
-                },
-                Ok(Some(OrchestratorEvent::Transcript(event))) => {
-                    // The exact Swift callback is the compatibility facade's
-                    // authoritative event. The correlated neutral transcript
-                    // has already passed through the orchestrator and must not
-                    // be remapped into a duplicate result.
-                    if let Some(compatibility) =
-                        lock_shared(&self.shared).compatibility_events.pop_front()
-                    {
-                        return Some(compatibility);
-                    }
-                    if !matches!(
-                        lock_shared(&self.shared).bridge_transcription,
-                        BridgeTranscription::Enabled
-                    ) {
-                        return Some(transcript_event_to_compat(&event));
-                    }
-                },
-                Ok(None) => {
-                    return lock_shared(&self.shared).compatibility_events.pop_front();
-                },
-                Err(error)
-                    if self.lifecycle == MacosLifecycle::Stopped
-                        && error.kind == BackendErrorKind::InvalidState =>
-                {
-                    return None;
-                },
-                Err(error) if error.backend == BackendId::new(TRANSCRIBER_BACKEND_ID) => {
-                    let failed_backend = error.backend.clone();
-                    let speech_permission = { lock_shared(&self.shared).speech_permission };
-                    let candidates = vec![macos_transcriber_probe(speech_permission)];
-                    let selection = crate::select_transcriber_after_failure(
-                        self.policy,
-                        &candidates,
-                        &failed_backend,
-                    );
-                    match selection {
-                        TranscriptionSelection::RecordOnly { reason } => {
-                            if let Err(disable_error) = self.orchestrator.disable_transcriber() {
-                                let _ = self.shutdown_abort_bounded();
-                                let message = format!(
-                                    "[FATAL] could not enter record-only mode after {error}: {disable_error}"
-                                );
-                                self.runtime_failure = Some(SessionError::Start(message.clone()));
-                                return Some(Event::Log(message));
-                            }
-                            let mut state = lock_shared(&self.shared);
-                            state.bridge_transcription = BridgeTranscription::Disabled;
-                            state.transcriber_started = false;
-                            state.transcript_events.clear();
-                            self.record_only = true;
-                            return Some(Event::Log(format!(
-                                "[ASR] {error}; continuing record-only ({reason})"
-                            )));
-                        },
-                        TranscriptionSelection::Unavailable { reason } => {
-                            let cleanup_error = self.shutdown_gracefully_bounded().err();
-                            let mut message =
-                                format!("[FATAL] transcription failed: {error}; {reason}");
-                            if let Some(cleanup_error) = cleanup_error {
-                                use std::fmt::Write as _;
-                                let _ = write!(
-                                    message,
-                                    "; graceful cleanup remains incomplete: {cleanup_error}"
-                                );
-                            }
-                            self.runtime_failure = Some(SessionError::Start(message.clone()));
-                            return Some(Event::Log(message));
-                        },
-                        TranscriptionSelection::Backend(backend) => {
-                            let cleanup_error = self.shutdown_gracefully_bounded().err();
-                            let mut message = format!(
-                                "[FATAL] runtime fallback backend is not connected: {backend}"
-                            );
-                            if let Some(cleanup_error) = cleanup_error {
-                                use std::fmt::Write as _;
-                                let _ = write!(
-                                    message,
-                                    "; graceful cleanup remains incomplete: {cleanup_error}"
-                                );
-                            }
-                            self.runtime_failure = Some(SessionError::Start(message.clone()));
-                            return Some(Event::Log(message));
-                        },
-                    }
-                },
-                Err(error) => {
-                    let _ = self.shutdown_abort_bounded();
-                    let message = format!("[FATAL] backend error: {error}");
-                    self.runtime_failure = Some(SessionError::Start(message.clone()));
-                    return Some(Event::Log(message));
-                },
+            match self.pump_step(remaining) {
+                PumpStep::Done(event) => return event,
+                PumpStep::Again => {},
             }
         }
+    }
+
+    fn take_compatibility_event(&self) -> Option<Event> {
+        lock_shared(&self.shared).compatibility_events.pop_front()
+    }
+
+    fn pump_step(
+        &mut self,
+        remaining: Duration,
+    ) -> PumpStep {
+        match self.orchestrator.pump_once(remaining) {
+            Ok(Some(OrchestratorEvent::Capture(CaptureEvent::Samples(_)))) => PumpStep::Again,
+            Ok(Some(OrchestratorEvent::Capture(event))) => {
+                PumpStep::Done(Some(self.route_capture_event(event)))
+            },
+            Ok(Some(OrchestratorEvent::Transcript(event))) => self.route_transcript_event(&event),
+            Ok(None) => PumpStep::Done(self.take_compatibility_event()),
+            Err(error) => PumpStep::Done(self.handle_pump_error(&error)),
+        }
+    }
+
+    fn route_capture_event(
+        &mut self,
+        event: CaptureEvent,
+    ) -> Event {
+        let terminal = matches!(
+            event,
+            CaptureEvent::Error {
+                recoverable: false,
+                ..
+            }
+        );
+        let output = capture_event_to_compat(event);
+        if terminal {
+            let _ = self.shutdown_abort_bounded();
+            self.runtime_failure = Some(SessionError::Start(match &output {
+                Event::Log(message) => message.clone(),
+                Event::Result(_) => "macOS capture failed".into(),
+            }));
+        }
+        output
+    }
+
+    fn route_transcript_event(
+        &mut self,
+        event: &TranscriptEvent,
+    ) -> PumpStep {
+        // The exact Swift callback is the compatibility facade's
+        // authoritative event. The correlated neutral transcript
+        // has already passed through the orchestrator and must not
+        // be remapped into a duplicate result.
+        if let Some(compatibility) = self.take_compatibility_event() {
+            return PumpStep::Done(Some(compatibility));
+        }
+        if !matches!(
+            lock_shared(&self.shared).bridge_transcription,
+            BridgeTranscription::Enabled
+        ) {
+            return PumpStep::Done(Some(transcript_event_to_compat(event)));
+        }
+        PumpStep::Again
+    }
+
+    fn handle_pump_error(
+        &mut self,
+        error: &BackendError,
+    ) -> Option<Event> {
+        if self.lifecycle == MacosLifecycle::Stopped && error.kind == BackendErrorKind::InvalidState
+        {
+            return None;
+        }
+        if error.backend == BackendId::new(TRANSCRIBER_BACKEND_ID) {
+            return Some(self.handle_transcriber_error(error));
+        }
+        let _ = self.shutdown_abort_bounded();
+        let message = format!("[FATAL] backend error: {error}");
+        self.runtime_failure = Some(SessionError::Start(message.clone()));
+        Some(Event::Log(message))
+    }
+
+    fn handle_transcriber_error(
+        &mut self,
+        error: &BackendError,
+    ) -> Event {
+        let failed_backend = error.backend.clone();
+        let speech_permission = { lock_shared(&self.shared).speech_permission };
+        let candidates = vec![macos_transcriber_probe(speech_permission)];
+        let selection =
+            crate::select_transcriber_after_failure(self.policy, &candidates, &failed_backend);
+        match selection {
+            TranscriptionSelection::RecordOnly { reason } => self.enter_record_only(error, &reason),
+            TranscriptionSelection::Unavailable { reason } => {
+                self.fail_transcription(format!("[FATAL] transcription failed: {error}; {reason}"))
+            },
+            TranscriptionSelection::Backend(backend) => self.fail_transcription(format!(
+                "[FATAL] runtime fallback backend is not connected: {backend}"
+            )),
+        }
+    }
+
+    fn enter_record_only(
+        &mut self,
+        error: &BackendError,
+        reason: &str,
+    ) -> Event {
+        if let Err(disable_error) = self.orchestrator.disable_transcriber() {
+            let _ = self.shutdown_abort_bounded();
+            let message =
+                format!("[FATAL] could not enter record-only mode after {error}: {disable_error}");
+            self.runtime_failure = Some(SessionError::Start(message.clone()));
+            return Event::Log(message);
+        }
+        let mut state = lock_shared(&self.shared);
+        state.bridge_transcription = BridgeTranscription::Disabled;
+        state.transcriber_started = false;
+        state.transcript_events.clear();
+        self.record_only = true;
+        Event::Log(format!("[ASR] {error}; continuing record-only ({reason})"))
+    }
+
+    fn fail_transcription(
+        &mut self,
+        reason: String,
+    ) -> Event {
+        let cleanup_error = self.shutdown_gracefully_bounded().err();
+        let mut message = reason;
+        if let Some(cleanup_error) = cleanup_error {
+            use std::fmt::Write as _;
+            let _ = write!(
+                message,
+                "; graceful cleanup remains incomplete: {cleanup_error}"
+            );
+        }
+        self.runtime_failure = Some(SessionError::Start(message.clone()));
+        Event::Log(message)
     }
 }
 

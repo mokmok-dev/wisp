@@ -207,43 +207,62 @@ fn run_session(
     update_tx: &Sender<Update>,
 ) {
     let session_id = session_start.session_id;
-    let mut session = match PlatformSession::new_with_config(output_dir, config) {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = update_tx.send(Update::Error {
-                session_id,
-                error: e,
-            });
-            return;
-        },
+    let Some(mut session) = open_session(output_dir, config, session_id, update_tx) else {
+        return;
     };
-    if let Err(e) = session.start() {
-        let mut preserve_partial = session.has_started_capture();
-        session.stop();
-        while let Some(event) = session.try_recv() {
-            preserve_partial |= is_transcript_result(&event);
-            let _ = update_tx.send(Update::Event { session_id, event });
-        }
-        let update = if preserve_partial {
-            Update::StartFailed {
-                session_id,
-                error: e,
-            }
-        } else {
-            Update::Error {
-                session_id,
-                error: e,
-            }
-        };
-        let _ = update_tx.send(update);
+    if let Err(error) = session.start() {
+        publish_start_failure(&mut session, session_id, error, update_tx);
         return;
     }
     let _ = update_tx.send(Update::Started(session_start));
+    pump_events(&mut session, session_id, cmd_rx, update_tx);
+}
 
-    // Pump events until the UI asks to stop. Between events we wake at
-    // most every `CMD_POLL_INTERVAL` to check the command channel so a
-    // Stop request doesn't have to wait for the next audio event; when
-    // events are arriving we forward them immediately without polling.
+fn open_session(
+    output_dir: &std::path::Path,
+    config: SessionConfig,
+    session_id: SessionId,
+    update_tx: &Sender<Update>,
+) -> Option<PlatformSession> {
+    match PlatformSession::new_with_config(output_dir, config) {
+        Ok(session) => Some(session),
+        Err(error) => {
+            let _ = update_tx.send(Update::Error { session_id, error });
+            None
+        },
+    }
+}
+
+fn publish_start_failure(
+    session: &mut PlatformSession,
+    session_id: SessionId,
+    error: SessionError,
+    update_tx: &Sender<Update>,
+) {
+    let mut preserve_partial = session.has_started_capture();
+    session.stop();
+    while let Some(event) = session.try_recv() {
+        preserve_partial |= is_transcript_result(&event);
+        let _ = update_tx.send(Update::Event { session_id, event });
+    }
+    let update = if preserve_partial {
+        Update::StartFailed { session_id, error }
+    } else {
+        Update::Error { session_id, error }
+    };
+    let _ = update_tx.send(update);
+}
+
+// Pump events until the UI asks to stop. Between events we wake at
+// most every `CMD_POLL_INTERVAL` to check the command channel so a
+// Stop request doesn't have to wait for the next audio event; when
+// events are arriving we forward them immediately without polling.
+fn pump_events(
+    session: &mut PlatformSession,
+    session_id: SessionId,
+    cmd_rx: &Receiver<Command>,
+    update_tx: &Sender<Update>,
+) {
     loop {
         match cmd_rx.try_recv() {
             Ok(Command::Stop) => break,
@@ -251,7 +270,7 @@ fn run_session(
                 session.set_microphone_muted(muted);
             },
             Ok(Command::Shutdown) | Err(TryRecvError::Disconnected) => {
-                stop_and_publish(&mut session, session_id, update_tx);
+                stop_and_publish(session, session_id, update_tx);
                 return;
             },
             Ok(Command::Start { .. }) | Err(TryRecvError::Empty) => {},
@@ -276,7 +295,7 @@ fn run_session(
         }
     }
 
-    stop_and_publish(&mut session, session_id, update_tx);
+    stop_and_publish(session, session_id, update_tx);
 }
 
 fn stop_and_publish(

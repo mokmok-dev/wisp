@@ -11,12 +11,13 @@
 //! none of them touch the GPUI context, so they're safe to call from
 //! background tasks.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use wisp_audiokit::SourceLabel;
-use wisp_core::{NewSegment, NewSession, SessionId};
+use wisp_core::{NewSegment, NewSession, Session, SessionId};
 use wisp_storage::{Storage, StorageError};
 
 use crate::app::{Segment as UiSegment, break_on_sentence_end};
@@ -149,6 +150,40 @@ pub fn load_history(
 /// `Mutex` is enough; we don't need a connection pool.
 pub type SharedStorage = Arc<Mutex<Storage>>;
 
+/// Remove one session's recording directory.
+///
+/// The path comes from the database, so the caller cannot assume it still
+/// points inside the recordings root. Both tracks must resolve to the same
+/// directory, and that directory must sit below `recordings_root` after
+/// canonicalisation. A missing directory is reported as `Ok(false)` because
+/// the database row can still be deleted safely.
+pub fn remove_session_recordings(
+    storage_root: &Path,
+    recordings_root: &Path,
+    session: &Session,
+) -> std::io::Result<bool> {
+    let Some(relative_dir) = Path::new(&session.mic_wav_path).parent() else {
+        return Ok(false);
+    };
+    if Path::new(&session.system_wav_path).parent() != Some(relative_dir) {
+        return Ok(false);
+    }
+    let Ok(canonical_root) = recordings_root.canonicalize() else {
+        return Ok(false);
+    };
+    let candidate = storage_root.join(relative_dir);
+    let canonical_dir = match candidate.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if canonical_dir == canonical_root || !canonical_dir.starts_with(&canonical_root) {
+        return Ok(false);
+    }
+    std::fs::remove_dir_all(canonical_dir)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -194,6 +229,65 @@ mod tests {
             .expect("valid timestamp");
 
         assert_ne!(session_dir_name(started_at), session_dir_name(started_at));
+    }
+
+    #[test]
+    fn removes_only_the_session_directory_below_the_recordings_root() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let storage_root = dir.path();
+        let recordings_root = storage_root.join("recordings");
+        let session_dir = recordings_root.join("2026-07-15T043000Z-abc");
+        std::fs::create_dir_all(&session_dir).expect("session dir");
+        std::fs::write(session_dir.join("mic.ogg"), b"audio").expect("mic file");
+
+        let session = Session {
+            id: SessionId::from(1),
+            started_at: Utc
+                .with_ymd_and_hms(2026, 7, 15, 4, 30, 0)
+                .single()
+                .expect("valid timestamp"),
+            ended_at: None,
+            title: "Test".into(),
+            mic_wav_path: "recordings/2026-07-15T043000Z-abc/mic.ogg".into(),
+            system_wav_path: "recordings/2026-07-15T043000Z-abc/system.ogg".into(),
+            notes: String::new(),
+        };
+
+        assert!(
+            remove_session_recordings(storage_root, &recordings_root, &session)
+                .expect("remove session recordings")
+        );
+        assert!(!session_dir.exists());
+    }
+
+    #[test]
+    fn refuses_a_recording_path_outside_the_recordings_root() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let storage_root = dir.path();
+        let recordings_root = storage_root.join("recordings");
+        std::fs::create_dir_all(&recordings_root).expect("recordings dir");
+        let outside = storage_root.join("elsewhere");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        std::fs::write(outside.join("mic.ogg"), b"audio").expect("mic file");
+
+        let session = Session {
+            id: SessionId::from(2),
+            started_at: Utc
+                .with_ymd_and_hms(2026, 7, 15, 4, 30, 0)
+                .single()
+                .expect("valid timestamp"),
+            ended_at: None,
+            title: "Test".into(),
+            mic_wav_path: "recordings/../elsewhere/mic.ogg".into(),
+            system_wav_path: "recordings/../elsewhere/system.ogg".into(),
+            notes: String::new(),
+        };
+
+        assert!(
+            !remove_session_recordings(storage_root, &recordings_root, &session)
+                .expect("guard traversal")
+        );
+        assert!(outside.join("mic.ogg").exists());
     }
 
     #[test]

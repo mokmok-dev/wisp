@@ -51,6 +51,38 @@ const MIGRATIONS: &[&str] = &[
         INSERT INTO segments_fts (rowid, text) VALUES (new.id, new.text);
     END;
     ",
+    // v1 -> v2: the default unicode61 tokenizer splits on whitespace, so a
+    // Japanese sentence becomes one token and a word inside it never matches.
+    // The app records ja-JP, and trigram indexes substrings without spaces.
+    // The triggers belong to `segments`, so dropping `segments_fts` leaves
+    // them behind and they must be dropped explicitly before recreation.
+    r"
+    DROP TABLE segments_fts;
+    DROP TRIGGER IF EXISTS segments_ai;
+    DROP TRIGGER IF EXISTS segments_ad;
+    DROP TRIGGER IF EXISTS segments_au;
+
+    CREATE VIRTUAL TABLE segments_fts USING fts5(
+        text,
+        content='segments',
+        content_rowid='id',
+        tokenize='trigram'
+    );
+    CREATE TRIGGER segments_ai AFTER INSERT ON segments BEGIN
+        INSERT INTO segments_fts (rowid, text) VALUES (new.id, new.text);
+    END;
+    CREATE TRIGGER segments_ad AFTER DELETE ON segments BEGIN
+        INSERT INTO segments_fts (segments_fts, rowid, text)
+            VALUES ('delete', old.id, old.text);
+    END;
+    CREATE TRIGGER segments_au AFTER UPDATE ON segments BEGIN
+        INSERT INTO segments_fts (segments_fts, rowid, text)
+            VALUES ('delete', old.id, old.text);
+        INSERT INTO segments_fts (rowid, text) VALUES (new.id, new.text);
+    END;
+
+    INSERT INTO segments_fts (rowid, text) SELECT id, text FROM segments;
+    ",
 ];
 
 // Statically guard the `usize -> u32` conversion in `run` below: the
@@ -110,6 +142,53 @@ mod tests {
         let conn = Connection::open_in_memory().expect("in-memory db");
         run(&conn).expect("first migration pass");
         run(&conn).expect("second migration pass should be a no-op");
+    }
+
+    #[test]
+    fn upgrades_a_v1_database_and_rebuilds_the_search_index() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(super::MIGRATIONS[0])
+            .expect("apply v1 schema");
+        conn.pragma_update(None, "user_version", 1)
+            .expect("mark as v1");
+        conn.execute(
+            "INSERT INTO sessions (started_at, title, mic_wav_path, system_wav_path) \
+             VALUES ('2026-05-28T10:00:00Z', 'old', 's/mic.ogg', 's/system.ogg')",
+            [],
+        )
+        .expect("insert session");
+        conn.execute(
+            "INSERT INTO segments \
+             (session_id, source, segment_index, start_seconds, end_seconds, text, created_at) \
+             VALUES (1, 'mic', 0, 0.0, 1.0, 'the weather is nice', '2026-05-28T10:00:01Z')",
+            [],
+        )
+        .expect("insert segment");
+
+        run(&conn).expect("upgrade to v2");
+
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read user_version");
+        assert_eq!(version, 2);
+        let hits = crate::Segments::new(&conn)
+            .search_text("weather", 10)
+            .expect("search rebuilt index");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "the weather is nice");
+
+        conn.execute(
+            "INSERT INTO segments \
+             (session_id, source, segment_index, start_seconds, end_seconds, text, created_at) \
+             VALUES (1, 'mic', 1, 2.0, 3.0, 'rain tomorrow', '2026-05-28T10:00:02Z')",
+            [],
+        )
+        .expect("insert after upgrade");
+        let hits = crate::Segments::new(&conn)
+            .search_text("rain", 10)
+            .expect("search with recreated trigger");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "rain tomorrow");
     }
 
     #[test]

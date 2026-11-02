@@ -583,68 +583,88 @@ where
             return Err(self.invalid_state_error("session orchestrator has already been started"));
         }
         self.capture.start()?;
-        if let Some(transcriber) = &mut self.transcriber {
-            let tracks = self.capture.probe().capabilities.tracks;
-            if let Err(start_error) = transcriber.start(&tracks) {
-                if retain_capture_after_transcriber_failure {
-                    match transcriber.abort() {
-                        Ok(()) => {
-                            self.transcriber = None;
-                            self.state = OrchestratorState::Running;
-                            return Ok(Some(start_error));
-                        },
-                        Err(disable_error) => {
-                            self.state = OrchestratorState::CleanupPending;
-                            // The fallback admission already attempted the
-                            // transcriber abort once. Abort capture now, but do
-                            // not silently retry the same failed transcriber
-                            // phase in this call: both failures must remain
-                            // visible and only unfinished phases are retried by
-                            // a later shutdown.
-                            let mut progress = CleanupProgress::failed_transcriber_start();
-                            let capture_abort = self.capture.stop(ShutdownMode::Abort);
-                            if capture_abort.is_ok() {
-                                progress.capture.stopped = true;
-                                progress.capture.drained = true;
-                            }
-                            self.cleanup = Some(progress);
-                            return match capture_abort {
-                                Ok(()) => Err(BackendError::new(
-                                    disable_error.backend.clone(),
-                                    disable_error.kind,
-                                    format!(
-                                        "transcriber start failed ({start_error}); record-only fallback failed ({disable_error})"
-                                    ),
-                                )),
-                                Err(capture_error) => Err(BackendError::new(
-                                    capture_error.backend,
-                                    capture_error.kind,
-                                    format!(
-                                        "transcriber start failed ({start_error}); record-only fallback failed ({disable_error}); capture abort also failed: {}",
-                                        capture_error.message
-                                    ),
-                                )),
-                            };
-                        },
-                    }
-                }
-                self.state = OrchestratorState::CleanupPending;
-                self.cleanup = Some(CleanupProgress::failed_transcriber_start());
-                return match self.continue_cleanup(ShutdownMode::Abort) {
-                    Ok(()) => Err(start_error),
-                    Err(cleanup_error) => Err(BackendError::new(
-                        cleanup_error.backend,
-                        cleanup_error.kind,
-                        format!(
-                            "transcriber start failed ({start_error}); capture abort also failed: {}",
-                            cleanup_error.message
-                        ),
-                    )),
-                };
-            }
-        }
+        let fallback = self.start_transcriber(retain_capture_after_transcriber_failure)?;
         self.state = OrchestratorState::Running;
-        Ok(None)
+        Ok(fallback)
+    }
+
+    fn start_transcriber(
+        &mut self,
+        retain_capture_after_failure: bool,
+    ) -> BackendResult<Option<BackendError>> {
+        let Some(transcriber) = self.transcriber.as_mut() else {
+            return Ok(None);
+        };
+        let tracks = self.capture.probe().capabilities.tracks;
+        let start_error = match transcriber.start(&tracks) {
+            Ok(()) => return Ok(None),
+            Err(error) => error,
+        };
+        if !retain_capture_after_failure {
+            return self.abort_after_transcriber_start_failure(start_error);
+        }
+        let disable_result = transcriber.abort();
+        self.disable_failed_transcriber(start_error, disable_result)
+    }
+
+    fn abort_after_transcriber_start_failure(
+        &mut self,
+        start_error: BackendError,
+    ) -> BackendResult<Option<BackendError>> {
+        self.state = OrchestratorState::CleanupPending;
+        self.cleanup = Some(CleanupProgress::failed_transcriber_start());
+        match self.continue_cleanup(ShutdownMode::Abort) {
+            Ok(()) => Err(start_error),
+            Err(cleanup_error) => Err(BackendError::new(
+                cleanup_error.backend,
+                cleanup_error.kind,
+                format!(
+                    "transcriber start failed ({start_error}); capture abort also failed: {}",
+                    cleanup_error.message
+                ),
+            )),
+        }
+    }
+
+    fn disable_failed_transcriber(
+        &mut self,
+        start_error: BackendError,
+        disable_result: BackendResult<()>,
+    ) -> BackendResult<Option<BackendError>> {
+        let Err(disable_error) = disable_result else {
+            self.transcriber = None;
+            self.state = OrchestratorState::Running;
+            return Ok(Some(start_error));
+        };
+        self.state = OrchestratorState::CleanupPending;
+        // The fallback admission already attempted the transcriber abort once.
+        // Abort capture now, but do not silently retry the same failed
+        // transcriber phase in this call: both failures must remain visible and
+        // only unfinished phases are retried by a later shutdown.
+        let mut progress = CleanupProgress::failed_transcriber_start();
+        let capture_abort = self.capture.stop(ShutdownMode::Abort);
+        if capture_abort.is_ok() {
+            progress.capture.stopped = true;
+            progress.capture.drained = true;
+        }
+        self.cleanup = Some(progress);
+        match capture_abort {
+            Ok(()) => Err(BackendError::new(
+                disable_error.backend.clone(),
+                disable_error.kind,
+                format!(
+                    "transcriber start failed ({start_error}); record-only fallback failed ({disable_error})"
+                ),
+            )),
+            Err(capture_error) => Err(BackendError::new(
+                capture_error.backend,
+                capture_error.kind,
+                format!(
+                    "transcriber start failed ({start_error}); record-only fallback failed ({disable_error}); capture abort also failed: {}",
+                    capture_error.message
+                ),
+            )),
+        }
     }
 
     /// Pump one queued or newly captured event through the pipeline.
@@ -804,94 +824,13 @@ where
             .unwrap_or_else(|| CleanupProgress::running(self.transcriber.is_some()));
         let mut first_error = None;
 
-        if !progress.capture.stopped {
-            match self.capture.stop(mode) {
-                Ok(()) => progress.capture.stopped = true,
-                Err(error) => first_error = Some(error),
-            }
-        }
-
+        self.stop_capture(mode, &mut progress, &mut first_error);
         match mode {
             ShutdownMode::Graceful => {
-                if progress.capture.stopped && !progress.capture.drained {
-                    loop {
-                        match self.capture.next_event(Duration::ZERO) {
-                            Ok(Some(event)) => {
-                                let transcriber_accepts_audio =
-                                    progress.transcriber == TranscriberCleanupState::Active;
-                                if let Err(error) =
-                                    self.queue_capture_event(event, transcriber_accepts_audio)
-                                    && first_error.is_none()
-                                {
-                                    first_error = Some(error);
-                                }
-                            },
-                            Ok(None) => {
-                                progress.capture.drained = true;
-                                break;
-                            },
-                            Err(error) => {
-                                if first_error.is_none() {
-                                    first_error = Some(error);
-                                }
-                                break;
-                            },
-                        }
-                    }
-                }
-
-                if progress.capture.drained
-                    && progress.transcriber == TranscriberCleanupState::Active
-                    && let Some(transcriber) = &mut self.transcriber
-                {
-                    match transcriber.finish() {
-                        Ok(()) => {
-                            progress.transcriber = TranscriberCleanupState::FinishedNeedsDrain;
-                        },
-                        Err(error) if first_error.is_none() => first_error = Some(error),
-                        Err(_) => {},
-                    }
-                }
-
-                if progress.transcriber == TranscriberCleanupState::FinishedNeedsDrain
-                    && let Some(transcriber) = &mut self.transcriber
-                {
-                    loop {
-                        match transcriber.next_event(Duration::ZERO) {
-                            Ok(Some(event)) => {
-                                self.pending.push_back(OrchestratorEvent::Transcript(event));
-                            },
-                            Ok(None) => {
-                                progress.transcriber = TranscriberCleanupState::Cleaned;
-                                break;
-                            },
-                            Err(error) => {
-                                if first_error.is_none() {
-                                    first_error = Some(error);
-                                }
-                                break;
-                            },
-                        }
-                    }
-                }
+                self.drain_gracefully(&mut progress, &mut first_error);
             },
             ShutdownMode::Abort => {
-                if progress.capture.stopped {
-                    progress.capture.drained = true;
-                }
-                if progress.transcriber != TranscriberCleanupState::Cleaned {
-                    if let Some(transcriber) = &mut self.transcriber {
-                        match transcriber.abort() {
-                            Ok(()) => {
-                                progress.transcriber = TranscriberCleanupState::Cleaned;
-                            },
-                            Err(error) if first_error.is_none() => first_error = Some(error),
-                            Err(_) => {},
-                        }
-                    } else {
-                        progress.transcriber = TranscriberCleanupState::Cleaned;
-                    }
-                }
+                self.abort_remaining(&mut progress, &mut first_error);
             },
         }
 
@@ -904,6 +843,132 @@ where
             Some(error) => Err(error),
             None if progress.is_complete() => Ok(()),
             None => Err(self.invalid_state_error("session cleanup remains incomplete")),
+        }
+    }
+
+    fn stop_capture(
+        &mut self,
+        mode: ShutdownMode,
+        progress: &mut CleanupProgress,
+        first_error: &mut Option<BackendError>,
+    ) {
+        if progress.capture.stopped {
+            return;
+        }
+        match self.capture.stop(mode) {
+            Ok(()) => progress.capture.stopped = true,
+            Err(error) => {
+                first_error.get_or_insert(error);
+            },
+        }
+    }
+
+    fn drain_gracefully(
+        &mut self,
+        progress: &mut CleanupProgress,
+        first_error: &mut Option<BackendError>,
+    ) {
+        self.drain_capture(progress, first_error);
+        self.finish_transcriber(progress, first_error);
+        self.drain_transcripts(progress, first_error);
+    }
+
+    fn drain_capture(
+        &mut self,
+        progress: &mut CleanupProgress,
+        first_error: &mut Option<BackendError>,
+    ) {
+        if !progress.capture.stopped || progress.capture.drained {
+            return;
+        }
+        loop {
+            match self.capture.next_event(Duration::ZERO) {
+                Ok(Some(event)) => {
+                    let transcriber_accepts_audio =
+                        progress.transcriber == TranscriberCleanupState::Active;
+                    if let Err(error) = self.queue_capture_event(event, transcriber_accepts_audio) {
+                        first_error.get_or_insert(error);
+                    }
+                },
+                Ok(None) => {
+                    progress.capture.drained = true;
+                    break;
+                },
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    break;
+                },
+            }
+        }
+    }
+
+    fn finish_transcriber(
+        &mut self,
+        progress: &mut CleanupProgress,
+        first_error: &mut Option<BackendError>,
+    ) {
+        if !progress.capture.drained || progress.transcriber != TranscriberCleanupState::Active {
+            return;
+        }
+        let Some(transcriber) = self.transcriber.as_mut() else {
+            return;
+        };
+        match transcriber.finish() {
+            Ok(()) => progress.transcriber = TranscriberCleanupState::FinishedNeedsDrain,
+            Err(error) => {
+                first_error.get_or_insert(error);
+            },
+        }
+    }
+
+    fn drain_transcripts(
+        &mut self,
+        progress: &mut CleanupProgress,
+        first_error: &mut Option<BackendError>,
+    ) {
+        if progress.transcriber != TranscriberCleanupState::FinishedNeedsDrain {
+            return;
+        }
+        let Some(transcriber) = self.transcriber.as_mut() else {
+            return;
+        };
+        loop {
+            match transcriber.next_event(Duration::ZERO) {
+                Ok(Some(event)) => {
+                    self.pending.push_back(OrchestratorEvent::Transcript(event));
+                },
+                Ok(None) => {
+                    progress.transcriber = TranscriberCleanupState::Cleaned;
+                    break;
+                },
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    break;
+                },
+            }
+        }
+    }
+
+    fn abort_remaining(
+        &mut self,
+        progress: &mut CleanupProgress,
+        first_error: &mut Option<BackendError>,
+    ) {
+        if progress.capture.stopped {
+            progress.capture.drained = true;
+        }
+        if progress.transcriber == TranscriberCleanupState::Cleaned {
+            return;
+        }
+        let Some(transcriber) = self.transcriber.as_mut() else {
+            progress.transcriber = TranscriberCleanupState::Cleaned;
+            return;
+        };
+        match transcriber.abort() {
+            Ok(()) => progress.transcriber = TranscriberCleanupState::Cleaned,
+            Err(error) => {
+                first_error.get_or_insert(error);
+            },
         }
     }
 }
@@ -1125,6 +1190,12 @@ enum ProducerEntry<'a> {
     ClosedAfterIncrement(ActiveProducer<'a>),
 }
 
+enum ProducerAdmission<'a> {
+    Admitted(ActiveProducer<'a>),
+    Dropped,
+    Disconnected,
+}
+
 struct ActiveProducer<'a>(&'a ProducerGate);
 
 impl Drop for ActiveProducer<'_> {
@@ -1186,9 +1257,7 @@ impl RealtimeCaptureSender {
         if self.gate.is_closed() {
             return Err(capture_receiver_disconnected_error());
         }
-        self.dropped
-            .frames
-            .fetch_add(frame_count, Ordering::Relaxed);
+        self.record_dropped(frame_count);
         Ok(())
     }
 
@@ -1209,32 +1278,47 @@ impl RealtimeCaptureSender {
             ));
         }
         let frame_count = u64::from(frame.frame_count());
-        let _active = match self.gate.try_enter() {
-            ProducerEntry::Entered(active) => active,
-            ProducerEntry::RejectedBeforeIncrement => {
-                if self.gate.is_closed() {
-                    return Err(capture_receiver_disconnected_error());
-                }
-                self.dropped
-                    .frames
-                    .fetch_add(frame_count, Ordering::Relaxed);
-                return Ok(FrameEnqueue::Dropped);
-            },
-            ProducerEntry::RejectedAfterIncrement(active) => {
-                self.dropped
-                    .frames
-                    .fetch_add(frame_count, Ordering::Relaxed);
-                drop(active);
-                return Ok(FrameEnqueue::Dropped);
-            },
-            ProducerEntry::ClosedBeforeIncrement => {
-                return Err(capture_receiver_disconnected_error());
-            },
-            ProducerEntry::ClosedAfterIncrement(active) => {
-                drop(active);
+        let _active = match self.admit_producer(frame_count) {
+            ProducerAdmission::Admitted(active) => active,
+            ProducerAdmission::Dropped => return Ok(FrameEnqueue::Dropped),
+            ProducerAdmission::Disconnected => {
                 return Err(capture_receiver_disconnected_error());
             },
         };
+        self.deliver_frame(frame, frame_count)
+    }
+
+    fn admit_producer(
+        &self,
+        frame_count: u64,
+    ) -> ProducerAdmission<'_> {
+        match self.gate.try_enter() {
+            ProducerEntry::Entered(active) => ProducerAdmission::Admitted(active),
+            ProducerEntry::RejectedBeforeIncrement => {
+                if self.gate.is_closed() {
+                    return ProducerAdmission::Disconnected;
+                }
+                self.record_dropped(frame_count);
+                ProducerAdmission::Dropped
+            },
+            ProducerEntry::RejectedAfterIncrement(active) => {
+                self.record_dropped(frame_count);
+                drop(active);
+                ProducerAdmission::Dropped
+            },
+            ProducerEntry::ClosedBeforeIncrement => ProducerAdmission::Disconnected,
+            ProducerEntry::ClosedAfterIncrement(active) => {
+                drop(active);
+                ProducerAdmission::Disconnected
+            },
+        }
+    }
+
+    fn deliver_frame(
+        &self,
+        frame: AudioFrame,
+        frame_count: u64,
+    ) -> BackendResult<FrameEnqueue> {
         #[cfg(test)]
         if let Some(hook) = &self.critical_section_hook {
             hook.entered.wait();
@@ -1244,23 +1328,28 @@ impl RealtimeCaptureSender {
             return Err(capture_receiver_disconnected_error());
         }
         if self.dropped.frames.load(Ordering::Relaxed) > 0 {
-            self.dropped
-                .frames
-                .fetch_add(frame_count, Ordering::Relaxed);
+            self.record_dropped(frame_count);
             return Ok(FrameEnqueue::Dropped);
         }
         match self.frame_sender.try_send(frame) {
             Ok(()) => Ok(FrameEnqueue::Enqueued),
             Err(channel::TrySendError::Full(_)) => {
-                self.dropped
-                    .frames
-                    .fetch_add(frame_count, Ordering::Relaxed);
+                self.record_dropped(frame_count);
                 Ok(FrameEnqueue::Dropped)
             },
             Err(channel::TrySendError::Disconnected(_)) => {
                 Err(capture_receiver_disconnected_error())
             },
         }
+    }
+
+    fn record_dropped(
+        &self,
+        frame_count: u64,
+    ) {
+        self.dropped
+            .frames
+            .fetch_add(frame_count, Ordering::Relaxed);
     }
 
     /// Publish a control event without waiting for queue capacity.
@@ -1301,6 +1390,25 @@ struct CaptureDeliveryState {
     boundary_events: VecDeque<CaptureEvent>,
     pending_controls: VecDeque<CaptureControlEvent>,
     boundary_deferred: bool,
+}
+
+enum LaneWait {
+    Frame(AudioFrame),
+    Control(CaptureControlEvent),
+    FrameClosed,
+    ControlClosed,
+    Unavailable,
+}
+
+enum BoundaryWait {
+    NotDeferred,
+    Retry,
+    Expired,
+}
+
+enum RecvStep {
+    Done(Option<CaptureEvent>),
+    Retry,
 }
 
 /// Consumer side of the bounded real-time capture channel.
@@ -1349,50 +1457,14 @@ impl CaptureEventReceiver {
             if let Some(event) = self.try_recv() {
                 return Some(event);
             }
-            if self.boundary_deferred() {
-                let remaining = timeout.saturating_sub(started.elapsed());
-                if remaining.is_zero() {
-                    return self.try_recv();
-                }
-                match self.gate.quiesced_receiver.recv_timeout(remaining) {
-                    Ok(()) => continue,
-                    Err(channel::RecvTimeoutError::Disconnected) => {},
-                    Err(channel::RecvTimeoutError::Timeout) => return self.try_recv(),
-                }
+            match self.wait_out_deferred_boundary(timeout, started) {
+                BoundaryWait::Retry => continue,
+                BoundaryWait::Expired => return self.try_recv(),
+                BoundaryWait::NotDeferred => {},
             }
-            if !frame_open && !control_open {
-                return None;
-            }
-
-            let remaining = timeout.saturating_sub(started.elapsed());
-            if remaining.is_zero() {
-                return self.try_recv();
-            }
-            match (frame_open, control_open) {
-                (true, true) => {
-                    channel::select! {
-                        recv(self.frame_receiver) -> frame => match frame {
-                            Ok(frame) => return Some(CaptureEvent::Samples(frame)),
-                            Err(_) => frame_open = false,
-                        },
-                        recv(self.control_receiver) -> event => match event {
-                            Ok(event) => self.stage_control(event),
-                            Err(_) => control_open = false,
-                        },
-                        default(remaining) => return self.try_recv(),
-                    }
-                },
-                (true, false) => match self.frame_receiver.recv_timeout(remaining) {
-                    Ok(frame) => return Some(CaptureEvent::Samples(frame)),
-                    Err(channel::RecvTimeoutError::Disconnected) => frame_open = false,
-                    Err(channel::RecvTimeoutError::Timeout) => return self.try_recv(),
-                },
-                (false, true) => match self.control_receiver.recv_timeout(remaining) {
-                    Ok(event) => self.stage_control(event),
-                    Err(channel::RecvTimeoutError::Disconnected) => control_open = false,
-                    Err(channel::RecvTimeoutError::Timeout) => return self.try_recv(),
-                },
-                (false, false) => return self.try_recv(),
+            match self.recv_timeout_step(&mut frame_open, &mut control_open, timeout, started) {
+                RecvStep::Done(event) => return event,
+                RecvStep::Retry => {},
             }
         }
     }
@@ -1409,30 +1481,150 @@ impl CaptureEventReceiver {
                 let _ = self.gate.quiesced_receiver.recv();
                 continue;
             }
-            match (frame_open, control_open) {
-                (true, true) => {
-                    channel::select! {
-                        recv(self.frame_receiver) -> frame => match frame {
-                            Ok(frame) => return Some(CaptureEvent::Samples(frame)),
-                            Err(_) => frame_open = false,
-                        },
-                        recv(self.control_receiver) -> event => match event {
-                            Ok(event) => self.stage_control(event),
-                            Err(_) => control_open = false,
-                        },
-                    }
-                },
-                (true, false) => match self.frame_receiver.recv() {
-                    Ok(frame) => return Some(CaptureEvent::Samples(frame)),
-                    Err(_) => frame_open = false,
-                },
-                (false, true) => match self.control_receiver.recv() {
-                    Ok(event) => self.stage_control(event),
-                    Err(_) => control_open = false,
-                },
-                (false, false) => return self.try_recv(),
+            match self.recv_blocking_step(&mut frame_open, &mut control_open) {
+                RecvStep::Done(event) => return event,
+                RecvStep::Retry => {},
             }
         }
+    }
+
+    fn wait_out_deferred_boundary(
+        &self,
+        timeout: Duration,
+        started: Instant,
+    ) -> BoundaryWait {
+        if !self.boundary_deferred() {
+            return BoundaryWait::NotDeferred;
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return BoundaryWait::Expired;
+        }
+        match self.gate.quiesced_receiver.recv_timeout(remaining) {
+            Ok(()) => BoundaryWait::Retry,
+            Err(channel::RecvTimeoutError::Disconnected) => BoundaryWait::NotDeferred,
+            Err(channel::RecvTimeoutError::Timeout) => BoundaryWait::Expired,
+        }
+    }
+
+    fn recv_timeout_step(
+        &self,
+        frame_open: &mut bool,
+        control_open: &mut bool,
+        timeout: Duration,
+        started: Instant,
+    ) -> RecvStep {
+        if !*frame_open && !*control_open {
+            return RecvStep::Done(None);
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return RecvStep::Done(self.try_recv());
+        }
+        match self.wait_for_lane_within(*frame_open, *control_open, remaining) {
+            LaneWait::Frame(frame) => RecvStep::Done(Some(CaptureEvent::Samples(frame))),
+            LaneWait::Control(event) => {
+                self.stage_control(event);
+                RecvStep::Retry
+            },
+            LaneWait::FrameClosed => {
+                *frame_open = false;
+                RecvStep::Retry
+            },
+            LaneWait::ControlClosed => {
+                *control_open = false;
+                RecvStep::Retry
+            },
+            LaneWait::Unavailable => RecvStep::Done(self.try_recv()),
+        }
+    }
+
+    fn recv_blocking_step(
+        &self,
+        frame_open: &mut bool,
+        control_open: &mut bool,
+    ) -> RecvStep {
+        match self.wait_for_lane_blocking(*frame_open, *control_open) {
+            LaneWait::Frame(frame) => RecvStep::Done(Some(CaptureEvent::Samples(frame))),
+            LaneWait::Control(event) => {
+                self.stage_control(event);
+                RecvStep::Retry
+            },
+            LaneWait::FrameClosed => {
+                *frame_open = false;
+                RecvStep::Retry
+            },
+            LaneWait::ControlClosed => {
+                *control_open = false;
+                RecvStep::Retry
+            },
+            LaneWait::Unavailable => RecvStep::Done(self.try_recv()),
+        }
+    }
+
+    fn wait_for_lane_within(
+        &self,
+        frame_open: bool,
+        control_open: bool,
+        remaining: Duration,
+    ) -> LaneWait {
+        if frame_open && control_open {
+            return channel::select! {
+                recv(self.frame_receiver) -> frame => match frame {
+                    Ok(frame) => LaneWait::Frame(frame),
+                    Err(_) => LaneWait::FrameClosed,
+                },
+                recv(self.control_receiver) -> event => match event {
+                    Ok(event) => LaneWait::Control(event),
+                    Err(_) => LaneWait::ControlClosed,
+                },
+                default(remaining) => LaneWait::Unavailable,
+            };
+        }
+        if frame_open {
+            return match self.frame_receiver.recv_timeout(remaining) {
+                Ok(frame) => LaneWait::Frame(frame),
+                Err(channel::RecvTimeoutError::Disconnected) => LaneWait::FrameClosed,
+                Err(channel::RecvTimeoutError::Timeout) => LaneWait::Unavailable,
+            };
+        }
+        match self.control_receiver.recv_timeout(remaining) {
+            Ok(event) => LaneWait::Control(event),
+            Err(channel::RecvTimeoutError::Disconnected) => LaneWait::ControlClosed,
+            Err(channel::RecvTimeoutError::Timeout) => LaneWait::Unavailable,
+        }
+    }
+
+    fn wait_for_lane_blocking(
+        &self,
+        frame_open: bool,
+        control_open: bool,
+    ) -> LaneWait {
+        if frame_open && control_open {
+            return channel::select! {
+                recv(self.frame_receiver) -> frame => match frame {
+                    Ok(frame) => LaneWait::Frame(frame),
+                    Err(_) => LaneWait::FrameClosed,
+                },
+                recv(self.control_receiver) -> event => match event {
+                    Ok(event) => LaneWait::Control(event),
+                    Err(_) => LaneWait::ControlClosed,
+                },
+            };
+        }
+        if frame_open {
+            return match self.frame_receiver.recv() {
+                Ok(frame) => LaneWait::Frame(frame),
+                Err(_) => LaneWait::FrameClosed,
+            };
+        }
+        if control_open {
+            return match self.control_receiver.recv() {
+                Ok(event) => LaneWait::Control(event),
+                Err(_) => LaneWait::ControlClosed,
+            };
+        }
+        LaneWait::Unavailable
     }
 
     fn try_recv_locked(

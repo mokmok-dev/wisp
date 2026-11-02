@@ -749,54 +749,68 @@ mod property_tests {
         (1u16..=8, 1u32..=16, 0usize..6).prop_map(|(channels, frame_count, variant)| {
             let len = usize::try_from(u64::from(frame_count) * u64::from(channels))
                 .expect("test payload length fits usize");
-            let samples = match variant {
-                0 => AudioSamples::I16(
-                    (0..len)
-                        .map(|i| i16::try_from(i).expect("test payload fits i16") * 3 - 7)
-                        .collect(),
-                ),
-                1 => AudioSamples::U16(
-                    (0..len)
-                        .map(|i| u16::try_from(i).expect("test payload fits u16") * 3 + 1)
-                        .collect(),
-                ),
-                2 => AudioSamples::I32(
-                    (0..len)
-                        .map(|i| i32::try_from(i).expect("test payload fits i32") * 5 - 3)
-                        .collect(),
-                ),
-                3 => AudioSamples::U32(
-                    (0..len)
-                        .map(|i| u32::try_from(i).expect("test payload fits u32") * 7 + 2)
-                        .collect(),
-                ),
-                4 => AudioSamples::F32(
-                    (0..len)
-                        .map(|i| {
-                            f32::from(u16::try_from(i).expect("test payload fits u16"))
-                                .mul_add(0.5, -3.25)
-                        })
-                        .collect(),
-                ),
-                _ => AudioSamples::F64(
-                    (0..len)
-                        .map(|i| {
-                            f64::from(u32::try_from(i).expect("test payload fits u32"))
-                                .mul_add(0.25, -2.5)
-                        })
-                        .collect(),
-                ),
-            };
-            let format = match variant {
-                0 => SampleFormat::I16,
-                1 => SampleFormat::U16,
-                2 => SampleFormat::I32,
-                3 => SampleFormat::U32,
-                4 => SampleFormat::F32,
-                _ => SampleFormat::F64,
-            };
-            (channels, frame_count, format, samples)
+            (
+                channels,
+                frame_count,
+                payload_format(variant),
+                payload_samples(len, variant),
+            )
         })
+    }
+
+    fn payload_format(variant: usize) -> SampleFormat {
+        match variant {
+            0 => SampleFormat::I16,
+            1 => SampleFormat::U16,
+            2 => SampleFormat::I32,
+            3 => SampleFormat::U32,
+            4 => SampleFormat::F32,
+            _ => SampleFormat::F64,
+        }
+    }
+
+    fn payload_samples(
+        len: usize,
+        variant: usize,
+    ) -> AudioSamples {
+        match variant {
+            0 => AudioSamples::I16(
+                (0..len)
+                    .map(|i| i16::try_from(i).expect("test payload fits i16") * 3 - 7)
+                    .collect(),
+            ),
+            1 => AudioSamples::U16(
+                (0..len)
+                    .map(|i| u16::try_from(i).expect("test payload fits u16") * 3 + 1)
+                    .collect(),
+            ),
+            2 => AudioSamples::I32(
+                (0..len)
+                    .map(|i| i32::try_from(i).expect("test payload fits i32") * 5 - 3)
+                    .collect(),
+            ),
+            3 => AudioSamples::U32(
+                (0..len)
+                    .map(|i| u32::try_from(i).expect("test payload fits u32") * 7 + 2)
+                    .collect(),
+            ),
+            4 => AudioSamples::F32(
+                (0..len)
+                    .map(|i| {
+                        f32::from(u16::try_from(i).expect("test payload fits u16"))
+                            .mul_add(0.5, -3.25)
+                    })
+                    .collect(),
+            ),
+            _ => AudioSamples::F64(
+                (0..len)
+                    .map(|i| {
+                        f64::from(u32::try_from(i).expect("test payload fits u32"))
+                            .mul_add(0.25, -2.5)
+                    })
+                    .collect(),
+            ),
+        }
     }
 
     proptest! {

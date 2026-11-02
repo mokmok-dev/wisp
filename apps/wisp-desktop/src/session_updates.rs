@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use wisp_audiokit::SourceLabel;
-use wisp_core::SessionId;
+use wisp_audiokit::{SessionError, SourceLabel};
+use wisp_core::{Session, SessionId};
 use wisp_lifecycle::WorkerUpdate;
 use wisp_storage::Storage;
 
@@ -19,8 +19,8 @@ use crate::app::{
 };
 use crate::library;
 use crate::library::SharedStorage;
-use crate::session_runner::Update;
 use crate::session_runner::Update::{Error, Event, RuntimeFailed, StartFailed, Started, Stopped};
+use crate::session_runner::{SessionStart, Update};
 
 pub(crate) const RECOVERY_FILE_NAME: &str = "transcript-recovery.json";
 
@@ -66,77 +66,136 @@ pub fn apply_update(
     storage: &SharedStorage,
 ) {
     match update {
-        Started(session) => {
-            let Some(next_phase) =
-                model.worker_update_phase(session.session_id, WorkerUpdate::Started)
-            else {
-                return;
-            };
-            model.linked_session_id = Some(session.session_id);
-            model.current_session_started_at = Some(session.started_at);
-            model.current_session_dir_name = Some(session.dir_name);
-            // A quit request can move Starting -> Stopping before the worker
-            // reports Started. Do not regress the UI back to Recording; the
-            // queued Stop still owns the transition.
-            model.set_state(SessionState::with_phase(next_phase, Instant::now()));
-        },
-        Event { session_id, event } => {
-            if model.accepts_worker_update(session_id) {
-                model.ingest(event);
-            }
-        },
-        Stopped { session_id } => {
-            if !model.accepts_worker_update(session_id) {
-                return;
-            }
-            model.finalize_all_segments();
-            model.pending_session_write = Some(PendingSessionWrite::Finalise {
-                ended_at: Utc::now(),
-            });
-            let _ = retry_pending_persistence(model, storage);
-        },
+        Started(session) => apply_started(session, model),
+        Event { session_id, event } => apply_event(session_id, event, model),
+        Stopped { session_id } => apply_stopped(session_id, model, storage),
         StartFailed { session_id, error } => {
-            if !model.accepts_worker_update(session_id) {
-                return;
-            }
-            model.finalize_all_segments();
-            model.pending_session_write = Some(PendingSessionWrite::Finalise {
-                ended_at: Utc::now(),
-            });
-            if retry_pending_persistence(model, storage) {
-                model.fail(error);
-            } else if let Some(AppError::Persistence(message)) = model.last_error.as_mut() {
-                message.push_str("; audio startup also failed: ");
-                message.push_str(&error.to_string());
-            }
+            apply_start_failed(session_id, error, model, storage);
         },
         RuntimeFailed { session_id, error } => {
-            if !model.accepts_worker_update(session_id) {
-                return;
-            }
-            model.finalize_all_segments();
-            model.pending_session_write = Some(PendingSessionWrite::Finalise {
-                ended_at: Utc::now(),
-            });
-            if retry_pending_persistence(model, storage) {
-                model.fail(error);
-            } else if let Some(AppError::Persistence(message)) = model.last_error.as_mut() {
-                message.push_str("; audio runtime also failed: ");
-                message.push_str(&error.to_string());
-            }
+            apply_runtime_failed(session_id, error, model, storage);
         },
-        Error { session_id, error } => {
-            if !model.accepts_worker_update(session_id) {
-                return;
-            }
-            model.pending_session_write = Some(PendingSessionWrite::Delete);
-            if retry_pending_persistence(model, storage) {
-                model.fail(error);
-            } else if let Some(AppError::Persistence(message)) = model.last_error.as_mut() {
-                message.push_str("; audio construction also failed: ");
-                message.push_str(&error.to_string());
-            }
+        Error { session_id, error } => apply_error(session_id, error, model, storage),
+    }
+}
+
+fn apply_started(
+    session: SessionStart,
+    model: &mut AppModel,
+) {
+    let Some(next_phase) = model.worker_update_phase(session.session_id, WorkerUpdate::Started)
+    else {
+        return;
+    };
+    model.linked_session_id = Some(session.session_id);
+    model.current_session_started_at = Some(session.started_at);
+    model.current_session_dir_name = Some(session.dir_name);
+    // A quit request can move Starting -> Stopping before the worker
+    // reports Started. Do not regress the UI back to Recording; the
+    // queued Stop still owns the transition.
+    model.set_state(SessionState::with_phase(next_phase, Instant::now()));
+}
+
+fn apply_event(
+    session_id: SessionId,
+    event: wisp_audiokit::Event,
+    model: &mut AppModel,
+) {
+    if model.accepts_worker_update(session_id) {
+        model.ingest(event);
+    }
+}
+
+fn apply_stopped(
+    session_id: SessionId,
+    model: &mut AppModel,
+    storage: &SharedStorage,
+) {
+    if !model.accepts_worker_update(session_id) {
+        return;
+    }
+    model.finalize_all_segments();
+    model.pending_session_write = Some(PendingSessionWrite::Finalise {
+        ended_at: Utc::now(),
+    });
+    let _ = retry_pending_persistence(model, storage);
+}
+
+fn apply_start_failed(
+    session_id: SessionId,
+    error: SessionError,
+    model: &mut AppModel,
+    storage: &SharedStorage,
+) {
+    if !model.accepts_worker_update(session_id) {
+        return;
+    }
+    model.finalize_all_segments();
+    settle_failure(
+        model,
+        storage,
+        PendingSessionWrite::Finalise {
+            ended_at: Utc::now(),
         },
+        "; audio startup also failed: ",
+        error,
+    );
+}
+
+fn apply_runtime_failed(
+    session_id: SessionId,
+    error: SessionError,
+    model: &mut AppModel,
+    storage: &SharedStorage,
+) {
+    if !model.accepts_worker_update(session_id) {
+        return;
+    }
+    model.finalize_all_segments();
+    settle_failure(
+        model,
+        storage,
+        PendingSessionWrite::Finalise {
+            ended_at: Utc::now(),
+        },
+        "; audio runtime also failed: ",
+        error,
+    );
+}
+
+fn apply_error(
+    session_id: SessionId,
+    error: SessionError,
+    model: &mut AppModel,
+    storage: &SharedStorage,
+) {
+    if !model.accepts_worker_update(session_id) {
+        return;
+    }
+    // Construction failed before any capture, so there is no partial
+    // transcript to finalise; only the pre-allocated row must be removed.
+    settle_failure(
+        model,
+        storage,
+        PendingSessionWrite::Delete,
+        "; audio construction also failed: ",
+        error,
+    );
+}
+
+fn settle_failure(
+    model: &mut AppModel,
+    storage: &SharedStorage,
+    pending_write: PendingSessionWrite,
+    suffix: &str,
+    error: SessionError,
+) {
+    model.pending_session_write = Some(pending_write);
+    if retry_pending_persistence(model, storage) {
+        model.fail(error);
+    } else if let Some(AppError::Persistence(message)) = model.last_error.as_mut() {
+        message.push_str(suffix);
+        message.push_str(&error.to_string());
     }
 }
 
@@ -420,6 +479,13 @@ fn load_recovery_model(
     recovery_path: &Path,
     storage: &SharedStorage,
 ) -> Result<AppModel, RecoveryLoadError> {
+    let (model, pending_write) = parse_recovery_snapshot(recovery_path)?;
+    reconcile_live_session(model, pending_write, storage)
+}
+
+fn parse_recovery_snapshot(
+    recovery_path: &Path
+) -> Result<(AppModel, PendingSessionWrite), RecoveryLoadError> {
     let invalid = |message: String| RecoveryLoadError::Invalid(message);
     let bytes = fs::read(recovery_path).map_err(|error| invalid(error.to_string()))?;
     let snapshot: RecoverySnapshot =
@@ -468,59 +534,81 @@ fn load_recovery_model(
         "pending recovery loaded from {}",
         recovery_path.display()
     )));
+    Ok((model, pending_write))
+}
 
-    if let Some(session_id) = retained_session_id {
-        let Ok(store) = storage.lock() else {
-            return Err(RecoveryLoadError::Retryable {
-                message: "storage lock is unavailable".into(),
-                model: Box::new(model),
-            });
-        };
-        match store.sessions().get(session_id) {
-            Ok(Some(session)) => {
-                let dir_name = model
-                    .current_session_dir_name
-                    .as_deref()
-                    .expect("validated directory metadata");
-                let expected_mic = format!("recordings/{dir_name}/mic.ogg");
-                let expected_system = format!("recordings/{dir_name}/system.ogg");
-                if session.mic_wav_path != expected_mic
-                    || session.system_wav_path != expected_system
-                {
-                    return Err(invalid(
-                        "snapshot session id points at a different recording".into(),
-                    ));
-                }
-                match pending_write {
-                    PendingSessionWrite::Finalise { .. } if session.ended_at.is_some() => {
-                        return Err(RecoveryLoadError::AlreadyPersisted);
-                    },
-                    PendingSessionWrite::Delete if session.ended_at.is_some() => {
-                        return Err(invalid(
-                            "cleanup snapshot points at an already-finalised session".into(),
-                        ));
-                    },
-                    PendingSessionWrite::Finalise { .. } | PendingSessionWrite::Delete => {},
-                }
-            },
-            Ok(None) => {
-                if pending_write == PendingSessionWrite::Delete {
-                    return Err(RecoveryLoadError::AlreadyPersisted);
-                }
-                // A finalisation row may have been lost while the sidecar
-                // remained. Launch metadata lets retry recreate it safely.
-                model.current_session_id = None;
-                model.linked_session_id = None;
-            },
-            Err(error) => {
-                return Err(RecoveryLoadError::Retryable {
-                    message: error.to_string(),
-                    model: Box::new(model),
-                });
-            },
-        }
+fn reconcile_live_session(
+    model: AppModel,
+    pending_write: PendingSessionWrite,
+    storage: &SharedStorage,
+) -> Result<AppModel, RecoveryLoadError> {
+    let Some(session_id) = model.current_session_id else {
+        return Ok(model);
+    };
+    let Ok(store) = storage.lock() else {
+        return Err(recovery_retryable(
+            "storage lock is unavailable".into(),
+            model,
+        ));
+    };
+    match store.sessions().get(session_id) {
+        Ok(Some(session)) => reconcile_retained_row(model, pending_write, &session),
+        Ok(None) => reconcile_missing_row(model, pending_write),
+        Err(error) => Err(recovery_retryable(error.to_string(), model)),
     }
+}
+
+fn reconcile_retained_row(
+    model: AppModel,
+    pending_write: PendingSessionWrite,
+    session: &Session,
+) -> Result<AppModel, RecoveryLoadError> {
+    let dir_name = model
+        .current_session_dir_name
+        .as_deref()
+        .expect("validated directory metadata");
+    let expected_mic = format!("recordings/{dir_name}/mic.ogg");
+    let expected_system = format!("recordings/{dir_name}/system.ogg");
+    if session.mic_wav_path != expected_mic || session.system_wav_path != expected_system {
+        return Err(RecoveryLoadError::Invalid(
+            "snapshot session id points at a different recording".into(),
+        ));
+    }
+    match pending_write {
+        PendingSessionWrite::Finalise { .. } if session.ended_at.is_some() => {
+            Err(RecoveryLoadError::AlreadyPersisted)
+        },
+        PendingSessionWrite::Delete if session.ended_at.is_some() => {
+            Err(RecoveryLoadError::Invalid(
+                "cleanup snapshot points at an already-finalised session".into(),
+            ))
+        },
+        PendingSessionWrite::Finalise { .. } | PendingSessionWrite::Delete => Ok(model),
+    }
+}
+
+fn reconcile_missing_row(
+    mut model: AppModel,
+    pending_write: PendingSessionWrite,
+) -> Result<AppModel, RecoveryLoadError> {
+    if pending_write == PendingSessionWrite::Delete {
+        return Err(RecoveryLoadError::AlreadyPersisted);
+    }
+    // A finalisation row may have been lost while the sidecar remained.
+    // Launch metadata lets retry recreate it safely.
+    model.current_session_id = None;
+    model.linked_session_id = None;
     Ok(model)
+}
+
+fn recovery_retryable(
+    message: String,
+    model: AppModel,
+) -> RecoveryLoadError {
+    RecoveryLoadError::Retryable {
+        message,
+        model: Box::new(model),
+    }
 }
 
 fn parse_recovery_pending_write(

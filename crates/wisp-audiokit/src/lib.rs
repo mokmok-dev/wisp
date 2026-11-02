@@ -374,32 +374,55 @@ where
         event: T,
     ) -> CallbackEnqueue {
         if let CallbackEventClass::Final(key) = class {
-            let terminal_key = key.clone();
-            return match self.finals.try_send((key, event)) {
-                Ok(()) => {
-                    if let Some(key) = &terminal_key {
-                        self.publish_terminal(key);
-                        self.try_finish_final_acceptance(key);
-                    }
-                    CallbackEnqueue::Enqueued
-                },
-                Err(crossbeam_channel::TrySendError::Full((key, _event))) => {
-                    if let Some(key) = &key {
-                        self.publish_terminal(key);
-                        self.try_finish_final_acceptance(key);
-                    }
-                    if self.report_final_gaps {
-                        self.run_final_overflow_hook();
-                        saturating_atomic_increment(&self.dropped_finals);
-                        let _ = self.final_gap_ready.try_send(());
-                    }
-                    CallbackEnqueue::DroppedFull
-                },
-                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                    CallbackEnqueue::DroppedFull
-                },
-            };
+            return self.try_send_final(key, event);
         }
+        self.try_send_lossy(class, event)
+    }
+
+    fn try_send_final(
+        &self,
+        key: Option<K>,
+        event: T,
+    ) -> CallbackEnqueue {
+        let terminal_key = key.clone();
+        match self.finals.try_send((key, event)) {
+            Ok(()) => {
+                self.publish_terminal_and_finish(terminal_key.as_ref());
+                CallbackEnqueue::Enqueued
+            },
+            Err(crossbeam_channel::TrySendError::Full((key, _event))) => {
+                self.publish_terminal_and_finish(key.as_ref());
+                self.report_final_overflow();
+                CallbackEnqueue::DroppedFull
+            },
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => CallbackEnqueue::DroppedFull,
+        }
+    }
+
+    fn publish_terminal_and_finish(
+        &self,
+        key: Option<&K>,
+    ) {
+        if let Some(key) = key {
+            self.publish_terminal(key);
+            self.try_finish_final_acceptance(key);
+        }
+    }
+
+    fn report_final_overflow(&self) {
+        if !self.report_final_gaps {
+            return;
+        }
+        self.run_final_overflow_hook();
+        saturating_atomic_increment(&self.dropped_finals);
+        let _ = self.final_gap_ready.try_send(());
+    }
+
+    fn try_send_lossy(
+        &self,
+        class: CallbackEventClass<K>,
+        event: T,
+    ) -> CallbackEnqueue {
         let Ok(mut state) = self.state.try_lock() else {
             return CallbackEnqueue::DroppedBusy;
         };
@@ -410,31 +433,8 @@ where
         );
         let outcome = match class {
             CallbackEventClass::Final(_) => unreachable!("final events use their reserved lane"),
-            CallbackEventClass::Partial(key) => {
-                if key_is_finalized(&state, &key) {
-                    CallbackEnqueue::DroppedFull
-                } else if let Some((_, queued)) = state
-                    .partials
-                    .iter_mut()
-                    .find(|(queued_key, _)| *queued_key == key)
-                {
-                    *queued = event;
-                    CallbackEnqueue::Replaced
-                } else if state.partials.len() >= CALLBACK_PARTIAL_CAPACITY {
-                    CallbackEnqueue::DroppedFull
-                } else {
-                    state.partials.push_back((key, event));
-                    CallbackEnqueue::Enqueued
-                }
-            },
-            CallbackEventClass::Log => {
-                if state.logs.len() >= CALLBACK_LOG_CAPACITY {
-                    CallbackEnqueue::DroppedFull
-                } else {
-                    state.logs.push_back(event);
-                    CallbackEnqueue::Enqueued
-                }
-            },
+            CallbackEventClass::Partial(key) => enqueue_partial(&mut state, key, event),
+            CallbackEventClass::Log => enqueue_log(&mut state, event),
         };
         if outcome == CallbackEnqueue::Enqueued {
             arm_lossy_wake(&mut state, &self.lossy_ready);
@@ -564,17 +564,37 @@ where
             &self.terminal_high_watermarks,
             &self.lossy_ready,
         );
-        if *finals_open {
-            match self.finals.try_recv() {
-                Ok(final_event) => {
-                    return CallbackSweep::Event(
-                        self.accept_final_event_locked(&mut state, final_event),
-                    );
-                },
-                Err(crossbeam_channel::TryRecvError::Disconnected) => *finals_open = false,
-                Err(crossbeam_channel::TryRecvError::Empty) => {},
-            }
+        if let Some(event) = self.recv_final_lane(&mut state, finals_open) {
+            return CallbackSweep::Event(event);
         }
+        if let Some(event) = self.recv_final_gap_lane(final_gap_open) {
+            return CallbackSweep::Event(event);
+        }
+        self.recv_lossy_lane(&mut state, lossy_open)
+    }
+
+    fn recv_final_lane(
+        &self,
+        state: &mut CallbackQueueState<T, K>,
+        finals_open: &mut bool,
+    ) -> Option<T> {
+        if !*finals_open {
+            return None;
+        }
+        match self.finals.try_recv() {
+            Ok(final_event) => Some(self.accept_final_event_locked(state, final_event)),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                *finals_open = false;
+                None
+            },
+            Err(crossbeam_channel::TryRecvError::Empty) => None,
+        }
+    }
+
+    fn recv_final_gap_lane(
+        &self,
+        final_gap_open: &mut bool,
+    ) -> Option<T> {
         if *final_gap_open
             && matches!(
                 self.final_gap_ready.try_recv(),
@@ -583,16 +603,23 @@ where
         {
             *final_gap_open = false;
         }
-        if let Some(factory) = self.final_gap_factory {
-            let dropped = self
-                .dropped_finals
-                .swap(0, std::sync::atomic::Ordering::AcqRel);
-            if dropped > 0 {
-                return CallbackSweep::Event(factory(dropped));
-            }
+        let factory = self.final_gap_factory?;
+        let dropped = self
+            .dropped_finals
+            .swap(0, std::sync::atomic::Ordering::AcqRel);
+        if dropped > 0 {
+            return Some(factory(dropped));
         }
+        None
+    }
+
+    fn recv_lossy_lane(
+        &self,
+        state: &mut CallbackQueueState<T, K>,
+        lossy_open: &mut bool,
+    ) -> CallbackSweep<T> {
         while *lossy_open {
-            match self.try_recv_lossy_locked(&mut state) {
+            match self.try_recv_lossy_locked(state) {
                 Ok(event) => return CallbackSweep::Event(event),
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     *lossy_open = false;
@@ -679,6 +706,45 @@ where
 {
     state.finalized_high_watermarks[key.source_slot()]
         .is_some_and(|finalized| key.sequence() <= finalized)
+}
+
+#[cfg(target_os = "macos")]
+fn enqueue_partial<T, K>(
+    state: &mut CallbackQueueState<T, K>,
+    key: K,
+    event: T,
+) -> CallbackEnqueue
+where
+    K: CallbackEventKey,
+{
+    if key_is_finalized(state, &key) {
+        return CallbackEnqueue::DroppedFull;
+    }
+    if let Some((_, queued)) = state
+        .partials
+        .iter_mut()
+        .find(|(queued_key, _)| *queued_key == key)
+    {
+        *queued = event;
+        return CallbackEnqueue::Replaced;
+    }
+    if state.partials.len() >= CALLBACK_PARTIAL_CAPACITY {
+        return CallbackEnqueue::DroppedFull;
+    }
+    state.partials.push_back((key, event));
+    CallbackEnqueue::Enqueued
+}
+
+#[cfg(target_os = "macos")]
+fn enqueue_log<T, K>(
+    state: &mut CallbackQueueState<T, K>,
+    event: T,
+) -> CallbackEnqueue {
+    if state.logs.len() >= CALLBACK_LOG_CAPACITY {
+        return CallbackEnqueue::DroppedFull;
+    }
+    state.logs.push_back(event);
+    CallbackEnqueue::Enqueued
 }
 
 #[cfg(target_os = "macos")]

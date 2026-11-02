@@ -960,7 +960,6 @@ impl AppView {
                     div()
                         .id(format!("session-row-{}", session.id.as_i64()))
                         .w_full()
-                        .cursor_pointer()
                         .rounded_md()
                         .px_3()
                         .py_2()
@@ -971,39 +970,55 @@ impl AppView {
                                 .gap_3()
                                 .items_center()
                                 .child(
-                                    v_flex()
+                                    // Navigation stays on this inner region. A
+                                    // click handler on the row also fires for
+                                    // the delete buttons and navigates away
+                                    // before the confirm state can render.
+                                    h_flex()
+                                        .id(format!("session-open-{}", session.id.as_i64()))
                                         .flex_1()
                                         .min_w_0()
-                                        .gap_0p5()
+                                        .gap_3()
+                                        .items_center()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.open_history(session_id, cx);
+                                        }))
                                         .child(
-                                            div()
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                                .text_ellipsis()
-                                                .child(session.title.clone()),
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap_0p5()
+                                                .child(
+                                                    div()
+                                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                                        .text_ellipsis()
+                                                        .child(session.title.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(crate::format::started_at(
+                                                            session.started_at,
+                                                        )),
+                                                ),
                                         )
                                         .child(
                                             div()
-                                                .text_xs()
+                                                .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
-                                                .child(crate::format::started_at(
-                                                    session.started_at,
-                                                )),
-                                        ),
+                                                .child(crate::format::duration(duration)),
+                                        )
+                                        .when(live, |this| {
+                                            this.child(
+                                                Tag::danger()
+                                                    .small()
+                                                    .rounded_full()
+                                                    .child(div().text_xs().child("live")),
+                                            )
+                                        }),
                                 )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(crate::format::duration(duration)),
-                                )
-                                .when(live, |this| {
-                                    this.child(
-                                        Tag::danger()
-                                            .small()
-                                            .rounded_full()
-                                            .child(div().text_xs().child("live")),
-                                    )
-                                })
                                 .when(session.ended_at.is_some(), |this| {
                                     if app.pending_delete == Some(session.id) {
                                         this.child(
@@ -1051,10 +1066,7 @@ impl AppView {
                                         )
                                     }
                                 }),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_history(session_id, cx);
-                        })),
+                        ),
                 );
             }
             v_flex()

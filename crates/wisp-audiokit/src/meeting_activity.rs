@@ -63,7 +63,6 @@ mod platform {
     }
 
     #[link(name = "CoreAudio", kind = "framework")]
-    #[link(name = "Foundation", kind = "framework")]
     unsafe extern "C" {
         fn AudioObjectGetPropertyDataSize(
             object: AudioObjectId,
@@ -80,6 +79,10 @@ mod platform {
             io_size: *mut u32,
             data: *mut c_void,
         ) -> OSStatus;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
         fn CFStringGetLength(string: *const c_void) -> isize;
         fn CFStringGetMaximumSizeForEncoding(
             length: isize,
@@ -109,7 +112,9 @@ mod platform {
     ) -> Result<T, MeetingActivityError> {
         let address = address(selector);
         let mut value = MaybeUninit::<T>::uninit();
-        let mut size = size_of::<T>() as u32;
+        let Ok(mut size) = u32::try_from(size_of::<T>()) else {
+            return Err(MeetingActivityError::Malformed { property });
+        };
         // SAFETY: `address` and the output buffer are valid for the call, and
         // Core Audio writes at most `size` bytes into `value`.
         let status = unsafe {
@@ -125,7 +130,7 @@ mod platform {
         if status != 0 {
             return Err(MeetingActivityError::CoreAudio { property, status });
         }
-        if size as usize != size_of::<T>() {
+        if !usize::try_from(size).is_ok_and(|size| size == size_of::<T>()) {
             return Err(MeetingActivityError::Malformed { property });
         }
         // SAFETY: The successful call initialised the whole value.
@@ -152,10 +157,13 @@ mod platform {
         if status != 0 {
             return Err(MeetingActivityError::CoreAudio { property, status });
         }
-        if size as usize % size_of::<T>() != 0 {
+        let Ok(size_bytes) = usize::try_from(size) else {
+            return Err(MeetingActivityError::Malformed { property });
+        };
+        if !size_bytes.is_multiple_of(size_of::<T>()) {
             return Err(MeetingActivityError::Malformed { property });
         }
-        let count = size as usize / size_of::<T>();
+        let count = size_bytes / size_of::<T>();
         if count == 0 {
             return Ok(Vec::new());
         }
@@ -177,7 +185,10 @@ mod platform {
         if status != 0 {
             return Err(MeetingActivityError::CoreAudio { property, status });
         }
-        let filled = (written as usize / size_of::<T>()).min(count);
+        let Ok(written_bytes) = usize::try_from(written) else {
+            return Err(MeetingActivityError::Malformed { property });
+        };
+        let filled = (written_bytes / size_of::<T>()).min(count);
         values.truncate(filled);
         // SAFETY: The successful call initialised exactly `filled` entries.
         Ok(values

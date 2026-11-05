@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{App, Global, Window, WindowAppearance};
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use wisp_core::{MeetingDetectionSettings, MeetingPolicy, MeetingTool};
 
@@ -156,18 +157,27 @@ pub struct Settings {
 
 impl Settings {
     /// Read `settings.json` from `data_dir`, falling back to defaults when the
-    /// file is missing or unreadable. A corrupt file is reported on stderr but
-    /// never prevents the app from starting.
+    /// file is missing or unreadable. Each field decodes on its own, so one
+    /// malformed value does not cost the user every other preference.
     #[must_use]
     pub fn load(data_dir: &Path) -> Self {
         let path = Self::path(data_dir);
         let Ok(bytes) = std::fs::read(&path) else {
             return Self::default();
         };
-        serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
             eprintln!("wisp: ignoring unreadable {}: {error}", path.display());
-            Self::default()
-        })
+            serde_json::Value::Null
+        });
+        Self::from_value(&value)
+    }
+
+    fn from_value(value: &serde_json::Value) -> Self {
+        Self {
+            theme: field(value, "theme"),
+            transcription_language: field(value, "transcription_language"),
+            meetings: field(value, "meetings"),
+        }
     }
 
     /// Write the settings back to `settings.json` through a temporary file,
@@ -193,6 +203,17 @@ impl Settings {
     fn path(data_dir: &Path) -> PathBuf {
         data_dir.join(FILE_NAME)
     }
+}
+
+/// Decode one top-level settings field, defaulting only that field.
+fn field<T: DeserializeOwned + Default>(
+    value: &serde_json::Value,
+    key: &str,
+) -> T {
+    value
+        .get(key)
+        .and_then(|field| serde_json::from_value(field.clone()).ok())
+        .unwrap_or_default()
 }
 
 struct SettingsState {
@@ -446,6 +467,21 @@ mod tests {
             settings.meetings.policy(MeetingTool::Discord),
             MeetingPolicy::Ask
         );
+    }
+
+    #[test]
+    fn one_malformed_field_keeps_the_others() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join(FILE_NAME),
+            br#"{"theme":"light","transcription_language":"en-US","meetings":{"policies":[]}}"#,
+        )
+        .expect("write settings");
+
+        let loaded = Settings::load(dir.path());
+        assert_eq!(loaded.theme, ThemePreference::Light);
+        assert_eq!(loaded.transcription_language.as_str(), "en-US");
+        assert_eq!(loaded.meetings, MeetingDetectionSettings::default());
     }
 
     #[test]

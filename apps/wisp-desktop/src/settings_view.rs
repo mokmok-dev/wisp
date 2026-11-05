@@ -61,7 +61,10 @@ pub(crate) fn render(
     let detection = stored.meetings;
     let language = &stored.transcription_language;
     let language_detail = if language.is_known() {
-        format!("{} · applies to your next recording.", language.label())
+        format!(
+            "{} · the on-device model checks support when the recording starts.",
+            language.label()
+        )
     } else {
         format!(
             "{} is not in this build's language list. Pick one before your next recording.",
@@ -170,7 +173,8 @@ pub(crate) fn render(
                                 .text_color(cx.theme().muted_foreground)
                                 .child(
                                     "Detection reads app bundle identifiers from Core Audio. \
-                                     Nothing is recorded until you start a session.",
+                                     Audio is captured only by a recording you start or \
+                                     auto-record.",
                                 ),
                         ),
                 ),

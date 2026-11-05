@@ -346,6 +346,14 @@ impl AppView {
     ) {
         let preferences = settings::set_meeting_detection_enabled(enabled, cx);
         self.meeting.set_preferences(preferences);
+        if !enabled {
+            self.model.update(cx, |model, cx| {
+                if model.meeting_prompt.is_some() {
+                    model.meeting_prompt = None;
+                    cx.notify();
+                }
+            });
+        }
         cx.notify();
     }
 
@@ -357,18 +365,27 @@ impl AppView {
     ) {
         let preferences = settings::set_meeting_policy(tool, policy, cx);
         self.meeting.set_preferences(preferences);
+        if policy == MeetingPolicy::Off {
+            self.model.update(cx, |model, cx| {
+                if model
+                    .meeting_prompt
+                    .is_some_and(|prompt| prompt.tool == tool)
+                {
+                    model.meeting_prompt = None;
+                    cx.notify();
+                }
+            });
+        }
         cx.notify();
     }
 
-    /// Start a recording for the detected call shown in the prompt.
+    /// Start a recording for the detected call shown in the prompt. The
+    /// prompt stays until the session actually starts, so a refused start
+    /// leaves the offer on screen.
     pub(crate) fn record_detected_meeting(
         &mut self,
         cx: &mut Context<Self>,
     ) {
-        self.model.update(cx, |model, cx| {
-            model.dismiss_meeting_prompt();
-            cx.notify();
-        });
         self.toggle_record(cx);
     }
 

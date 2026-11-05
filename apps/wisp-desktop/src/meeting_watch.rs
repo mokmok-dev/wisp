@@ -110,8 +110,13 @@ fn run(
     loop {
         match wait(controls) {
             Wake::Preferences(next) => {
+                // Re-enabling starts a fresh run; a policy edit must not clear
+                // the snooze for a call that is still in progress.
+                let enabled_changed = preferences.enabled != next.enabled;
                 preferences = *next;
-                detector.reset();
+                if enabled_changed {
+                    detector.reset();
+                }
             },
             Wake::Shutdown => return,
             Wake::Tick => {},

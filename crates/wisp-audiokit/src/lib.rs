@@ -8,6 +8,13 @@ mod backend;
 mod error;
 #[cfg(target_os = "macos")]
 mod macos_backend;
+mod meeting_activity;
+mod meeting_detection;
+
+pub use meeting_activity::{MeetingActivityError, active_meeting_tools};
+pub use meeting_detection::{
+    ABSENT_FOR_RESET, DROPOUT_GRACE, Detection, Detector, MAX_OBSERVATION_GAP, Observation,
+};
 
 pub use backend::{
     Availability, BackendError, BackendErrorKind, BackendId, BackendResult, CaptureBackend,

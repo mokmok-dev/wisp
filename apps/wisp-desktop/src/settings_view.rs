@@ -84,9 +84,13 @@ pub(crate) fn render(
         "settings-language",
         "Language",
         language_detail,
-        Select::new(&app.language_select)
-            .placeholder("Choose a language")
+        // Select's root is `size_full()`, so it has to be constrained by a
+        // fixed-size wrapper or it eats the row and leaves the text at zero.
+        div()
             .w(px(240.0))
+            .h(px(32.0))
+            .flex_shrink_0()
+            .child(Select::new(&app.language_select).placeholder("Choose a language"))
             .into_any_element(),
         true,
         cx,
@@ -141,9 +145,8 @@ pub(crate) fn render(
 
     v_flex()
         .flex_1()
-        .min_h_0()
         .min_w_0()
-        .w_full()
+        .h_full()
         .overflow_hidden()
         .child(header(cx))
         .child(
@@ -151,6 +154,7 @@ pub(crate) fn render(
                 .id("settings-scroll")
                 .flex_1()
                 .min_h_0()
+                .min_w_0()
                 .w_full()
                 .overflow_y_scroll()
                 .child(
@@ -158,6 +162,7 @@ pub(crate) fn render(
                         .w_full()
                         .max_w(px(760.0))
                         .mx_auto()
+                        .min_w(px(320.0))
                         .p_6()
                         .gap_6()
                         .child(section("Appearance", card(vec![appearance], cx)))
@@ -203,6 +208,8 @@ fn header(cx: &mut Context<AppView>) -> AnyElement {
         )
         .child(
             v_flex()
+                .flex_1()
+                .min_w_0()
                 .gap_0p5()
                 .child(
                     div()
@@ -242,6 +249,7 @@ fn card(
 ) -> AnyElement {
     v_flex()
         .w_full()
+        .min_w_0()
         .rounded_lg()
         .border_1()
         .border_color(cx.theme().border)
@@ -262,6 +270,7 @@ fn row(
     let title: SharedString = title.into();
     h_flex()
         .id(id)
+        .min_h(px(56.0))
         .gap_4()
         .items_center()
         .px_4()

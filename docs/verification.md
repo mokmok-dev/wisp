@@ -26,11 +26,11 @@ step.
 2026-11-05, Linux x86_64 (NixOS), Rust 1.99.1:
 
 - `cargo test -p wisp-core -p wisp-audiokit` passed: 36 tests in `wisp-core`
-  (including the meeting catalog and settings shapes) and 45 in
+  (including the meeting catalog and settings shapes) and 47 in
   `wisp-audiokit` (including the meeting-detection state machine).
 - `cargo clippy -p wisp-core -p wisp-audiokit --all-targets -- -D warnings`
   passed.
-- The desktop crate was type-checked and its 67 unit tests passed on the same
+- The desktop crate was type-checked and its 68 unit tests passed on the same
   Linux host against a compile-only stub of the macOS backend. The stub lives
   outside the repository. The real Core Audio probe, the Swift language path,
   and every rendering path remain unverified.

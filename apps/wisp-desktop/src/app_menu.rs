@@ -22,6 +22,7 @@ actions!(
     [
         Quit,
         About,
+        OpenSettings,
         ToggleRecording,
         CopyTranscript,
         ExportTranscript,
@@ -52,6 +53,14 @@ pub fn configure(
 
     cx.on_action(|_: &About, cx| {
         about_view::open(cx);
+    });
+
+    let model_for_settings = model.clone();
+    cx.on_action(move |_: &OpenSettings, cx| {
+        model_for_settings.update(cx, |model, cx| {
+            model.show_settings();
+            cx.notify();
+        });
     });
 
     // Start/stop recording straight from the menu bar (and Cmd+R), so the
@@ -98,6 +107,7 @@ pub fn configure(
 
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-r", ToggleRecording, None),
         KeyBinding::new("cmd-shift-c", CopyTranscript, None),
         KeyBinding::new("cmd-shift-e", ExportTranscript, None),
@@ -149,7 +159,10 @@ fn install_transcript_actions(
     cx.on_action(move |_: &CopyTranscript, cx| {
         let copied = {
             let app = model_for_copy.read(cx);
-            if !matches!(app.view, View::LiveSession | View::History { .. }) {
+            if !matches!(
+                app.view,
+                View::LiveSession | View::History { .. } | View::Settings
+            ) {
                 return;
             }
             transcript_export::copy_transcript_to_clipboard(&app.segments, cx)
@@ -167,7 +180,10 @@ fn install_transcript_actions(
     cx.on_action(move |_: &ExportTranscript, cx| {
         let (text, name) = {
             let app = model.read(cx);
-            if !matches!(app.view, View::LiveSession | View::History { .. }) {
+            if !matches!(
+                app.view,
+                View::LiveSession | View::History { .. } | View::Settings
+            ) {
                 return;
             }
             let session = app.viewed_session.as_ref();
@@ -256,6 +272,8 @@ fn build_menus(
             MenuItem::separator(),
             MenuItem::action("Copy Transcript", CopyTranscript),
             MenuItem::action("Export Transcript…", ExportTranscript),
+            MenuItem::separator(),
+            MenuItem::action("Settings…", OpenSettings),
             MenuItem::separator(),
             MenuItem::action("Toggle Light/Dark Appearance", ToggleTheme),
             MenuItem::submenu(Menu {

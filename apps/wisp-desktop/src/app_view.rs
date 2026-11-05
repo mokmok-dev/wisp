@@ -21,11 +21,12 @@ use gpui::{
 use gpui_kit::ScrollHandle;
 use gpui_kit::assets::IconName as AppIcon;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, TitleBar, WindowExt as _,
+    ActiveTheme as _, Icon, IndexPath, Sizable as _, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
     notification::Notification,
+    select::{SelectEvent, SelectState},
     sidebar::{
         Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu,
         SidebarMenuItem, SidebarToggleButton,
@@ -34,13 +35,15 @@ use gpui_kit::component::{
     v_flex,
 };
 use wisp_audiokit::{Permission, PermissionStatus};
-use wisp_core::SessionId;
+use wisp_core::{MeetingPolicy, MeetingTool, SessionId};
 
 use crate::app::{AppModel, Permissions, SessionState, View};
 use crate::library::SharedStorage;
+use crate::meeting_watch::MeetingWatcher;
 use crate::permissions;
 use crate::session_runner::SessionRunner;
-use crate::settings;
+use crate::settings::{self, LanguageCode, ThemePreference};
+use crate::settings_view::{self, LanguageOption};
 use crate::transcript_export::{self, suggested_export_name};
 use crate::{history_view, live_view, transcript_view};
 
@@ -54,6 +57,7 @@ pub(crate) struct AppDeps {
     pub runner: Arc<SessionRunner>,
     pub storage: SharedStorage,
     pub recordings_dir: PathBuf,
+    pub meeting: Arc<MeetingWatcher>,
 }
 
 /// Root view for the Wisp window.
@@ -62,6 +66,10 @@ pub(crate) struct AppView {
     pub(crate) runner: Arc<SessionRunner>,
     pub(crate) storage: SharedStorage,
     pub(crate) recordings_dir: PathBuf,
+    /// Background meeting detector. Settings changes are pushed to it.
+    pub(crate) meeting: Arc<MeetingWatcher>,
+    /// Language picker state. It is the only writer of the language setting.
+    pub(crate) language_select: Entity<SelectState<Vec<LanguageOption>>>,
     /// Live-session title field. Kept in sync with `AppModel::live_title`.
     pub(crate) live_title_input: Entity<InputState>,
     /// History rename field. Committed on Enter or blur.
@@ -82,6 +90,7 @@ pub(crate) struct AppView {
 }
 
 impl AppView {
+    #[allow(clippy::too_many_lines)] // one constructor tree
     pub(crate) fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -92,6 +101,7 @@ impl AppView {
             runner,
             storage,
             recordings_dir,
+            meeting,
         } = deps;
 
         // Apply the persisted appearance (or the window's current system
@@ -105,6 +115,30 @@ impl AppView {
             cx.new(|cx| InputState::new(window, cx).placeholder("Untitled session"));
         let library_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search transcripts"));
+        let language_items = settings_view::language_options();
+        let current_language = settings::language(cx);
+        let language_index = language_items
+            .iter()
+            .position(|option| option.code.as_ref() == current_language.as_str());
+        let language_select = cx.new(|cx| {
+            SelectState::new(
+                language_items,
+                language_index.map(|row| IndexPath::default().row(row)),
+                window,
+                cx,
+            )
+        });
+        cx.subscribe_in(
+            &language_select,
+            window,
+            |_this: &mut Self, _state, event: &SelectEvent<Vec<LanguageOption>>, _window, cx| {
+                if let SelectEvent::Confirm(Some(code)) = event {
+                    settings::set_language(LanguageCode::new(code.to_string()), cx);
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let transcript_scroll = ScrollHandle::new();
 
         // Keep the model's tree in sync when either title field changes. The
@@ -204,6 +238,8 @@ impl AppView {
             runner,
             storage,
             recordings_dir,
+            meeting,
+            language_select,
             live_title_input,
             history_title_input,
             library_search_input,
@@ -267,6 +303,102 @@ impl AppView {
         });
     }
 
+    pub(crate) fn show_settings(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.update(cx, |model, cx| {
+            model.show_settings();
+            cx.notify();
+        });
+    }
+
+    pub(crate) fn close_settings(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.update(cx, |model, cx| {
+            model.close_settings();
+            cx.notify();
+        });
+    }
+
+    pub(crate) fn choose_appearance(
+        &mut self,
+        preference: ThemePreference,
+        cx: &mut Context<Self>,
+    ) {
+        match preference {
+            ThemePreference::System => settings::set_system(cx),
+            ThemePreference::Light => settings::set_light(cx),
+            ThemePreference::Dark => settings::set_dark(cx),
+        }
+        // The native menu caches its checkmarks and does not observe the
+        // settings global.
+        crate::app_menu::refresh_menus(cx, &self.model);
+        cx.notify();
+    }
+
+    pub(crate) fn set_meeting_detection(
+        &mut self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let preferences = settings::set_meeting_detection_enabled(enabled, cx);
+        self.meeting.set_preferences(preferences);
+        if !enabled {
+            self.model.update(cx, |model, cx| {
+                if model.meeting_prompt.is_some() {
+                    model.meeting_prompt = None;
+                    cx.notify();
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn set_meeting_policy(
+        &mut self,
+        tool: MeetingTool,
+        policy: MeetingPolicy,
+        cx: &mut Context<Self>,
+    ) {
+        let preferences = settings::set_meeting_policy(tool, policy, cx);
+        self.meeting.set_preferences(preferences);
+        if policy == MeetingPolicy::Off {
+            self.model.update(cx, |model, cx| {
+                if model
+                    .meeting_prompt
+                    .is_some_and(|prompt| prompt.tool == tool)
+                {
+                    model.meeting_prompt = None;
+                    cx.notify();
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    /// Start a recording for the detected call shown in the prompt. The
+    /// prompt stays until the session actually starts, so a refused start
+    /// leaves the offer on screen.
+    pub(crate) fn record_detected_meeting(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_record(cx);
+    }
+
+    pub(crate) fn dismiss_meeting_prompt(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.update(cx, |model, cx| {
+            model.dismiss_meeting_prompt();
+            cx.notify();
+        });
+    }
+
     pub(crate) fn open_history(
         &mut self,
         session_id: SessionId,
@@ -290,7 +422,7 @@ impl AppView {
     ) {
         let session_id = match self.model.read(cx).view {
             View::History { session_id } => session_id,
-            View::Library | View::LiveSession => return,
+            View::Library | View::LiveSession | View::Settings => return,
         };
         let title = self.history_title_input.read(cx).value().to_string();
         crate::rename_session(&self.model, &self.storage, session_id, &title, cx);
@@ -304,7 +436,10 @@ impl AppView {
     ) {
         let copied = {
             let app = self.model.read(cx);
-            if !matches!(app.view, View::LiveSession | View::History { .. }) {
+            if !matches!(
+                app.view,
+                View::LiveSession | View::History { .. } | View::Settings
+            ) {
                 return;
             }
             transcript_export::copy_transcript_to_clipboard(&app.segments, cx)
@@ -324,7 +459,10 @@ impl AppView {
     ) {
         let (text, name) = {
             let app = self.model.read(cx);
-            if !matches!(app.view, View::LiveSession | View::History { .. }) {
+            if !matches!(
+                app.view,
+                View::LiveSession | View::History { .. } | View::Settings
+            ) {
                 return;
             }
             let session = app.viewed_session.as_ref();
@@ -618,12 +756,79 @@ impl AppView {
         Some(row.into_any_element())
     }
 
+    /// A detected call offers to record without leaving the current screen.
+    fn render_meeting_prompt(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let app = self.model.read(cx);
+        if app.state.is_active() {
+            return None;
+        }
+        let prompt = app.meeting_prompt?;
+        let headline = match prompt.tool {
+            MeetingTool::BrowserMeeting => "A browser is using your microphone.".to_string(),
+            tool => format!("{} is using your microphone.", tool.label()),
+        };
+        Some(
+            h_flex()
+                .w_full()
+                .gap_3()
+                .items_center()
+                .px_6()
+                .py_2()
+                .bg(cx.theme().secondary)
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(Icon::new(AppIcon::Mic).text_color(cx.theme().primary))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(headline),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Record this meeting and transcribe it on this Mac."),
+                        ),
+                )
+                .child(
+                    Button::new("meeting-dismiss")
+                        .ghost()
+                        .small()
+                        .label("Not now")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.dismiss_meeting_prompt(cx);
+                        })),
+                )
+                .child(
+                    Button::new("meeting-record")
+                        .primary()
+                        .small()
+                        .label("Record")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.record_detected_meeting(cx);
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_sidebar(
         &self,
         active_view: &View,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let live = matches!(active_view, View::LiveSession);
+        let history = matches!(active_view, View::Library | View::History { .. });
+        let settings = matches!(active_view, View::Settings);
         let collapsed = self.sidebar_collapsed;
 
         Sidebar::new("wisp-sidebar")
@@ -656,8 +861,14 @@ impl AppView {
                         .child(
                             SidebarMenuItem::new("Session History")
                                 .icon(AppIcon::RotateCcw)
-                                .active(!live)
+                                .active(history)
                                 .on_click(cx.listener(|this, _, _, cx| this.show_library(cx))),
+                        )
+                        .child(
+                            SidebarMenuItem::new("Settings")
+                                .icon(AppIcon::Settings)
+                                .active(settings)
+                                .on_click(cx.listener(|this, _, _, cx| this.show_settings(cx))),
                         ),
                 ),
             )
@@ -753,7 +964,7 @@ impl AppView {
             )
     }
 
-    fn render_permission_row(
+    pub(crate) fn render_permission_row(
         permission: Permission,
         icon: AppIcon,
         title: &'static str,
@@ -1109,11 +1320,24 @@ impl Render for AppView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let onboarding = !self.model.read(cx).setup_complete();
-        let content = if onboarding {
+        let (view, onboarding) = {
+            let app = self.model.read(cx);
+            (app.view.clone(), !app.setup_complete())
+        };
+        let content = if matches!(view, View::Settings) {
+            // Settings stays reachable before onboarding finishes, so the
+            // menu action never looks like it did nothing.
+            h_flex()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .overflow_hidden()
+                .child(self.render_sidebar(&view, cx))
+                .child(settings_view::render(self, cx))
+                .into_any_element()
+        } else if onboarding {
             self.render_onboarding(cx).into_any_element()
         } else {
-            let view = self.model.read(cx).view.clone();
             h_flex()
                 .flex_1()
                 .min_h_0()
@@ -1124,6 +1348,7 @@ impl Render for AppView {
                     View::Library => self.render_library(cx).into_any_element(),
                     View::LiveSession => live_view::render(self, cx),
                     View::History { .. } => history_view::render(self, cx),
+                    View::Settings => settings_view::render(self, cx),
                 })
                 .into_any_element()
         };
@@ -1134,6 +1359,7 @@ impl Render for AppView {
             .text_color(cx.theme().foreground)
             .child(self.render_title_bar(cx))
             .children(self.render_status_strip(cx))
+            .children(self.render_meeting_prompt(cx))
             .child(content)
     }
 }
@@ -1144,6 +1370,7 @@ const fn view_key(view: &View) -> u8 {
         View::Library => 0,
         View::LiveSession => 1,
         View::History { .. } => 2,
+        View::Settings => 3,
     }
 }
 

@@ -23,6 +23,18 @@ step.
 
 ## Current record
 
+2026-11-05, Linux x86_64 (NixOS), Rust 1.99.1:
+
+- `cargo test -p wisp-core -p wisp-audiokit` passed: 36 tests in `wisp-core`
+  (including the meeting catalog and settings shapes) and 47 in
+  `wisp-audiokit` (including the meeting-detection state machine).
+- `cargo clippy -p wisp-core -p wisp-audiokit --all-targets -- -D warnings`
+  passed.
+- The desktop crate was type-checked and its 68 unit tests passed on the same
+  Linux host against a compile-only stub of the macOS backend. The stub lives
+  outside the repository. The real Core Audio probe, the Swift language path,
+  and every rendering path remain unverified.
+
 2026-11-02, Linux x86_64 (NixOS), Rust 1.99.1:
 
 - `./scripts/check --pure` passed. That covers formatting, clippy, and 70
@@ -38,6 +50,20 @@ step.
 
 Run these before the next release and record the result and date here.
 
+- Open Settings with <kbd>⌘,</kbd> while a recording is running. Confirm the
+  live transcript keeps updating and Back returns to the recording screen.
+- Choose English (US), record a session, and confirm the transcript is English.
+  Choose a language the Speech framework rejects and confirm the failure lands
+  in the status strip instead of crashing.
+- Enable meeting detection, join a Zoom or Teams call, and confirm one prompt
+  appears after about two seconds. Dismiss it and confirm the same call is not
+  offered again until the app has been off the microphone for a minute.
+- Set Zoom to Auto-record and join a call. Confirm exactly one session starts,
+  and that a call detected while a session is already recording is ignored.
+- Join Google Meet in Safari or Chrome. Confirm the browser prompt waits about
+  twenty seconds, and a short voice note in the same browser does not prompt.
+- Quit and relaunch, then confirm the chosen language and every tool policy
+  survive in `settings.json`.
 - First launch with both permissions undetermined, then grant them. Confirm
   the onboarding rows update without a restart.
 - Deny Speech Recognition and start a recording. Confirm the library screen

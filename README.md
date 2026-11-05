@@ -14,7 +14,9 @@ the same time and transcribes both on-device with Apple's `SpeechAnalyzer`.
 - **On-device transcription** — Uses [`SpeechAnalyzer`](https://developer.apple.com/documentation/speech), the new API in Apple's Speech framework. Both the microphone and the far side of the call are transcribed locally.
 - **System audio + microphone capture** — Uses macOS 14.2+ [Core Audio Process Taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps). Each source is captured as a separate track.
 - **Built in Rust with a native GPU-rendered UI** — The window is built on [GPUI](https://www.gpui.rs/), the framework that powers the [Zed](https://zed.dev/) editor, with the interface composed from [GPUI Component](https://gpui-kit.com/) ([longbridge/gpui-kit](https://github.com/longbridge/gpui-kit)). The UI is native — no embedded browser and no web assets — and no network is used at runtime.
-- **Light and dark appearance** — Follows the macOS appearance by default. Switch from the title-bar button, <kbd>⌘⇧D</kbd>, or the app menu's Appearance submenu (Follow System / Light / Dark); the choice is persisted in `settings.json` beside the local data.
+- **Light and dark appearance** — Follows the macOS appearance by default. Switch from the title-bar button, <kbd>⌘⇧D</kbd>, the app menu's Appearance submenu (Follow System / Light / Dark), or the Settings page; the choice is persisted in `settings.json` beside the local data.
+- **Settings and transcription language** — <kbd>⌘,</kbd> or the sidebar opens Settings. Pick the speech language there; Apple's on-device model is downloaded for it on the next recording. The default stays `ja-JP`.
+- **Meeting detection** — Off by default. When enabled, Wisp watches which apps hold the microphone and offers to record, or records automatically, per tool: Zoom, Microsoft Teams, Slack huddles, Webex, FaceTime, Discord, and browser meetings. A native app must hold the microphone for about two seconds, and a browser for twenty, so a voice note is not mistaken for a call.
 - **Simple local storage** — Recordings are stored as Ogg/Opus and metadata as SQLite under `$WISP_DATA_DIR`, or `$HOME/Library/Application Support/dev.mokmok.wisp/` when the override is unset. Completed transcripts can be copied as plain text or exported as Markdown.
 
 ## Screenshots
@@ -34,8 +36,8 @@ Wisp is a small Cargo workspace with cleanly separated concerns:
 | Crate / target | Responsibility |
 | --- | --- |
 | `apps/wisp-desktop` | GPUI desktop shell. The native UI is built with [GPUI Component](https://gpui-kit.com/) ([longbridge/gpui-kit](https://github.com/longbridge/gpui-kit)) and handles setup, recording controls, session history, and transcript export. |
-| `crates/wisp-core` | Shared, platform-agnostic types (`Session`, `Segment`, IDs, `SourceLabel`). |
-| `crates/wisp-audiokit` | macOS audio/transcription backends and the backend-neutral session orchestrator. |
+| `crates/wisp-core` | Shared, platform-agnostic types (`Session`, `Segment`, IDs, `SourceLabel`) and the meeting-tool catalog and settings shapes. |
+| `crates/wisp-audiokit` | macOS audio/transcription backends, the backend-neutral session orchestrator, and the microphone-activity probe and detection state machine. |
 | `crates/wisp-audiokit-sys` | Raw C ABI bindings to the macOS `WispAudioKit` library. |
 | `crates/wisp-lifecycle` | Session lifecycle state machine used by the runtime and formal verification. |
 | `crates/wisp-storage` | Session/segment persistence on SQLite (bundled `rusqlite`). |
@@ -87,8 +89,14 @@ Microphone input ───────┘        │                            
 ## Setup and usage
 
 On macOS, first launch shows the microphone and speech-recognition permissions
-needed for capture and on-device transcription. The desktop currently requests
-the `ja-JP` transcription locale for each session.
+needed for capture and on-device transcription. The default speech language is
+`ja-JP`; open Settings with <kbd>⌘,</kbd> or the sidebar to choose another
+language. The choice applies to the next recording, and the model downloads on
+first use.
+
+Meeting detection is off until you enable it in Settings. Each tool can be set
+to **Off**, **Ask**, or **Auto-record**. Wisp reads the microphone users from
+Core Audio and never records audio until a session starts.
 
 To record and review a session:
 
@@ -108,6 +116,7 @@ The application menu also provides these shortcuts:
 | Copy transcript | <kbd>⌘⇧C</kbd> |
 | Export transcript | <kbd>⌘⇧E</kbd> |
 | Toggle light/dark appearance | <kbd>⌘⇧D</kbd> |
+| Open Settings | <kbd>⌘,</kbd> |
 
 ## Build & run
 

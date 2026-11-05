@@ -4,6 +4,7 @@
 //! timing rules that separate a call from a voice note, and the snooze that
 //! keeps one call from being offered twice.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use wisp_core::{MeetingPolicy, MeetingTool};
@@ -71,17 +72,13 @@ struct Pending {
     run: Run,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Handled {
-    tool: MeetingTool,
-    last_present: Instant,
-}
-
 /// The detection state machine. One instance per running app.
 #[derive(Debug, Default)]
 pub struct Detector {
     pending: Option<Pending>,
-    handled: Option<Handled>,
+    /// Last time each offered call's app was on the microphone. A call stays
+    /// snoozed until its entry is a minute old.
+    handled: BTreeMap<MeetingTool, Instant>,
 }
 
 impl Detector {
@@ -101,16 +98,28 @@ impl Detector {
         active: &[MeetingTool],
         policy: impl Fn(MeetingTool) -> MeetingPolicy,
     ) -> Option<Observation> {
-        if let Some(handled) = &mut self.handled {
-            if active.contains(&handled.tool) {
-                handled.last_present = now;
-                return None;
+        let mut handled_present = false;
+        for (tool, last_present) in &mut self.handled {
+            if active.contains(tool) {
+                *last_present = now;
+                handled_present = true;
             }
-            if now.saturating_duration_since(handled.last_present) < ABSENT_FOR_RESET {
-                return None;
-            }
-            let tool = handled.tool;
-            self.handled = None;
+        }
+        // One call at a time: while an offered call still holds the
+        // microphone, another app joining it does not raise a second offer.
+        if handled_present {
+            return None;
+        }
+
+        let expired = self
+            .handled
+            .iter()
+            .find(|(_, last_present)| {
+                now.saturating_duration_since(**last_present) >= ABSENT_FOR_RESET
+            })
+            .map(|(tool, _)| *tool);
+        if let Some(tool) = expired {
+            self.handled.remove(&tool);
             self.pending = None;
             return Some(Observation::Ended { tool });
         }
@@ -143,10 +152,7 @@ impl Detector {
         }
 
         self.pending = None;
-        self.handled = Some(Handled {
-            tool,
-            last_present: now,
-        });
+        self.handled.insert(tool, now);
         Some(Observation::Detected(Detection {
             tool,
             auto_record: policy(tool) == MeetingPolicy::AutoRecord,
@@ -163,10 +169,13 @@ impl Detector {
         now: Instant,
     ) {
         if let Some(pending) = &mut self.pending {
+            if now.saturating_duration_since(pending.run.last) > MAX_OBSERVATION_GAP {
+                pending.run.since = now;
+            }
             pending.run.last = now;
         }
-        if let Some(handled) = &mut self.handled {
-            handled.last_present = now;
+        for last_present in self.handled.values_mut() {
+            *last_present = now;
         }
     }
 
@@ -178,22 +187,19 @@ impl Detector {
         tool: MeetingTool,
     ) {
         self.pending = None;
-        self.handled = Some(Handled {
-            tool,
-            last_present: now,
-        });
+        self.handled.insert(tool, now);
     }
 
     /// Forget every run and snooze, as when detection is turned off.
     pub fn reset(&mut self) {
         self.pending = None;
-        self.handled = None;
+        self.handled.clear();
     }
 
     /// The call currently snoozed, if any.
     #[must_use]
     pub fn handled_tool(&self) -> Option<MeetingTool> {
-        self.handled.map(|handled| handled.tool)
+        self.handled.keys().next().copied()
     }
 }
 
@@ -360,6 +366,47 @@ mod tests {
     }
 
     #[test]
+    fn another_tool_is_detected_after_the_first_call_leaves() {
+        let base = Instant::now();
+        let mut detector = Detector::new();
+        assert_eq!(
+            detector.observe(at(base, 0), &[MeetingTool::Zoom], ask),
+            None
+        );
+        assert!(matches!(
+            detector.observe(at(base, 2_000), &[MeetingTool::Zoom], ask),
+            Some(Observation::Detected(super::Detection {
+                tool: MeetingTool::Zoom,
+                ..
+            }))
+        ));
+        // Zoom still holds the microphone, so the Slack huddle waits.
+        assert_eq!(
+            detector.observe(
+                at(base, 3_000),
+                &[MeetingTool::Zoom, MeetingTool::Slack],
+                ask
+            ),
+            None
+        );
+        assert_eq!(
+            detector.observe(at(base, 4_000), &[MeetingTool::Slack], ask),
+            None
+        );
+        assert_eq!(
+            detector.observe(at(base, 5_000), &[MeetingTool::Slack], ask),
+            None
+        );
+        assert!(matches!(
+            detector.observe(at(base, 6_000), &[MeetingTool::Slack], ask),
+            Some(Observation::Detected(super::Detection {
+                tool: MeetingTool::Slack,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn one_call_is_offered_once_until_it_leaves_the_microphone() {
         let base = Instant::now();
         let mut detector = Detector::new();
@@ -415,6 +462,25 @@ mod tests {
         detector.observe_unavailable(at(base, 1_000));
         assert!(matches!(
             detector.observe(at(base, 2_000), &[MeetingTool::Zoom], ask),
+            Some(Observation::Detected(_))
+        ));
+    }
+
+    #[test]
+    fn a_long_unreadable_stretch_restarts_the_run() {
+        let base = Instant::now();
+        let mut detector = Detector::new();
+        assert_eq!(
+            detector.observe(at(base, 0), &[MeetingTool::Zoom], ask),
+            None
+        );
+        detector.observe_unavailable(at(base, 20_000));
+        assert_eq!(
+            detector.observe(at(base, 21_999), &[MeetingTool::Zoom], ask),
+            None
+        );
+        assert!(matches!(
+            detector.observe(at(base, 22_000), &[MeetingTool::Zoom], ask),
             Some(Observation::Detected(_))
         ));
     }

@@ -62,6 +62,8 @@ mod platform {
         element: u32,
     }
 
+    #[link(name = "CoreAudio", kind = "framework")]
+    #[link(name = "Foundation", kind = "framework")]
     unsafe extern "C" {
         fn AudioObjectGetPropertyDataSize(
             object: AudioObjectId,
@@ -235,6 +237,8 @@ mod platform {
     pub(super) fn active_meeting_tools() -> Result<Vec<MeetingTool>, MeetingActivityError> {
         let process_objects =
             property_vec::<AudioObjectId>(SYSTEM_OBJECT, PROCESS_OBJECT_LIST, "process objects")?;
+        let total = process_objects.len();
+        let mut failed = 0usize;
         let mut tools = Vec::new();
         for process in process_objects {
             // A process that disappears between the list and this read is
@@ -242,6 +246,7 @@ mod platform {
             let Ok(running) =
                 property_value::<u32>(process, PROCESS_IS_RUNNING_INPUT, "running input")
             else {
+                failed += 1;
                 continue;
             };
             if running == 0 {
@@ -256,6 +261,12 @@ mod platform {
             if !tools.contains(&tool) {
                 tools.push(tool);
             }
+        }
+        // Every process failing is a broken sampler, not a quiet microphone.
+        if total > 0 && failed == total {
+            return Err(MeetingActivityError::Malformed {
+                property: "running input",
+            });
         }
         Ok(tools)
     }

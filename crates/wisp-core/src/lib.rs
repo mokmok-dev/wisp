@@ -7,6 +7,7 @@
 mod audio;
 mod error;
 mod ids;
+mod meeting;
 mod source;
 mod transcript;
 
@@ -17,5 +18,6 @@ pub use audio::{
 };
 pub use error::SourceLabelError;
 pub use ids::{SegmentId, SessionId};
+pub use meeting::{MeetingDetectionSettings, MeetingPolicies, MeetingPolicy, MeetingTool};
 pub use source::SourceLabel;
 pub use transcript::{NewSegment, NewSession, Segment, Session};

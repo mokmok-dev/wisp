@@ -17,7 +17,7 @@ use wisp_audiokit::{
     Event, Permission, PermissionStatus, SessionConfig, SessionError, SessionResult, SourceLabel,
     TranscriptionPolicy,
 };
-use wisp_core::{Session as StoredSession, SessionId};
+use wisp_core::{MeetingTool, Session as StoredSession, SessionId};
 use wisp_lifecycle::{Phase, UpdateContext, ViewOwner, WorkerUpdate, can_replace_transcript};
 
 #[derive(Debug, Clone)]
@@ -119,7 +119,19 @@ pub enum PendingSessionWrite {
 pub enum View {
     Library,
     LiveSession,
-    History { session_id: SessionId },
+    History {
+        session_id: SessionId,
+    },
+    /// Preferences. Opening it never discards a settling session, and
+    /// `view_owner` keeps a live recording's updates flowing while it is
+    /// shown.
+    Settings,
+}
+
+/// A detected meeting waiting for the user's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeetingPrompt {
+    pub tool: MeetingTool,
 }
 
 /// Snapshot of every permission Wisp gates Record on.
@@ -265,13 +277,20 @@ pub struct AppModel {
     pub library_hits: Option<Vec<SessionId>>,
     /// Session waiting for the second click on Delete.
     pub pending_delete: Option<SessionId>,
+    /// A detected meeting waiting for the user's answer.
+    pub meeting_prompt: Option<MeetingPrompt>,
+    /// The screen Settings was opened from, so closing returns there without
+    /// touching a live session.
+    pub pre_settings_view: Option<View>,
 }
 
 impl AppModel {
     fn view_owner(&self) -> ViewOwner {
         match self.view {
             View::Library => ViewOwner::Library,
-            View::LiveSession => ViewOwner::Live,
+            // Settings owns no session; a live recording keeps ingesting while
+            // the user reads preferences.
+            View::LiveSession | View::Settings => ViewOwner::Live,
             View::History { .. } => ViewOwner::History,
         }
     }
@@ -324,6 +343,8 @@ impl AppModel {
             library_query: String::new(),
             library_hits: None,
             pending_delete: None,
+            meeting_prompt: None,
+            pre_settings_view: None,
         }
     }
 
@@ -381,6 +402,29 @@ impl AppModel {
         self.pending_delete = None;
     }
 
+    /// Show the preferences page. Unlike the other `show_*` methods this never
+    /// consults [`Self::has_unsettled_session`]: opening settings discards
+    /// nothing, and closing returns to the screen it was opened from.
+    pub fn show_settings(&mut self) {
+        if !matches!(self.view, View::Settings) {
+            self.pre_settings_view = Some(self.view.clone());
+            self.view = View::Settings;
+        }
+    }
+
+    /// Return to the screen Settings was opened from. This bypasses the
+    /// `show_*` guards so a user who opened Settings during a recording can
+    /// always get back to it.
+    pub fn close_settings(&mut self) {
+        self.view = self.pre_settings_view.take().unwrap_or(View::Library);
+    }
+
+    /// Drop a detected-meeting prompt without changing detection state; the
+    /// detector's snooze already prevents this call from being offered again.
+    pub fn dismiss_meeting_prompt(&mut self) {
+        self.meeting_prompt = None;
+    }
+
     /// Move to the library screen and drop any live/historical segments so
     /// the next view enter starts from a clean slate. Navigation is ignored
     /// while a worker session is active; otherwise its future events could be
@@ -402,6 +446,7 @@ impl AppModel {
         self.current_output_dir = None;
         self.last_error = None;
         self.pending_delete = None;
+        self.pre_settings_view = None;
     }
 
     /// Move to the live recording screen in idle state. Used by the
@@ -425,6 +470,7 @@ impl AppModel {
         self.current_output_dir = None;
         self.last_error = None;
         self.pending_delete = None;
+        self.pre_settings_view = None;
     }
 
     /// Move to a historical session's read-only transcript view. The
@@ -450,6 +496,7 @@ impl AppModel {
         self.current_session_dir_name = None;
         self.current_output_dir = None;
         self.pending_delete = None;
+        self.pre_settings_view = None;
         // Historical segments are already finalized.
         self.finalize_all_segments();
         for seg in &mut self.segments {
@@ -468,6 +515,7 @@ impl AppModel {
         self.show_new_session();
         self.state = SessionState::Starting;
         self.microphone_muted = false;
+        self.meeting_prompt = None;
         true
     }
 
@@ -482,6 +530,9 @@ impl AppModel {
         state: SessionState,
     ) {
         self.state = state;
+        if state.is_active() {
+            self.meeting_prompt = None;
+        }
         if matches!(state, SessionState::Idle | SessionState::Failed) {
             self.microphone_muted = false;
         }
@@ -943,6 +994,73 @@ mod tests {
             assert_eq!(m.segments.len(), 1);
             assert_eq!(m.segments[0].text, "live");
         }
+    }
+
+    #[test]
+    fn settings_view_keeps_accepting_the_live_session() {
+        let mut m = AppModel::new();
+        let started_at = Instant::now();
+        m.show_new_session();
+        m.state = SessionState::Recording { started_at };
+        m.current_session_id = Some(SessionId::from(10));
+
+        m.show_settings();
+
+        assert_eq!(m.view, View::Settings);
+        assert!(m.accepts_worker_update(SessionId::from(10)));
+        assert_eq!(m.state, SessionState::Recording { started_at });
+    }
+
+    #[test]
+    fn closing_settings_returns_to_the_screen_it_opened_from() {
+        let mut m = AppModel::new();
+        m.show_history(
+            stored_session(20),
+            vec![historical_segment("old transcript")],
+        );
+
+        m.show_settings();
+        m.close_settings();
+
+        assert_eq!(
+            m.view,
+            View::History {
+                session_id: SessionId::from(20)
+            }
+        );
+        assert_eq!(m.segments.len(), 1);
+        assert_eq!(m.segments[0].text, "old transcript");
+    }
+
+    #[test]
+    fn settings_never_discards_a_settling_session() {
+        let mut m = AppModel::new();
+        m.show_new_session();
+        m.state = SessionState::Failed;
+        m.current_session_id = Some(SessionId::from(10));
+        m.pending_session_write = Some(PendingSessionWrite::Finalise {
+            ended_at: chrono::Utc::now(),
+        });
+        m.segments.push(historical_segment("not persisted yet"));
+
+        m.show_settings();
+        m.close_settings();
+
+        assert!(m.has_unsettled_session());
+        assert_eq!(m.segments.len(), 1);
+        assert_eq!(m.current_session_id, Some(SessionId::from(10)));
+    }
+
+    #[test]
+    fn opening_settings_twice_keeps_the_first_origin() {
+        let mut m = AppModel::new();
+        m.show_library();
+        m.show_settings();
+        m.show_settings();
+
+        m.close_settings();
+
+        assert_eq!(m.view, View::Library);
     }
 
     #[test]

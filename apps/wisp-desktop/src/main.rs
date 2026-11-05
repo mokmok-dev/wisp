@@ -45,17 +45,20 @@ mod format;
 mod history_view;
 mod library;
 mod live_view;
+mod meeting_watch;
 mod permissions;
 mod session_runner;
 mod session_updates;
 mod settings;
+mod settings_view;
 mod transcript_export;
 mod transcript_view;
 
-use app::{AppError, AppModel, PendingSessionWrite, SessionState, View};
+use app::{AppError, AppModel, MeetingPrompt, PendingSessionWrite, SessionState, View};
 use app_menu::configure as configure_app_menu;
 use app_view::{AppDeps, AppView};
 use library::SharedStorage;
+use meeting_watch::{MeetingEvent, MeetingWatcher};
 use session_runner::{SessionRunner, SessionStart};
 use session_updates::apply_update;
 
@@ -80,9 +83,11 @@ fn main() {
             cx.activate(true);
 
             let data_dir = default_data_directory();
-            // Load persisted preferences (light/dark appearance) and apply the
-            // stored theme before the first window paints.
+            // Load persisted preferences (appearance, language, meeting
+            // policies) and apply the stored theme before the first window
+            // paints.
             settings::init(cx, &data_dir);
+            let meeting = Arc::new(MeetingWatcher::spawn(settings::meeting_detection(cx)));
             let recordings_dir = data_dir.join("recordings");
             let storage = open_storage(&data_dir);
             let runner = Arc::new(SessionRunner::spawn());
@@ -112,6 +117,7 @@ fn main() {
                 runner: runner.clone(),
                 storage: storage.clone(),
                 recordings_dir: recordings_dir.clone(),
+                meeting: meeting.clone(),
             };
             let (_window, _view) = gpui_kit::open_window(window_options, cx, move |window, cx| {
                 cx.new(|cx| AppView::new(window, cx, deps))
@@ -123,10 +129,19 @@ fn main() {
                 runner.clone(),
                 storage.clone(),
                 model.clone(),
-                recordings_dir,
+                recordings_dir.clone(),
             );
 
-            spawn_session_pump(cx, SessionPump::new(runner, storage, model.clone()));
+            spawn_session_pump(
+                cx,
+                SessionPump::new(
+                    runner,
+                    storage,
+                    model.clone(),
+                    recordings_dir.clone(),
+                    meeting,
+                ),
+            );
             spawn_permission_refresh(cx, model);
         });
 }
@@ -135,6 +150,8 @@ struct SessionPump {
     runner: Arc<SessionRunner>,
     storage: SharedStorage,
     model: Entity<AppModel>,
+    recordings_dir: PathBuf,
+    meeting: Arc<MeetingWatcher>,
 }
 
 impl SessionPump {
@@ -142,11 +159,15 @@ impl SessionPump {
         runner: Arc<SessionRunner>,
         storage: SharedStorage,
         model: Entity<AppModel>,
+        recordings_dir: PathBuf,
+        meeting: Arc<MeetingWatcher>,
     ) -> Self {
         Self {
             runner,
             storage,
             model,
+            recordings_dir,
+            meeting,
         }
     }
 }
@@ -169,6 +190,9 @@ fn spawn_session_pump(
                         }
                         cx.notify();
                     });
+                }
+                for event in deps.meeting.drain_events() {
+                    apply_meeting_event(event, &deps, cx);
                 }
             });
         }
@@ -202,13 +226,14 @@ pub(crate) fn toggle_recording(
     recordings_dir: &std::path::Path,
     cx: &mut gpui::App,
 ) {
+    let language = settings::language(cx);
     let (state, pending_persistence, setup_complete, config, live_title) = {
         let app = model.read(cx);
         (
             app.state,
             app.has_pending_persistence(),
             app.setup_complete(),
-            AppModel::session_config("ja-JP"),
+            AppModel::session_config(language.as_str()),
             app.live_title.clone(),
         )
     };
@@ -244,6 +269,97 @@ pub(crate) fn toggle_recording(
         },
         SessionState::Starting | SessionState::Stopping => {
             // ignore taps while a transition is in flight
+        },
+    }
+}
+
+/// A detected call may start a recording, but only from an idle app. Unlike
+/// [`toggle_recording`] this never stops a session that is already running.
+fn start_meeting_recording(
+    tool: wisp_core::MeetingTool,
+    runner: &SessionRunner,
+    model: &gpui::Entity<AppModel>,
+    storage: &SharedStorage,
+    recordings_dir: &std::path::Path,
+    cx: &mut gpui::App,
+) {
+    let (state, pending_persistence, setup_complete) = {
+        let app = model.read(cx);
+        (
+            app.state,
+            app.has_pending_persistence(),
+            app.setup_complete(),
+        )
+    };
+    if pending_persistence
+        || !matches!(state, SessionState::Idle | SessionState::Failed)
+        || !setup_complete
+    {
+        return;
+    }
+    let config = AppModel::session_config(settings::language(cx).as_str());
+    start_recording(
+        runner,
+        model,
+        storage,
+        recordings_dir,
+        config,
+        tool.label(),
+        cx,
+    );
+}
+
+fn apply_meeting_event(
+    event: MeetingEvent,
+    deps: &SessionPump,
+    cx: &mut gpui::App,
+) {
+    match event {
+        MeetingEvent::Detected { tool, auto_record } => {
+            let (active, ready) = {
+                let model = deps.model.read(cx);
+                (model.state.is_active(), model.setup_complete())
+            };
+            if active || !ready {
+                return;
+            }
+            if auto_record {
+                start_meeting_recording(
+                    tool,
+                    &deps.runner,
+                    &deps.model,
+                    &deps.storage,
+                    &deps.recordings_dir,
+                    cx,
+                );
+                return;
+            }
+            deps.model.update(cx, |model, cx| {
+                model.meeting_prompt = Some(MeetingPrompt { tool });
+                cx.notify();
+            });
+        },
+        MeetingEvent::Ended { tool } => {
+            deps.model.update(cx, |model, cx| {
+                if model
+                    .meeting_prompt
+                    .is_some_and(|prompt| prompt.tool == tool)
+                {
+                    model.meeting_prompt = None;
+                    cx.notify();
+                }
+            });
+        },
+        MeetingEvent::SamplerUnavailable => {
+            deps.model.update(cx, |model, cx| {
+                model
+                    .recent_log
+                    .push_back("meeting detection: microphone activity is unavailable".to_owned());
+                while model.recent_log.len() > 200 {
+                    model.recent_log.pop_front();
+                }
+                cx.notify();
+            });
         },
     }
 }

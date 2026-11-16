@@ -42,11 +42,17 @@ struct Permissions: Equatable, Sendable {
 }
 
 extension Permission {
-  /// The row label and rationale shared by onboarding and settings.
   var title: String {
     switch self {
     case .microphone: "Microphone"
     case .speechRecognition: "Speech Recognition"
+    }
+  }
+
+  var rationale: String {
+    switch self {
+    case .microphone: "Capture your voice for on-device transcription."
+    case .speechRecognition: "Transcribe both tracks with Apple's on-device speech model."
     }
   }
 }

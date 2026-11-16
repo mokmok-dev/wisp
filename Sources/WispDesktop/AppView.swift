@@ -58,8 +58,6 @@ struct AppView: View {
 
   private var chrome: some View {
     HStack(spacing: 8) {
-      Text("Wisp")
-        .font(.headline)
       stateTag
       Spacer()
     }
@@ -67,14 +65,19 @@ struct AppView: View {
     .padding(.vertical, 10)
   }
 
+  /// The one place the session phase is shown.
   private var stateTag: some View {
     let (label, color): (String, Color) =
       if model.hasPendingPersistence {
         ("Unsaved", .orange)
-      } else if model.state.isActive {
-        ("REC", .red)
       } else {
-        ("idle", .secondary)
+        switch model.state {
+        case .idle: ("Ready", .secondary)
+        case .starting: ("Starting…", .accentColor)
+        case .recording: ("Recording", .red)
+        case .stopping: ("Finishing…", .accentColor)
+        case .failed: ("Failed", .red)
+        }
       }
     return TagView(label: label, color: color)
   }
@@ -83,30 +86,22 @@ struct AppView: View {
 
   private var sidebar: some View {
     VStack(alignment: .leading, spacing: 0) {
-      VStack(alignment: .leading, spacing: 2) {
-        Text("Wisp").font(.subheadline.weight(.semibold))
-        Text("on-device").font(.caption).foregroundStyle(.secondary)
-      }
-      .padding(.horizontal, 16)
-      .padding(.top, 12)
       List {
-        Section("Menu") {
-          SidebarRow(
-            title: "New Session",
-            systemImage: "mic",
-            active: model.view == .live
-          ) { model.showNewSession() }
-          SidebarRow(
-            title: "Session History",
-            systemImage: "clock.arrow.circlepath",
-            active: isLibraryActive
-          ) { model.showLibrary() }
-          SidebarRow(
-            title: "Settings",
-            systemImage: "gearshape",
-            active: model.view == .settings
-          ) { model.showSettings() }
-        }
+        SidebarRow(
+          title: "New Session",
+          systemImage: "mic",
+          active: model.view == .live
+        ) { model.showNewSession() }
+        SidebarRow(
+          title: "Session History",
+          systemImage: "clock.arrow.circlepath",
+          active: isLibraryActive
+        ) { model.showLibrary() }
+        SidebarRow(
+          title: "Settings",
+          systemImage: "gearshape",
+          active: model.view == .settings
+        ) { model.showSettings() }
       }
       .listStyle(.sidebar)
       Spacer(minLength: 0)

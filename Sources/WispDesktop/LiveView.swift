@@ -19,29 +19,6 @@ struct LiveView: View {
     model.state == .idle || model.state == .recording
   }
 
-  private var phaseLabel: String {
-    if model.hasPendingPersistence {
-      return "Unsaved"
-    }
-    return switch model.state {
-    case .idle: "Ready"
-    case .starting: "Starting…"
-    case .recording: "Recording"
-    case .stopping: "Finishing…"
-    case .failed: "Failed"
-    }
-  }
-
-  private var phaseColor: Color {
-    if model.hasPendingPersistence || model.state == .recording || model.state == .failed {
-      return .red
-    }
-    if model.state == .starting || model.state == .stopping {
-      return .accentColor
-    }
-    return .secondary
-  }
-
   var body: some View {
     VStack(spacing: 0) {
       header
@@ -50,7 +27,7 @@ struct LiveView: View {
         TranscriptView(segments: model.segments, follows: true)
       }
       ScreenFooter(
-        leading: "Transcribed on-device · mic and system audio are kept as separate tracks",
+        leading: "Mic and system audio are kept as separate tracks",
         trailing: "⌘R to start / stop"
       )
     }
@@ -70,10 +47,6 @@ struct LiveView: View {
       .disabled(!titleEditable)
 
       HStack(spacing: 12) {
-        if isRecording {
-          Circle().fill(Color.red).frame(width: 8, height: 8)
-        }
-        TagView(label: phaseLabel, color: phaseColor)
         Text(Format.clock(totalMilliseconds: model.elapsedMilliseconds))
           .font(.system(.title3, design: .monospaced))
           .monospacedDigit()

@@ -14,7 +14,7 @@ the same time and transcribes both on-device with Apple's `SpeechAnalyzer`.
 - **On-device transcription** — Uses [`SpeechAnalyzer`](https://developer.apple.com/documentation/speech), the new API in Apple's Speech framework. Both the microphone and the far side of the call are transcribed locally.
 - **System audio + microphone capture** — Uses macOS 14.2+ [Core Audio Process Taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps). Each source is captured as a separate track.
 - **Pure Swift** — Capture, transcription, storage, and the interface are one Swift package built on AppKit and SwiftUI. No embedded browser, no web assets, and no network at runtime.
-- **Light and dark appearance** — Follows the macOS appearance by default. Switch from the title-bar button, <kbd>⌘⇧D</kbd>, the app menu's Appearance submenu (Follow System / Light / Dark), or the Settings page; the choice is persisted in `settings.json` beside the local data.
+- **Light and dark appearance** — Follows the macOS appearance by default. Change the preference on the Settings page (Follow System / Light / Dark). The choice is persisted in `settings.json` beside the local data.
 - **Settings and transcription language** — <kbd>⌘,</kbd> or the sidebar opens Settings. Pick the speech language there; Apple's on-device model is downloaded for it on the next recording. The default stays `ja-JP`.
 - **Meeting detection** — Off by default. When enabled, Wisp watches which apps hold the microphone and offers to record, or records automatically, per tool: Zoom, Microsoft Teams, Slack huddles, Webex, FaceTime, Discord, and browser meetings. A native app must hold the microphone for about two seconds, and a browser for twenty, so a voice note is not mistaken for a call.
 - **Simple local storage** — Recordings are stored as Ogg/Opus and metadata as SQLite under `$WISP_DATA_DIR`, or `$HOME/Library/Application Support/dev.mokmok.wisp/` when the override is unset. Completed transcripts can be copied as plain text or exported as Markdown.
@@ -96,7 +96,6 @@ The application menu also provides these shortcuts:
 | Start / stop recording | <kbd>⌘R</kbd> |
 | Copy transcript | <kbd>⌘⇧C</kbd> |
 | Export transcript | <kbd>⌘⇧E</kbd> |
-| Toggle light/dark appearance | <kbd>⌘⇧D</kbd> |
 | Open Settings | <kbd>⌘,</kbd> |
 
 ## Build & run

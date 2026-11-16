@@ -346,12 +346,6 @@ final class SessionController {
     applyTheme()
   }
 
-  /// Pin whichever explicit mode is not in effect right now.
-  func toggleTheme() {
-    let dark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-    setTheme(dark ? .light : .dark)
-  }
-
   /// Follow the OS appearance (nil) or pin one, without a restart.
   func applyTheme() {
     switch settings.theme {

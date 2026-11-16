@@ -6,50 +6,84 @@ nothing about the device it never ran on.
 
 ## What each gate proves
 
-| Gate | Command | Proves | Host |
-| --- | --- | --- | --- |
-| Formatting | `./scripts/check` (stage 1) | The tree parses and matches `rustfmt` | Any |
-| Lints | `./scripts/check` (stage 2) | Clippy's deny set holds for the whole workspace | macOS with Xcode |
-| Rust tests | `./scripts/check` (stage 3) | Model, storage, lifecycle, and pure audio logic | macOS with Xcode |
-| Pure subset | `./scripts/check --pure` | The same for `wisp-core`, `wisp-lifecycle`, and `wisp-storage` | Any |
-| Desktop rendering | none | Nothing. The desktop tests cover model and state logic, not pixels | n/a |
-| Swift tests | `swift test --package-path native/WispAudioKit` | Capture, recording, and transcription adapters | macOS 26 |
-| Formal | `bash formal/check.sh` | Kani proofs and Shuttle schedules for the lifecycle protocol | macOS 26 |
-| Mutation | `./scripts/check --full` | Every mutant in the pure-logic crates is killed | macOS with Xcode |
+Every check is a `nix flake check` attribute. That command is the single entry
+point; there is no wrapper script.
 
-CI runs the macOS jobs in `.github/workflows/ci.yaml` and `formal.yaml`. The
-`swift.yaml` job runs `swiftformat --lint` only, so Swift tests stay a local
-step.
+| `nix flake check` attribute | Proves | Host |
+| --- | --- | --- |
+| `checks.aarch64-darwin.treefmt` | Every Nix file matches `nixfmt` and every `Sources/`, `Tests/`, and `App/` Swift file matches stock `swift-format` | Any with Nix |
+| `checks.aarch64-darwin.build` | The whole package type-checks, including the SwiftUI app and the audio targets | macOS 26 with the SDK |
+| `checks.aarch64-darwin.tests` | Core types, settings, the meeting catalog and detection state machine, the lifecycle reducer, and storage behaviour | macOS 26 with Xcode (XCTest) |
+| `checks.aarch64-darwin.pre-commit` | The configured pre-commit hooks evaluate and run | Any with Nix |
+| Desktop rendering | Nothing. The tests cover model and state logic, not pixels | n/a |
+| Recording/transcription | Nothing below the `WispSession` seam; capture and the speech engine need real hardware | n/a |
+
+`.github/workflows/ci.yaml` runs `nix flake check` on `macos-26` with Xcode
+installed, so the XCTest suites execute there. That is the only workflow that
+runs these checks.
+
+`swift test` needs XCTest, which Apple ships with Xcode and not with the Command
+Line Tools. `checks.aarch64-darwin.tests` resolves the macOS SDK platform with
+`xcrun --sdk macosx --show-sdk-platform-path`, then type-checks a one-line
+`import XCTest` against it. A bare probe would report a false negative on a host
+that has Xcode, because Apple puts the module under the platform rather than the
+toolchain.
+
+When the probe fails with "no such module 'XCTest'", the check **fails**. It
+records `skipped: XCTest is not available to the Swift compiler` in
+`$out/status` and exits 1 unless the caller opts in:
+
+```bash
+WISP_ALLOW_SKIPPED_TESTS=1 nix build --impure .#checks.aarch64-darwin.tests
+```
+
+The opt-out is evaluated by Nix and handed to the derivation through its `env`,
+because a builder does not inherit the invoking shell's environment. That is why
+`--impure` is part of the command: a pure `nix flake check` reads the variable as
+empty and keeps the fail-closed default. A skip is not evidence that the suites
+pass, and `nix flake check` is the only entry point, so the default has to be a
+failure. Every other failure — a compile error, a failing test, a crash, or a run
+that executes no suite — fails the check regardless of the opt-out.
 
 ## Current record
 
-2026-11-05, Linux x86_64 (NixOS), Rust 1.99.1:
+2026-11-16, macOS 26 (Apple Silicon), Swift 6.4.2 / SDK 27.2, Xcode 27.2 at
+`/Applications/Xcode.app`. `xcode-select -p` reports
+`/Library/Developer/CommandLineTools`, but inside the Nix build sandbox no
+`DEVELOPER_DIR` is set, so `xcrun` resolves the Xcode developer directory and
+XCTest is reachable.
 
-- `cargo test -p wisp-core -p wisp-audiokit` passed: 36 tests in `wisp-core`
-  (including the meeting catalog and settings shapes) and 47 in
-  `wisp-audiokit` (including the meeting-detection state machine).
-- `cargo clippy -p wisp-core -p wisp-audiokit --all-targets -- -D warnings`
-  passed.
-- The desktop crate was type-checked and its 68 unit tests passed on the same
-  Linux host against a compile-only stub of the macOS backend. The stub lives
-  outside the repository. The real Core Audio probe, the Swift language path,
-  and every rendering path remain unverified.
-
-2026-11-02, Linux x86_64 (NixOS), Rust 1.99.1:
-
-- `./scripts/check --pure` passed. That covers formatting, clippy, and 70
-  tests across `wisp-core`, `wisp-lifecycle`, and `wisp-storage`, including the
-  trigram search and the v1 to v2 migration.
-- The desktop crate was type-checked and its 58 unit tests passed on the same
-  Linux host against a compile-only stub of the macOS backend. That stub lives
-  outside the repository. The real macOS backend and every rendering path
-  remain unverified.
-- `swift test`, `formal/check.sh`, and `cargo mutants` were not run.
+- `nix flake check` **passed** on this host, all four gates: `treefmt`, `build`,
+  `tests`, and `pre-commit`.
+- `checks.aarch64-darwin.build` really compiled: its log ends in
+  `Build complete! (17.26 sec)` covering `WispCore`, `WispLifecycle`,
+  `WispStorage`, `WispAudioKit`, `WispDesktop`, and `wispctl`.
+- `checks.aarch64-darwin.tests` really executed every XCTest bundle:
+  `WispStorageTests` 44, `WispLifecycleTests` 11, `WispDesktopTests` 88,
+  `WispCoreTests` 50, and `WispAudioKitTests` 29 — 222 tests, 0 failures. Its
+  output records `passed: XCTest suites executed`.
+- The skip branch was exercised deliberately, in a scratch copy of the flake
+  with `DEVELOPER_DIR=/Library/Developer/CommandLineTools` pinned so the XCTest
+  probe fails. Without the opt-out it failed the check; with
+  `WISP_ALLOW_SKIPPED_TESTS=1 nix build --impure …` it wrote
+  `skipped: XCTest is not available to the Swift compiler` and exited 0.
+- The gate's failure paths were also exercised in scratch copies. A type error in
+  a test file failed the check, and so did a runtime assertion failure
+  (`XCTAssertEqual failed`, `Some test targets reported failures`,
+  `nix build` exit 1). Neither was converted into a skip.
+- `swift-format lint --recursive Sources Tests App` reported no
+  findings of any severity, using the 6.4.0 the `treefmt` check runs. The
+  repository commits no `.swift-format`, so the tool's stock style — 2-space
+  indentation, 100 columns — is what the tree matches.
+- Recording, transcription, meeting detection against real apps, and every
+  rendering path remain unverified. The tests cover model and state logic only.
 
 ## Needs a person on macOS 26
 
 Run these before the next release and record the result and date here.
 
+- Launch the app built by `nix build` (`open result/Wisp.app`) on a host with
+  full Xcode and confirm the window opens.
 - Open Settings with <kbd>⌘,</kbd> while a recording is running. Confirm the
   live transcript keeps updating and Back returns to the recording screen.
 - Choose English (US), record a session, and confirm the transcript is English.
@@ -77,3 +111,6 @@ Run these before the next release and record the result and date here.
   library row and its `recordings/` directory, and Cancel leaves both alone.
 - Copy and export with an empty transcript. Confirm the error notification, and
   confirm a real export writes the file.
+- Open a database written by the previous release. Confirm the library, the
+  transcript, and a two-character Japanese search all still work, and that
+  `PRAGMA user_version` stays at 2.

@@ -199,11 +199,12 @@
                 <path d="M9 3v2M12 3v2M15 3v2M9 19v2M12 19v2M15 19v2M3 9h2M3 12h2M3 15h2M19 9h2M19 12h2M19 15h2" stroke-linecap="round"/>
               </svg>
             </div>
-            <h3>Built in Rust, GPU-rendered</h3>
+            <h3>Built in Swift</h3>
             <p>
-              The UI runs natively on <a href="https://www.gpui.rs/" target="_blank" rel="noopener">GPUI</a>,
-              the framework behind the Zed editor, and is built with
-              <a href="https://gpui-kit.com/" target="_blank" rel="noopener">GPUI Component</a> — native-feeling and smooth.
+              The whole app is one Swift package: capture and transcription on
+              Apple's frameworks, the interface in
+              <a href="https://developer.apple.com/swiftui/" target="_blank" rel="noopener">SwiftUI</a>.
+              Native, with no embedded browser.
             </p>
           </article>
 
@@ -281,11 +282,11 @@
           </li>
         </ol>
 
-        <div class="flow" role="img" aria-label="Data flow: process tap and microphone feed into WispAudioKit and SpeechAnalyzer, then into the GPUI desktop app and local storage.">
+        <div class="flow" role="img" aria-label="Data flow: process tap and microphone feed into WispAudioKit and SpeechAnalyzer, then into the SwiftUI desktop app and local storage.">
 <pre>
  Core Audio Process Tap ─┐
-                         ├─► WispAudioKit ─► GPUI desktop
- Microphone input ───────┘        │              ▲
+                         ├─► WispAudioKit ─► SwiftUI desktop
+ Microphone input ───────┘        │                 ▲
                                   └─► SpeechAnalyzer
                                           │
                                           └─► Ogg/Opus + SQLite (local)

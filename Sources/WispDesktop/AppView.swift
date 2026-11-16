@@ -58,14 +58,6 @@ struct AppView: View {
 
   private var chrome: some View {
     HStack(spacing: 8) {
-      Button {
-        model.sidebarVisibility = collapsed ? .all : .detailOnly
-      } label: {
-        Image(systemName: "sidebar.leading")
-      }
-      .buttonStyle(.borderless)
-      .help("Toggle sidebar")
-      .accessibilityLabel("Toggle sidebar")
       Text("Wisp")
         .font(.headline)
       stateTag
@@ -128,10 +120,6 @@ struct AppView: View {
       .padding(.horizontal, 12)
       .padding(.vertical, 8)
     }
-  }
-
-  private var collapsed: Bool {
-    model.sidebarVisibility == .detailOnly
   }
 
   private var isLibraryActive: Bool {

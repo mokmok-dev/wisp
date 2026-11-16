@@ -34,9 +34,11 @@ struct LibraryView: View {
     HStack(alignment: .center) {
       VStack(alignment: .leading, spacing: 2) {
         Text("Sessions").font(.title3.weight(.semibold))
-        Text(countLine)
-          .font(.callout)
-          .foregroundStyle(.secondary)
+        if let countLine {
+          Text(countLine)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+        }
       }
       Spacer()
       TextField(
@@ -59,14 +61,12 @@ struct LibraryView: View {
     .padding(.vertical, 12)
   }
 
-  private var countLine: String {
-    if total == 0 {
-      return "Recordings and transcripts stay on this Mac."
-    }
+  private var countLine: String? {
+    guard total > 0 else { return nil }
     if queryActive {
-      return "\(visible.count) of \(total) sessions match."
+      return visible.isEmpty ? nil : "\(visible.count) of \(total) match the search."
     }
-    return total == 1 ? "1 session saved locally." : "\(total) sessions saved locally."
+    return total == 1 ? "1 session." : "\(total) sessions."
   }
 
   @ViewBuilder
@@ -92,20 +92,11 @@ struct LibraryView: View {
         .font(.system(size: 36, weight: .light))
         .foregroundStyle(.secondary)
       Text("No sessions yet").font(.headline)
-      Text(
-        "Start a new session to capture a meeting, a call, or a voice memo — "
-          + "transcribed entirely on-device."
-      )
-      .font(.callout)
-      .foregroundStyle(.secondary)
-      .multilineTextAlignment(.center)
-      .fixedSize(horizontal: false, vertical: true)
-      Button {
-        model.showNewSession()
-      } label: {
-        Label("New Session", systemImage: "plus")
-      }
-      .buttonStyle(.borderedProminent)
+      Text("Start a new session to capture a meeting, a call, or a voice memo.")
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
@@ -160,9 +151,11 @@ private struct LibraryRow: View {
               .font(.body.weight(.medium))
               .lineLimit(1)
               .truncationMode(.tail)
-            Text(Format.startedAt(session.startedAt))
-              .font(.caption)
-              .foregroundStyle(.secondary)
+            if let caption = session.startCaption {
+              Text(caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
           }
           Spacer(minLength: 8)
           Text(Format.duration(seconds: duration))

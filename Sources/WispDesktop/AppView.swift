@@ -70,21 +70,9 @@ struct AppView: View {
         .font(.headline)
       stateTag
       Spacer()
-      Button {
-        controller.toggleTheme()
-      } label: {
-        Image(systemName: isDark ? "sun.max" : "moon")
-      }
-      .buttonStyle(.borderless)
-      .help(isDark ? "Switch to light appearance (⌘⇧D)" : "Switch to dark appearance (⌘⇧D)")
-      .accessibilityLabel("Toggle appearance")
     }
     .padding(.horizontal, 16)
     .padding(.vertical, 10)
-  }
-
-  private var isDark: Bool {
-    NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
   }
 
   private var stateTag: some View {

@@ -1,13 +1,11 @@
 name: version-bump
-# Bumps the single source of truth for the workspace version
-# (`[workspace.package] version` in the root Cargo.toml — every member crate
-# inherits it via `version.workspace = true`), syncs Cargo.lock, commits the
-# change, and creates the `vX.Y.Z` tag.
+# Bumps the single source of truth for the app version (`VERSION` in the repo
+# root), commits the change, and creates the `vX.Y.Z` tag.
 #
 # Creating the tag is what produces a shippable build: the release workflow
-# (.github/workflows/release.yaml) builds the macOS binaries, assembles
-# Wisp.app, and publishes the GitHub Release. Because a tag pushed with the
-# default GITHUB_TOKEN does NOT trigger `on: push: tags` (GitHub deliberately
+# (.github/workflows/release.yaml) builds the macOS app, assembles Wisp.app,
+# and publishes the GitHub Release. Because a tag pushed with the default
+# GITHUB_TOKEN does NOT trigger `on: push: tags` (GitHub deliberately
 # suppresses recursive workflow runs), we instead dispatch the release
 # workflow explicitly — `workflow_dispatch` via GITHUB_TOKEN *is* allowed.
 on:
@@ -29,7 +27,7 @@ on:
         type: boolean
         default: true
 concurrency:
-  # Serialize version bumps so two runs can't race on Cargo.toml / the tag.
+  # Serialize version bumps so two runs can't race on VERSION / the tag.
   group: version-bump
   cancel-in-progress: false
 permissions:
@@ -51,20 +49,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Read the current version from the [workspace.package] table only,
-          # so unrelated `version = "..."` lines (dependencies, comments) can't
-          # be mistaken for it.
-          CURRENT="$(awk '
-            /^\[workspace\.package\]/ { in_wp = 1; next }
-            /^\[/                     { in_wp = 0 }
-            in_wp && /^version[[:space:]]*=/ {
-              match($0, /"[^"]+"/)
-              print substr($0, RSTART + 1, RLENGTH - 2)
-              exit
-            }
-          ' Cargo.toml)"
-          if [ -z "$CURRENT" ]; then
-            echo "could not find [workspace.package] version in Cargo.toml" >&2
+          CURRENT="$(tr -d '[:space:]' < VERSION)"
+          if ! echo "$CURRENT" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "VERSION must hold a single X.Y.Z semver, found '$CURRENT'" >&2
             exit 1
           fi
           echo "current version: $CURRENT"
@@ -103,30 +90,13 @@ jobs:
             exit 1
           fi
 
-      - name: Update Cargo.toml and Cargo.lock
+      - name: Update VERSION
         run: |
           set -euo pipefail
           NEW="${{ steps.ver.outputs.new }}"
-
-          # Rewrite only the first `version = "..."` inside [workspace.package].
-          awk -v ver="$NEW" '
-            /^\[workspace\.package\]/ { in_wp = 1 }
-            /^\[/ && !/^\[workspace\.package\]/ { in_wp = 0 }
-            in_wp && !done && /^version[[:space:]]*=/ {
-              sub(/version[[:space:]]*=[[:space:]]*"[^"]*"/, "version = \"" ver "\"")
-              done = 1
-            }
-            { print }
-          ' Cargo.toml > Cargo.toml.tmp
-          mv Cargo.toml.tmp Cargo.toml
-
-          # Sync the local crate versions in Cargo.lock without touching any
-          # third-party pins. `--workspace` limits the update to the workspace
-          # members, whose versions are inherited from the value we just set.
-          nix develop .#default --quiet --command cargo update --workspace
-
-          echo "--- Cargo.toml [workspace.package] ---"
-          grep -n 'version' Cargo.toml | tail -1
+          printf '%s\n' "$NEW" > VERSION
+          echo "--- VERSION ---"
+          cat VERSION
 
       - name: Commit, tag, and push
         run: |
@@ -136,7 +106,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add Cargo.toml Cargo.lock
+          git add VERSION
           git commit -m "chore(release): ${TAG}"
           git tag -a "$TAG" -m "$TAG"
 

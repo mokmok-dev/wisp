@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        Hardened runtime requires every TCC-gated capability to be declared
+        as an entitlement. Without these, AVCaptureDevice.requestAccess
+        and friends return false immediately without ever showing the OS
+        prompt, and no entry appears in System Settings.
+    -->
+
+    <!-- Microphone capture via AVCaptureDevice / AVAudioEngine. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!--
+        The app renders through AppKit/SwiftUI layers that benefit from a JIT
+        graphics pipeline; without this, hardened-runtime apps can crash on
+        the first frame. (Also present in wispctl.entitlements.)
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!--
+        We are not sandboxed: the app writes recordings to
+        ~/Library/Application Support (or $WISP_DATA_DIR). Explicitly opt out
+        so the entitlement set is unambiguous.
+    -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+</dict>
+</plist>

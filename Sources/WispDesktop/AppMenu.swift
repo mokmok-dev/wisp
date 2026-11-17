@@ -22,6 +22,8 @@ struct AppCommands: Commands {
 
     CommandGroup(after: .appSettings) {
       Divider()
+      Button(dictationLabel) { controller.toggleDictation() }
+      Divider()
       Button(recordingLabel) { controller.toggleRecording() }
         .keyboardShortcut("r", modifiers: .command)
       Divider()
@@ -47,5 +49,12 @@ struct AppCommands: Commands {
     case .starting, .recording, .stopping: return "Stop Recording"
     case .idle, .failed: return "Start Recording"
     }
+  }
+
+  /// "Stop Dictation" from `starting` through the settle, "Start Dictation"
+  /// otherwise. No `.keyboardShortcut` here: Carbon owns the chord, and a
+  /// menu shortcut would fire it twice while Wisp is frontmost.
+  private var dictationLabel: String {
+    controller.dictation.model.state.holdsMicrophone ? "Stop Dictation" : "Start Dictation"
   }
 }

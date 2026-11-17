@@ -506,23 +506,11 @@ public final class WispSession: @unchecked Sendable {
     guard SpeechTranscriber.isAvailable else {
       throw PoCError.speechTranscriberUnavailable
     }
-    guard
-      let supported = await SpeechTranscriber.supportedLocale(
-        equivalentTo: locale
-      )
-    else {
-      throw PoCError.unsupportedSpeechLocale(locale.identifier)
-    }
-    if supported.identifier != locale.identifier {
-      onLog("Using supported speech locale \(supported.identifier) for \(locale.identifier)")
-    }
-    let probe = makeLiveSpeechTranscriber(locale: supported)
-    if let request = try await AssetInventory.assetInstallationRequest(supporting: [probe]) {
-      onLog("Downloading speech model for \(supported.identifier)...")
-      try await request.downloadAndInstall()
-      try Task.checkCancellation()
-      onLog("Model ready")
-    }
+    let supported = try await prepareSpeechAssets(locale: locale)
+    // The helper covers the model download, so a stop requested during it
+    // must not fall through into enabling an analyzer for a session that is
+    // already tearing down.
+    try Task.checkCancellation()
     guard let micPipeline else {
       throw PoCError.invalidLifecycle("microphone recording pipeline is unavailable")
     }

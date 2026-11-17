@@ -75,8 +75,25 @@ XCTest is reachable.
   findings of any severity, using the 6.4.0 the `treefmt` check runs. The
   repository commits no `.swift-format`, so the tool's stock style — 2-space
   indentation, 100 columns — is what the tree matches.
+- On 2026-11-17, macOS 27.2 (Apple Silicon), Swift 6.4.2 / SDK 27.2,
+  `nix flake check` **passed** on all four gates. The `tests` gate executed 268
+  XCTest cases with 0 failures: `WispStorageTests` 44, `WispLifecycleTests` 11,
+  `WispDesktopTests` 120, `WispCoreTests` 64, `WispAudioKitTests` 29, and it
+  recorded `passed: XCTest suites executed`. `swift-format lint --recursive
+  Sources Tests App` reported nothing.
+- Dictation was exercised against the signed `nix build .#Wisp-debug` bundle on
+  the same host. With Google Chrome frontmost, the chord opened the HUD over
+  Chrome without changing the frontmost app across a sampled run, live partial
+  text appeared with the caret, and finishing wrote the transcript to the
+  clipboard with no newline inserted mid-sentence. Starting a recording and then
+  pressing the chord produced the in-progress notice. The panel measured 520
+  points wide and grew upward as the text wrapped.
+- Still unverified by automation: the chord failing to register because another
+  app owns it, the recorder field accepting a new chord, and the HUD on a second
+  display. Each needs a person, and the checklist above names them.
 - Recording, transcription, meeting detection against real apps, and every
-  rendering path remain unverified. The tests cover model and state logic only.
+  other rendering path remain unverified. The tests cover model and state logic
+  only.
 
 ## Needs a person on macOS 26
 
@@ -96,6 +113,19 @@ Run these before the next release and record the result and date here.
   and that a call detected while a session is already recording is ignored.
 - Join Google Meet in Safari or Chrome. Confirm the browser prompt waits about
   twenty seconds, and a short voice note in the same browser does not prompt.
+- Press the dictation chord while another app is focused. Confirm the panel
+  appears, the other app keeps its insertion point, and recognized text lands
+  in the panel as you speak.
+- Press the chord again. Confirm the panel shows that the transcript was
+  copied, closes within about two seconds, and `⌘V` pastes the text with no
+  sentence broken across a line.
+- Start a recording, then press the dictation chord. Confirm the panel reports
+  that a recording is in progress and that the recording keeps running.
+- Dictate while a recording is not running, then press <kbd>⌘R</kbd>. Confirm
+  no recording starts and the panel reports the conflict.
+- Clear the chord in Settings, and confirm the chord no longer opens the panel.
+  Set a chord another app already owns and confirm Settings names the conflict
+  and keeps the previous chord working.
 - Quit and relaunch, then confirm the chosen language and every tool policy
   survive in `settings.json`.
 - First launch with both permissions undetermined, then grant them. Confirm

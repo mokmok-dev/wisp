@@ -2,6 +2,7 @@ import Foundation
 import WispCore
 import XCTest
 
+@testable import WispAudioKit
 @testable import WispDesktop
 
 final class TranscriptModelTests: XCTestCase {
@@ -359,5 +360,42 @@ final class AppModelTests: XCTestCase {
 
     XCTAssertTrue(model.hasUnsettledSession)
     XCTAssertFalse(model.beginSessionStart())
+  }
+
+  func testDictationIngestLeavesTheSessionFieldsUntouched() {
+    let model = started()
+    model.setState(.recording)
+    let sessionID = SessionID(10)
+    model.currentSessionID = sessionID
+    model.linkedSessionID = sessionID
+    model.pendingSessionWrite = .finalise(endedAt: DesktopFixtures.date(2026, 7, 22, 9, 0, 0))
+    model.currentOutputDir = URL(fileURLWithPath: "/tmp/wisp/dictation-test")
+    upsertSegment(
+      DesktopFixtures.segment(.mic, id: 1, text: "recording text", isFinal: true),
+      into: &model.segments
+    )
+    let libraryCountBefore = model.library.count
+
+    let dictation = DictationModel()
+    dictation.apply(.hotKeyPressed)
+    dictation.apply(.captureStarted)
+    dictation.ingest(
+      DictationCapture.Update(
+        segmentID: 5,
+        isFinal: false,
+        text: "dictated line",
+        startSeconds: 0,
+        endSeconds: 1
+      )
+    )
+
+    XCTAssertEqual(dictation.state, .listening)
+    XCTAssertEqual(dictation.segments.map(\.text), ["dictated line"])
+    XCTAssertEqual(model.currentSessionID, sessionID)
+    XCTAssertEqual(model.linkedSessionID, sessionID)
+    XCTAssertNotNil(model.pendingSessionWrite)
+    XCTAssertEqual(model.currentOutputDir, URL(fileURLWithPath: "/tmp/wisp/dictation-test"))
+    XCTAssertEqual(model.library.count, libraryCountBefore)
+    XCTAssertEqual(model.segments.map(\.text), ["recording text"])
   }
 }

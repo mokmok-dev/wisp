@@ -103,21 +103,26 @@ public struct Settings: Hashable, Sendable, Codable {
   public var transcriptionLanguage: LanguageCode
   /// Meeting detection and per-tool policies.
   public var meetings: MeetingDetectionSettings
+  /// Chord that starts and finishes dictation from any app.
+  public var dictationShortcut: DictationChord?
 
   public init(
     theme: ThemePreference = .system,
     transcriptionLanguage: LanguageCode = .fallback,
-    meetings: MeetingDetectionSettings = MeetingDetectionSettings()
+    meetings: MeetingDetectionSettings = MeetingDetectionSettings(),
+    dictationShortcut: DictationChord? = .default
   ) {
     self.theme = theme
     self.transcriptionLanguage = transcriptionLanguage
     self.meetings = meetings
+    self.dictationShortcut = dictationShortcut
   }
 
   private enum CodingKeys: String, CodingKey {
     case theme
     case transcriptionLanguage = "transcription_language"
     case meetings
+    case dictationShortcut = "dictation_shortcut"
   }
 
   /// Each field decodes on its own, so one malformed value does not cost the
@@ -131,5 +136,13 @@ public struct Settings: Hashable, Sendable, Codable {
     meetings =
       (try? container.decode(MeetingDetectionSettings.self, forKey: .meetings))
       ?? MeetingDetectionSettings()
+    // An absent key means the field never existed, so the factory default
+    // applies; an explicit `null` or a malformed value switches dictation
+    // off, exactly as its author wrote.
+    if container.contains(.dictationShortcut) {
+      dictationShortcut = try? container.decode(DictationChord.self, forKey: .dictationShortcut)
+    } else {
+      dictationShortcut = .default
+    }
   }
 }

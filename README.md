@@ -21,13 +21,16 @@ the same time and transcribes both on-device with Apple's `SpeechAnalyzer`.
 
 ## Screenshots
 
-The native interface — the session library in light and dark appearance, the
-live recording screen, and a saved transcript.
+The native interface: the session library in light and dark appearance,
+transcript search, the live recording screen, a saved transcript, and the
+settings page.
 
-![Wisp session library — light appearance](docs/screenshot.png)
-![Wisp session library — dark appearance](docs/screenshot-dark.png)
-![Wisp live recording screen](docs/screenshot-live.png)
+![Wisp session library in light appearance](docs/screenshot.png)
+![Wisp session library in dark appearance](docs/screenshot-dark.png)
+![Wisp transcript search with two matching sessions](docs/screenshot-search.png)
+![Wisp live recording screen with SYS segments arriving](docs/screenshot-live.png)
 ![Wisp saved-session transcript with MIC/SYS labels](docs/screenshot-history.png)
+![Wisp settings with appearance, language, permissions, and meeting detection](docs/screenshot-settings.png)
 
 ## Architecture
 

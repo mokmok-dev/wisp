@@ -3,20 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Wisp — Fully offline recording &amp; transcription for macOS</title>
+    <title>Wisp — Offline recording &amp; transcription for macOS</title>
     <meta
       name="description"
-      content="Wisp captures your microphone and system audio at the same time and transcribes both on-device. Audio and text never leave your machine."
+      content="Wisp records your microphone and the other side of the call at the same time and transcribes both on this Mac with Apple's SpeechAnalyzer. Audio and text stay on the device."
     />
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://github.com" />
 
     <!-- Open Graph / social -->
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Wisp — Fully offline recording &amp; transcription" />
+    <meta property="og:title" content="Wisp — Offline recording &amp; transcription for macOS" />
     <meta
       property="og:description"
-      content="Capture mic + system audio and transcribe both on-device. Works with Wi-Fi off. Audio and text never leave your machine."
+      content="Mic and system audio recorded as separate tracks, transcribed on-device. Search every transcript and export it as Markdown."
     />
     <meta property="og:url" content="https://wisp.mokmok.dev/" />
     <meta property="og:image" content="https://wisp.mokmok.dev/screenshot.png" />
@@ -53,16 +53,17 @@
       <section class="hero">
         <span class="pill">
           <span class="pill-dot"></span>
-          Fully offline · works with Wi-Fi off
+          On-device speech · works with Wi-Fi off
         </span>
         <h1>
-          Recording &amp; transcription<br />
-          that <span class="accent">never leaves your machine</span>.
+          Recording and transcription<br />
+          that <span class="accent">stays on your Mac</span>.
         </h1>
         <p class="lede">
-          Wisp captures your microphone and the other side of the call at the
-          same time, then transcribes both on-device. No cloud APIs, no uploads —
-          just a clean, local transcript.
+          Wisp records your microphone and the other side of the call at the
+          same time, then transcribes both with Apple's on-device speech model.
+          Search the transcripts in one library and export them when the call
+          ends.
         </p>
         <div class="hero-actions">
           <a
@@ -85,21 +86,25 @@
         <p class="hero-note">
           Apple Silicon · macOS 26 (Tahoe) · on-device transcription
         </p>
+      </section>
 
       <!-- Screenshots -->
       <section id="screenshots" class="section">
         <div class="section-head">
           <h2>A closer look</h2>
-          <p>Both appearances, the live recording screen, and a saved transcript.</p>
+          <p>
+            The session library in both appearances, a transcript search, the
+            live recording screen, a saved transcript, and the settings page.
+          </p>
         </div>
 
         <div class="shots">
           <figure class="shot-card">
             <img
               src="screenshot.png"
-              alt="Wisp session library in light appearance"
+              alt="Wisp session library in light appearance, listing four saved sessions"
               width="1600"
-              height="1170"
+              height="1131"
               loading="lazy"
             />
             <figcaption>Session library, light appearance</figcaption>
@@ -109,30 +114,50 @@
               src="screenshot-dark.png"
               alt="Wisp session library in dark appearance"
               width="1600"
-              height="1170"
+              height="1135"
               loading="lazy"
             />
             <figcaption>Session library, dark appearance</figcaption>
           </figure>
           <figure class="shot-card">
             <img
-              src="screenshot-live.png"
-              alt="Wisp live recording screen with the transcript area empty"
+              src="screenshot-search.png"
+              alt="Transcript search in Wisp, showing the two sessions that mention the search term"
               width="1600"
-              height="1170"
+              height="1116"
               loading="lazy"
             />
-            <figcaption>Live recording</figcaption>
+            <figcaption>Search across every transcript</figcaption>
+          </figure>
+          <figure class="shot-card">
+            <img
+              src="screenshot-live.png"
+              alt="Wisp live recording screen with SYS segments arriving and the record timer running"
+              width="1600"
+              height="1131"
+              loading="lazy"
+            />
+            <figcaption>Live recording, SYS track</figcaption>
           </figure>
           <figure class="shot-card">
             <img
               src="screenshot-history.png"
-              alt="Saved Wisp session transcript with MIC and SYS labels"
+              alt="Saved Wisp session transcript with MIC and SYS labels, plus Copy and Export buttons"
               width="1600"
-              height="1189"
+              height="1131"
               loading="lazy"
             />
             <figcaption>Saved transcript</figcaption>
+          </figure>
+          <figure class="shot-card">
+            <img
+              src="screenshot-settings.png"
+              alt="Wisp settings with appearance, transcription language, permissions, and meeting detection policies"
+              width="1600"
+              height="1131"
+              loading="lazy"
+            />
+            <figcaption>Settings and meeting detection</figcaption>
           </figure>
         </div>
       </section>
@@ -141,7 +166,7 @@
       <section id="features" class="section">
         <div class="section-head">
           <h2>Everything stays on-device</h2>
-          <p>A small, focused app that does one thing well — and keeps it private.</p>
+          <p>A small, focused app that does one thing well, and keeps it private.</p>
         </div>
 
         <div class="grid">
@@ -156,7 +181,7 @@
             <h3>Fully offline</h3>
             <p>
               Audio and transcripts stay on your device. Turn off Wi-Fi and Wisp
-              keeps working exactly the same.
+              keeps working the same way.
             </p>
           </article>
 
@@ -169,8 +194,8 @@
             </div>
             <h3>On-device transcription</h3>
             <p>
-              Powered by Apple's new <code>SpeechAnalyzer</code> API. Live, refining
-              transcripts with no cloud round-trips.
+              Apple's <code>SpeechAnalyzer</code> turns each track into text as
+              you speak, and refines each sentence until it settles.
             </p>
           </article>
 
@@ -184,10 +209,26 @@
                 <path d="M8.4 6.8L15.6 11M8.4 17.2L15.6 13" stroke-linecap="round"/>
               </svg>
             </div>
-            <h3>Mic + system audio</h3>
+            <h3>Mic and system audio</h3>
             <p>
-              Core Audio Process Taps capture meeting-app output without prompts,
-              mix it with your mic, and merge both sides into one transcript.
+              A Core Audio Process Tap captures the meeting app's output as its
+              own track, next to your microphone. Both appear in one transcript
+              with MIC and SYS labels.
+            </p>
+          </article>
+
+          <article class="card">
+            <div class="card-icon">
+              <!-- search -->
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                <circle cx="10.5" cy="10.5" r="6"/>
+                <path d="M15 15l4.5 4.5" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <h3>Search every transcript</h3>
+            <p>
+              Type a word and the library narrows to the sessions that mention
+              it. Short Japanese words of one or two characters match too.
             </p>
           </article>
 
@@ -201,10 +242,43 @@
             </div>
             <h3>Built in Swift</h3>
             <p>
-              The whole app is one Swift package: capture and transcription on
-              Apple's frameworks, the interface in
+              One Swift package: capture and transcription on Apple's
+              frameworks, the interface in
               <a href="https://developer.apple.com/swiftui/" target="_blank" rel="noopener">SwiftUI</a>.
-              Native, with no embedded browser.
+              No embedded browser.
+            </p>
+          </article>
+
+          <article class="card">
+            <div class="card-icon">
+              <!-- sliders -->
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                <path d="M4 7h16M4 17h16" stroke-linecap="round"/>
+                <circle cx="9" cy="7" r="2.2"/>
+                <circle cx="15" cy="17" r="2.2"/>
+              </svg>
+            </div>
+            <h3>Settings that persist</h3>
+            <p>
+              Pick light, dark, or the system appearance, and choose the speech
+              language for the next recording. Both are saved in
+              <code>settings.json</code> beside the library.
+            </p>
+          </article>
+
+          <article class="card">
+            <div class="card-icon">
+              <!-- meeting detection -->
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                <rect x="3" y="6" width="13" height="12" rx="2"/>
+                <path d="M16 11l5-3v8l-5-3" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <h3>Meeting detection</h3>
+            <p>
+              Wisp can watch which apps hold the microphone and offer to record.
+              Set each tool to Off, Ask, or Auto-record. Detection is off until
+              you enable it.
             </p>
           </article>
 
@@ -219,8 +293,9 @@
             </div>
             <h3>Simple local storage</h3>
             <p>
-              Recordings save as Ogg/Opus, metadata as SQLite. Browse past sessions in
-              the library — easy to export and analyze later.
+              Recordings save as Ogg/Opus and the transcripts as SQLite. Point
+              <code>WISP_DATA_DIR</code> at another folder to move the whole
+              library.
             </p>
           </article>
 
@@ -235,8 +310,7 @@
             </div>
             <h3>Yours, and only yours</h3>
             <p>
-              No accounts, no telemetry, no servers. Nothing to sign up for and
-              nothing leaving your laptop.
+              No accounts, no telemetry, no servers. Nothing to sign up for.
             </p>
           </article>
         </div>
@@ -246,7 +320,7 @@
       <section id="how" class="section">
         <div class="section-head">
           <h2>How it works</h2>
-          <p>Two audio streams in, one tidy transcript out — every step on your Mac.</p>
+          <p>Two audio streams in, one transcript out, every step on your Mac.</p>
         </div>
 
         <ol class="steps">
@@ -255,8 +329,9 @@
             <div>
               <h3>Capture both sides</h3>
               <p>
-                A Core Audio Process Tap grabs system audio while your microphone
-                is recorded in parallel — no virtual cables or prompts.
+                A Core Audio Process Tap records system audio while the
+                microphone is captured in parallel. Each source is written to its
+                own Ogg/Opus file.
               </p>
             </div>
           </li>
@@ -265,31 +340,33 @@
             <div>
               <h3>Transcribe on-device</h3>
               <p>
-                Each stream flows through Apple's <code>SpeechAnalyzer</code>,
-                producing live segments that refine themselves as you speak.
+                Each stream runs through Apple's <code>SpeechAnalyzer</code>.
+                Segments appear while you speak and settle as the engine confirms
+                them.
               </p>
             </div>
           </li>
           <li class="step">
             <span class="step-num">3</span>
             <div>
-              <h3>Merge &amp; store locally</h3>
+              <h3>Keep, search, export</h3>
               <p>
-                Mic and system segments merge into a single timeline, then persist
-                as Ogg/Opus + SQLite under your Application Support folder.
+                The finished transcript lands in the library with its recording.
+                Search it later, copy it with MIC and SYS labels, or export
+                Markdown with YAML frontmatter.
               </p>
             </div>
           </li>
         </ol>
 
-        <div class="flow" role="img" aria-label="Data flow: process tap and microphone feed into WispAudioKit and SpeechAnalyzer, then into the SwiftUI desktop app and local storage.">
+        <div class="flow" role="img" aria-label="Data flow: a process tap and the microphone feed WispAudioKit, which writes Ogg/Opus recordings and sends audio to SpeechAnalyzer; the SwiftUI app stores the transcript in sessions.db.">
 <pre>
- Core Audio Process Tap ─┐
-                         ├─► WispAudioKit ─► SwiftUI desktop
- Microphone input ───────┘        │                 ▲
-                                  └─► SpeechAnalyzer
-                                          │
-                                          └─► Ogg/Opus + SQLite (local)
+ Core Audio Process Tap --+
+ Microphone input --------+--> WispAudioKit --+--> SpeechAnalyzer
+                                              |
+                                              +--> Ogg/Opus recordings
+
+ SpeechAnalyzer --> SwiftUI app --> sessions.db (SQLite)
 </pre>
         </div>
       </section>
@@ -303,9 +380,9 @@
           </span>
           <h2>The network is never in the loop</h2>
           <p>
-            Wisp doesn't have a cloud backend to leak to. Capture, transcription,
-            and storage all happen locally, so your conversations stay between you
-            and your machine — by design, not by policy.
+            Wisp has no cloud backend to send audio to. Capture, transcription,
+            and storage all happen locally, and the app contains no networking
+            code.
           </p>
           <div class="privacy-stats">
             <div><strong>0</strong><span>bytes uploaded</span></div>
@@ -319,16 +396,16 @@
       <section id="download" class="section">
         <div class="section-head">
           <h2>Get Wisp</h2>
-          <p>Open-source and free. Built for the latest Apple Silicon Macs.</p>
+          <p>Open-source and free, built for Apple Silicon Macs on macOS 26.</p>
         </div>
 
         <div class="download-card">
           <div class="download-meta">
             <h3>Download for macOS</h3>
             <ul class="reqs">
-              <li>macOS 26 (Tahoe) — uses <code>SpeechAnalyzer</code> &amp; Core Audio Process Taps</li>
-              <li>Apple Silicon (aarch64) build, shipped as a signed <code>.dmg</code></li>
-              <li>Microphone &amp; system-audio permission, prompted on first launch</li>
+              <li>macOS 26 (Tahoe) for <code>SpeechAnalyzer</code> and Core Audio Process Taps</li>
+              <li>A signed and notarized <code>.dmg</code>, built for Apple Silicon</li>
+              <li>Microphone and Speech Recognition access, requested on first launch</li>
             </ul>
           </div>
           <div class="download-actions">
@@ -350,8 +427,8 @@
         </div>
 
         <p class="roadmap-note">
-          On the roadmap: export to SRT / JSON and speaker diarization within a
-          single channel.
+          On the roadmap: export to SRT and JSON, and speaker diarization within
+          a single channel.
         </p>
       </section>
     </main>
@@ -361,7 +438,7 @@
         <span class="brand-dot"></span>
         <span class="brand-name">Wisp</span>
       </div>
-      <p class="footer-tag">Fully offline recording &amp; transcription.</p>
+      <p class="footer-tag">Offline recording and transcription for macOS.</p>
       <nav class="footer-links">
         <a href="https://github.com/mokmok-dev/wisp" target="_blank" rel="noopener">GitHub</a>
         <a href="https://github.com/mokmok-dev/wisp/releases" target="_blank" rel="noopener">Releases</a>

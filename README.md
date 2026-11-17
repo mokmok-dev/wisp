@@ -17,6 +17,7 @@ the same time and transcribes both on-device with Apple's `SpeechAnalyzer`.
 - **Light and dark appearance** — Follows the macOS appearance by default. Change the preference on the Settings page (Follow System / Light / Dark). The choice is persisted in `settings.json` beside the local data.
 - **Settings and transcription language** — <kbd>⌘,</kbd> or the sidebar opens Settings. Pick the speech language there; Apple's on-device model is downloaded for it on the next recording. The default stays `ja-JP`.
 - **Meeting detection** — Off by default. When enabled, Wisp watches which apps hold the microphone and offers to record, or records automatically, per tool: Zoom, Microsoft Teams, Slack huddles, Webex, FaceTime, Discord, and browser meetings. A native app must hold the microphone for about two seconds, and a browser for twenty, so a voice note is not mistaken for a call.
+- **Dictation from anywhere** — Set a global chord in Settings (the default is `⌃⌥Space`) and press it in any app. A small panel floats above the active window and shows each sentence as it is recognized. Press the chord again and the text is on the clipboard, ready to paste. Dictation writes nothing to disk and creates no session.
 - **Simple local storage** — Recordings are stored as Ogg/Opus and metadata as SQLite under `$WISP_DATA_DIR`, or `$HOME/Library/Application Support/dev.mokmok.wisp/` when the override is unset. Completed transcripts can be copied as plain text or exported as Markdown.
 
 ## Screenshots
@@ -82,6 +83,19 @@ Meeting detection is off until you enable it in Settings. Each tool can be set
 to **Off**, **Ask**, or **Auto-record**. Wisp reads the microphone users from
 Core Audio and never records audio until a session starts.
 
+To dictate into another app:
+
+1. Press the dictation chord anywhere. The panel appears without taking focus
+   from the app you are typing in.
+2. Speak. Recognized text appears in the panel as the speech model revises it.
+3. Press the chord again. The transcript is copied to the clipboard and the
+   panel closes, so <kbd>⌘V</kbd> pastes it.
+
+Dictation uses the language chosen in Settings and needs both permissions
+granted; it never prompts, because a system dialog would steal focus from the
+app you are dictating into. Change the chord in Settings, or clear it to turn
+dictation off. A recording and a dictation never run at the same time.
+
 To record and review a session:
 
 1. Select **New Session**, then **Record**. Wisp keeps microphone and system
@@ -100,6 +114,7 @@ The application menu also provides these shortcuts:
 | Copy transcript | <kbd>⌘⇧C</kbd> |
 | Export transcript | <kbd>⌘⇧E</kbd> |
 | Open Settings | <kbd>⌘,</kbd> |
+| Start / stop dictation | Your dictation chord, `⌃⌥Space` by default |
 
 ## Build & run
 

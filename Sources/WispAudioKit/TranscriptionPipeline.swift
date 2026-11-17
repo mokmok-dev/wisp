@@ -555,6 +555,31 @@ func makeLiveSpeechTranscriber(locale: Locale) -> SpeechTranscriber {
   )
 }
 
+/// Resolve the locale the engine supports and install its model, so no caller
+/// starts an analyzer against an asset that is not on disk.
+///
+/// Callers around the await must keep their own `Task.checkCancellation()`
+/// coverage: the download is the one long suspension here.
+func prepareSpeechAssets(locale: Locale) async throws -> Locale {
+  guard
+    let supported = await SpeechTranscriber.supportedLocale(
+      equivalentTo: locale
+    )
+  else {
+    throw PoCError.unsupportedSpeechLocale(locale.identifier)
+  }
+  if supported.identifier != locale.identifier {
+    wispLog("Using supported speech locale \(supported.identifier) for \(locale.identifier)")
+  }
+  let probe = makeLiveSpeechTranscriber(locale: supported)
+  if let request = try await AssetInventory.assetInstallationRequest(supporting: [probe]) {
+    wispLog("Downloading speech model for \(supported.identifier)...")
+    try await request.downloadAndInstall()
+    wispLog("Model ready")
+  }
+  return supported
+}
+
 /// Assign one stable identifier to all revisions and the final result for an
 /// utterance. A final-only result also receives its own identifier.
 struct ResultSegmentIDs {

@@ -30,6 +30,7 @@ final class SessionController {
   private let runner: SessionRunner
   private let ingest: SessionIngest
   private let meeting: MeetingWatch
+  private(set) var dictation: DictationController
 
   private(set) var settings: Settings
   private var pumpTask: Task<Void, Never>?
@@ -61,6 +62,7 @@ final class SessionController {
       recordingsRoot: recordingsRoot
     )
     meeting = MeetingWatch(preferences: settings.meetings)
+    dictation = DictationController(app: model, language: settings.transcriptionLanguage)
 
     // Recovery and the first library read run before any window exists, so
     // the menu and ⌘R cannot start a recording into a snapshot this call is
@@ -163,6 +165,14 @@ final class SessionController {
   }
 
   private func startRecording(title: String) {
+    // A run that holds the microphone is a dictation run; refusing here
+    // reports back through the HUD rather than failing the recording.
+    guard
+      canStartCapture(.recording, recording: model.state, dictation: dictation.model.state)
+    else {
+      dictation.showNotice(.microphoneBusy)
+      return
+    }
     let startedAt = Date()
     let dirName = Library.sessionDirectoryName(startedAt: startedAt)
     let outputDir = recordingsRoot.appendingPathComponent(dirName, isDirectory: true)
@@ -359,6 +369,7 @@ final class SessionController {
     let language = LanguageCode(code)
     guard settings.transcriptionLanguage != language else { return }
     settings.transcriptionLanguage = language
+    dictation.language = language
     saveSettings()
   }
 
@@ -379,6 +390,28 @@ final class SessionController {
     if policy == .off, model.meetingPrompt?.tool == tool {
       model.meetingPrompt = nil
     }
+  }
+
+  // MARK: - Dictation
+
+  /// Register the persisted chord once, from `applicationDidFinishLaunching`.
+  func installDictation() {
+    dictation.install(shortcut: settings.dictationShortcut)
+  }
+
+  /// Register first, persist only on success: a chord the OS refused must
+  /// never become the stored default.
+  func setDictationShortcut(_ chord: DictationChord?) {
+    if let message = dictation.apply(shortcut: chord) {
+      dictation.model.reportShortcutFailure(message)
+      return
+    }
+    settings.dictationShortcut = chord
+    saveSettings()
+  }
+
+  func toggleDictation() {
+    dictation.toggle()
   }
 
   private func pushMeetingPreferences() {
@@ -419,6 +452,13 @@ final class SessionController {
   func prepareForTermination() -> Bool {
     if model.hasPendingPersistence {
       return ingest.retryPendingPersistence()
+    }
+
+    // A dictation run owns the microphone and nothing else; dropping it
+    // first keeps the recording path below from waiting on a claim that
+    // quit is about to dissolve anyway.
+    if dictation.model.state.holdsMicrophone {
+      dictation.cancel()
     }
 
     if model.state == .recording || model.state == .starting {
@@ -475,6 +515,7 @@ final class SessionController {
     pumpTask = nil
     permissionTask?.cancel()
     permissionTask = nil
+    dictation.shutdown()
     runner.shutdown()
     Task { [meeting] in await meeting.shutdown() }
   }

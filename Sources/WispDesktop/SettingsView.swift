@@ -15,6 +15,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 24) {
           appearanceSection
           transcriptionSection
+          dictationSection
           permissionsSection
           meetingSection
           Text(
@@ -110,6 +111,28 @@ struct SettingsView: View {
     }
     return
       "\(language.code) is not in this build's language list. Pick one before your next recording."
+  }
+
+  private var dictationSection: some View {
+    Section(title: "Dictation") {
+      Card {
+        Row(title: "Shortcut", detail: "Press the chord anywhere to dictate.", last: true) {
+          DictationShortcutField(
+            chord: controller.settings.dictationShortcut,
+            failure: controller.dictation.model.shortcutFailure,
+            onChange: { controller.setDictationShortcut($0) }
+          )
+          .frame(width: 240)
+        }
+      }
+      Text(
+        "Finishing a dictation run copies the transcript to the clipboard. "
+          + "Nothing is written to disk and no session is kept."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      .fixedSize(horizontal: false, vertical: true)
+    }
   }
 
   private var permissionsSection: some View {

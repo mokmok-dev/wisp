@@ -86,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // NSApp exists only after launch, so the persisted appearance lands
     // here rather than while the environment is constructed.
     AppEnvironment.shared.controller?.applyTheme()
+    AppEnvironment.shared.controller?.installDictation()
   }
 
   func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {

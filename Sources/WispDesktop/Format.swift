@@ -1,4 +1,5 @@
 import Foundation
+import WispCore
 
 /// Human-readable formatting shared by the views, so dates, durations, and the
 /// recording clock read the same on every screen.
@@ -29,5 +30,14 @@ enum Format {
     formatter.timeZone = .current
     formatter.dateFormat = "yyyy-MM-dd HH:mm"
     return formatter.string(from: date)
+  }
+}
+
+extension Session {
+  /// The start time for a row's caption, `nil` when the title already is the
+  /// default title for that start time.
+  var startCaption: String? {
+    let untitled = Library.defaultTitle(startedAt: startedAt)
+    return title == untitled ? nil : Format.startedAt(startedAt)
   }
 }

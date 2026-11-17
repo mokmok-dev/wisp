@@ -42,12 +42,7 @@ struct SettingsView: View {
       }
       .controlSize(.small)
       .help("Back to the previous screen")
-      VStack(alignment: .leading, spacing: 2) {
-        Text("Settings").font(.title2.weight(.semibold))
-        Text("Preferences are saved on this Mac as you change them.")
-          .font(.callout)
-          .foregroundStyle(.secondary)
-      }
+      Text("Settings").font(.title2.weight(.semibold))
       Spacer(minLength: 0)
     }
     .padding(.horizontal, 16)
@@ -59,11 +54,7 @@ struct SettingsView: View {
   private var appearanceSection: some View {
     Section(title: "Appearance") {
       Card {
-        Row(
-          title: "Appearance",
-          detail: "Follow the macOS setting, or pin light or dark.",
-          last: true
-        ) {
+        Row(detail: "Follow the macOS setting, or pin light or dark.", last: true) {
           Picker(
             "",
             selection: Binding(
@@ -77,6 +68,7 @@ struct SettingsView: View {
           }
           .pickerStyle(.segmented)
           .labelsHidden()
+          .accessibilityLabel("Appearance")
           .frame(width: 280)
         }
       }
@@ -114,8 +106,7 @@ struct SettingsView: View {
   private var languageDetail: String {
     let language = controller.settings.transcriptionLanguage
     if language.isKnown {
-      return
-        "\(language.label) · the on-device model checks support when the recording starts."
+      return "The on-device model checks support when a recording starts."
     }
     return
       "\(language.code) is not in this build's language list. Pick one before your next recording."
@@ -127,14 +118,12 @@ struct SettingsView: View {
         PermissionRow(
           permission: .microphone,
           systemImage: "mic",
-          rationale: "Capture your voice for on-device transcription.",
           model: model,
           controller: controller
         )
         PermissionRow(
           permission: .speechRecognition,
           systemImage: "waveform",
-          rationale: "Transcribe both tracks with Apple's on-device speech model.",
           model: model,
           controller: controller
         )
@@ -189,12 +178,8 @@ struct SettingsView: View {
     }
   }
 
-  private func policyDetail(_ policy: MeetingPolicy) -> String {
-    switch policy {
-    case .off: "Calls from this app are ignored."
-    case .ask: "Wisp asks before recording."
-    case .autoRecord: "Recording starts on its own."
-    }
+  private func policyDetail(_ policy: MeetingPolicy) -> String? {
+    policy == .autoRecord ? "Recording starts on its own." : nil
   }
 }
 
@@ -229,19 +214,23 @@ private struct Card<Content: View>: View {
 }
 
 private struct Row<Control: View>: View {
-  let title: String
-  let detail: String
+  var title: String?
+  var detail: String?
   let last: Bool
   @ViewBuilder let control: () -> Control
 
   var body: some View {
     HStack(spacing: 16) {
       VStack(alignment: .leading, spacing: 2) {
-        Text(title).font(.callout.weight(.semibold))
-        Text(detail)
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
+        if let title {
+          Text(title).font(.callout.weight(.semibold))
+        }
+        if let detail {
+          Text(detail)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
       }
       Spacer(minLength: 8)
       control()

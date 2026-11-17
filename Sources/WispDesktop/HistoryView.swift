@@ -50,8 +50,8 @@ struct HistoryView: View {
       .onSubmit { controller.renameViewedSession(model.historyTitleDraft) }
 
       HStack(spacing: 8) {
-        if let session {
-          Text(Format.startedAt(session.startedAt))
+        if let session, let caption = session.startCaption {
+          Text(caption)
             .font(.callout)
             .foregroundStyle(.secondary)
             .lineLimit(1)

@@ -27,14 +27,12 @@ struct OnboardingView: View {
           PermissionRow(
             permission: .microphone,
             systemImage: "mic",
-            rationale: "Capture your voice for on-device transcription.",
             model: model,
             controller: controller
           )
           PermissionRow(
             permission: .speechRecognition,
             systemImage: "waveform",
-            rationale: "Run Apple's on-device speech model on captured audio.",
             model: model,
             controller: controller
           )
@@ -58,7 +56,6 @@ struct OnboardingView: View {
 struct PermissionRow: View {
   let permission: Permission
   let systemImage: String
-  let rationale: String
   @Bindable var model: AppModel
   let controller: SessionController
 
@@ -73,7 +70,7 @@ struct PermissionRow: View {
           Text(permission.title).font(.subheadline.weight(.semibold))
           statusTag
         }
-        Text(rationale)
+        Text(permission.rationale)
           .font(.callout)
           .foregroundStyle(.secondary)
           .fixedSize(horizontal: false, vertical: true)

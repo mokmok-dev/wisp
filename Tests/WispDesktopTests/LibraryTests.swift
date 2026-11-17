@@ -268,4 +268,22 @@ final class LibraryTests: XCTestCase {
     )
     XCTAssertTrue(FileManager.default.fileExists(atPath: tree.sessionDir.path))
   }
+
+  func testAnUntitledSessionDoesNotRepeatItsTimestamp() throws {
+    let startedAt = DesktopFixtures.date(2026, 7, 15, 4, 30, 0)
+    let untitled = try Library.createSession(
+      storage,
+      startedAt: startedAt,
+      dirName: Library.sessionDirectoryName(startedAt: startedAt),
+      title: ""
+    )
+    let session = try XCTUnwrap(try storage.sessions.get(untitled))
+
+    XCTAssertEqual(session.title, Format.startedAt(startedAt))
+    XCTAssertNil(session.startCaption, "the title already is the start time")
+
+    try storage.sessions.updateTitle(untitled, title: "Weekly sync")
+    let renamed = try XCTUnwrap(try storage.sessions.get(untitled))
+    XCTAssertEqual(renamed.startCaption, Format.startedAt(startedAt))
+  }
 }
